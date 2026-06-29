@@ -23,12 +23,12 @@ async def _did_resolver(did: str) -> tuple[int, int] | None:
 
 
 async def _fallback(room_name: str, reason: str) -> None:
-    # C4: never silent. A real transfer-to-human lands in S-L3-SAFETYNET;
-    # here we record the reason so the call is observably routed, not dropped.
+    # C4: never silent. Real transfer-to-human is S-L3-SAFETYNET; interim we log
+    # so the call is observably routed, not dropped. TODO(S-L3): REFER to queue.
     logger.warning(f"LiveKit dispatch fallback room={room_name} reason={reason}")
 
 
-def _verify(body: bytes, auth_header: str) -> bool:
+def _verify(body: bytes, auth_header: str):
     from livekit import api
 
     receiver = api.WebhookReceiver(
@@ -36,8 +36,7 @@ def _verify(body: bytes, auth_header: str) -> bool:
             os.environ["LIVEKIT_API_KEY"], os.environ["LIVEKIT_API_SECRET"]
         )
     )
-    receiver.receive(body.decode(), auth_header)
-    return True
+    return receiver.receive(body.decode(), auth_header)
 
 
 @router.post("/inbound")
@@ -45,15 +44,14 @@ async def livekit_inbound(request: Request):
     body = await request.body()
     auth = request.headers.get("Authorization", "")
     try:
-        _verify(body, auth)
+        event = _verify(body, auth)
     except Exception as e:
         logger.warning(f"LiveKit webhook signature rejected: {e}")
         return {"ok": False}
 
-    event = await request.json()
-    if event.get("event") != "room_started":
+    if event.event != "room_started":
         return {"ok": True}
 
-    room_name = (event.get("room") or {}).get("name", "")
+    room_name = event.room.name if event.room else ""
     await dispatch_livekit_call(room_name, _did_resolver, _fallback)
     return {"ok": True}

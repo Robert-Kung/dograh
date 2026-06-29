@@ -100,11 +100,15 @@ class TelephonyPhoneNumberClient(BaseDBClient):
         country_hint: Optional[str] = None,
     ) -> Optional[Tuple[int, int]]:
         """LiveKit inbound: map a dialed DID to (workflow_id, user_id) without a
-        telephony provider. Matches the first active number whose normalized
-        address equals the DID and which has an inbound workflow assigned. The
-        provider-bound routing table is reused only as a stop-gap; the canonical
-        DID->workflow store is owned by S-L6-ROUTING."""
-        normalized = normalize_telephony_address(address, country_hint=country_hint)
+        telephony provider. Matches active numbers whose normalized address
+        equals the DID and which have an inbound workflow assigned. Returns None
+        on bad input or when the DID is ambiguous across tenants, so the caller
+        falls back rather than cross-routing. The provider-bound routing table
+        is a stop-gap; the canonical DID->workflow store is S-L6-ROUTING."""
+        try:
+            normalized = normalize_telephony_address(address, country_hint=country_hint)
+        except ValueError:
+            return None
 
         async with self.async_session() as session:
             result = await session.execute(
@@ -120,11 +124,12 @@ class TelephonyPhoneNumberClient(BaseDBClient):
                     TelephonyPhoneNumberModel.address_normalized == normalized.canonical,
                     TelephonyPhoneNumberModel.is_active.is_(True),
                 )
+                .limit(2)
             )
-            row = result.first()
-            if not row:
+            rows = result.all()
+            if len(rows) != 1:
                 return None
-            return (row[0], row[1])
+            return (rows[0][0], rows[0][1])
 
     async def find_active_phone_number_for_inbound(
         self,

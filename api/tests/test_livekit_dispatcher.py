@@ -13,3 +13,7 @@ def test_parse_did_from_room_bad_prefix():
 
 def test_parse_did_from_room_empty_did():
     assert parse_did_from_room("cs-") is None
+
+
+def test_parse_did_from_room_invalid_did():
+    assert parse_did_from_room("cs-   ") is None
