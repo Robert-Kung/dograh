@@ -62,12 +62,6 @@ async def dispatch_livekit_call(
     Never fails silently (C4): unresolved DID or launch error routes to
     ``fallback(room_name, reason)``.
     """
-    from loguru import logger
-
-    from api.db import db_client
-    from api.enums import CallType, WorkflowRunMode
-    from api.services.pipecat.run_pipeline import run_pipeline_livekit
-
     did = parse_did_from_room(room_name)
     if not did:
         await fallback(room_name, "no_did")
@@ -77,6 +71,12 @@ async def dispatch_livekit_call(
     if not resolved:
         await fallback(room_name, "unmapped_did")
         return
+
+    from loguru import logger
+
+    from api.db import db_client
+    from api.enums import CallType, WorkflowRunMode
+    from api.services.pipecat.run_pipeline import run_pipeline_livekit
 
     workflow_id, user_id = resolved
     workflow_run = await db_client.create_workflow_run(
