@@ -24,6 +24,7 @@ from pipecat.utils.enums import EndTaskReason
 from api.db import db_client
 from api.enums import ToolCategory, WorkflowRunMode
 from api.services.pipecat.audio_playback import play_audio, play_audio_loop
+from api.services.pipecat.livekit_cold_transfer import cold_transfer_to_human
 from api.services.telephony.call_transfer_manager import get_call_transfer_manager
 from api.services.telephony.factory import get_telephony_provider_for_run
 from api.services.telephony.transfer_event_protocol import TransferContext
@@ -554,6 +555,14 @@ class CustomToolManager:
                     )
                     return
 
+                # LIVEKIT cold transfer is a net-new branch (C3): short-circuit
+                # before the Twilio conference / CallTransferManager path.
+                if workflow_run.mode == WorkflowRunMode.LIVEKIT.value:
+                    await self._handle_livekit_cold_transfer(
+                        config, workflow_run, function_call_params, properties
+                    )
+                    return
+
                 # Validate destination format based on workflow run mode
                 if workflow_run.mode == WorkflowRunMode.ARI.value:
                     # For ARI provider, also accept SIP endpoints
@@ -816,3 +825,52 @@ class CustomToolManager:
             # Unknown action, treat as generic success
             logger.warning(f"Unknown transfer action: {action}, treating as success")
             await function_call_params.result_callback(result)
+
+    async def _handle_livekit_cold_transfer(
+        self, config, workflow_run, function_call_params, properties
+    ):
+        """LIVEKIT cold transfer: validate destination (C6), play TTS, SIP REFER,
+        then leave the room. Failures stay structured (C4); agent never lingers."""
+        destination = config.get("destination", "").strip()
+        # transfer_to is config-driven whitelist (tel:+E164 or sip:queue@host),
+        # never caller input.
+        if not re.match(r"^(tel:\+[1-9]\d{1,14}|sip:[\w\-\.@:]+)$", destination):
+            await self._handle_transfer_result(
+                {
+                    "status": "failed",
+                    "action": "transfer_failed",
+                    "reason": "invalid_destination",
+                },
+                function_call_params,
+                properties,
+            )
+            return
+
+        room_name = (workflow_run.initial_context or {}).get("room_name")
+        if not room_name:
+            await self._handle_transfer_result(
+                {
+                    "status": "failed",
+                    "action": "transfer_failed",
+                    "reason": "no_room",
+                },
+                function_call_params,
+                properties,
+            )
+            return
+
+        await self._play_config_message(config)
+
+        result = await cold_transfer_to_human(room_name, destination)
+        if result.get("status") == "success":
+            await function_call_params.result_callback(
+                {"status": "transfer_success", "message": "Transferred to human"},
+                properties=FunctionCallResultProperties(run_llm=False),
+            )
+            await self._engine.end_call_with_reason(
+                EndTaskReason.TRANSFER_CALL.value, abort_immediately=False
+            )
+        else:
+            await self._handle_transfer_result(
+                result, function_call_params, properties
+            )
