@@ -99,6 +99,7 @@ def create_audio_config(transport_type: str) -> AudioConfig:
     elif transport_type in (
         WorkflowRunMode.WEBRTC.value,
         WorkflowRunMode.SMALLWEBRTC.value,
+        WorkflowRunMode.LIVEKIT.value,
     ):
         rate = 16000
     else:

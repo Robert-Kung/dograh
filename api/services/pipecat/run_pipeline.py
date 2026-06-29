@@ -55,7 +55,10 @@ from api.services.pipecat.service_factory import (
 from api.services.pipecat.tracing_config import (
     ensure_tracing,
 )
-from api.services.pipecat.transport_setup import create_webrtc_transport
+from api.services.pipecat.transport_setup import (
+    create_livekit_transport,
+    create_webrtc_transport,
+)
 from api.services.pipecat.worker_runner import run_pipeline_worker
 from api.services.pipecat.ws_sender_registry import get_ws_sender
 from api.services.telephony import registry as telephony_registry
@@ -362,6 +365,98 @@ async def _run_pipeline_smallwebrtc_impl(
     transport = await create_webrtc_transport(
         webrtc_connection,
         workflow_run_id,
+        audio_config,
+        ambient_noise_config,
+        is_realtime=is_realtime,
+    )
+    await _run_pipeline_impl(
+        transport,
+        workflow_id,
+        workflow_run_id,
+        user_id,
+        call_context_vars=call_context_vars,
+        audio_config=audio_config,
+        user_provider_id=user_provider_id,
+        workflow_run=workflow_run,
+        resolved_user_config=user_config,
+    )
+
+
+async def run_pipeline_livekit(
+    url: str,
+    token: str,
+    room_name: str,
+    workflow_id: int,
+    workflow_run_id: int,
+    user_id: int,
+    call_context_vars: dict = {},
+    user_provider_id: str | None = None,
+) -> None:
+    """Run pipeline for a LiveKit room (headless agent participant)."""
+    register_active_call(workflow_run_id)
+    try:
+        await _run_pipeline_livekit_impl(
+            url,
+            token,
+            room_name,
+            workflow_id,
+            workflow_run_id,
+            user_id,
+            call_context_vars=call_context_vars,
+            user_provider_id=user_provider_id,
+        )
+    finally:
+        unregister_active_call(workflow_run_id)
+
+
+async def _run_pipeline_livekit_impl(
+    url: str,
+    token: str,
+    room_name: str,
+    workflow_id: int,
+    workflow_run_id: int,
+    user_id: int,
+    call_context_vars: dict = {},
+    user_provider_id: str | None = None,
+) -> None:
+    """Run pipeline for a LiveKit room, mirroring the smallwebrtc path."""
+    logger.debug(
+        f"Running pipeline for LiveKit room {room_name} with workflow_id: {workflow_id} and workflow_run_id: {workflow_run_id}"
+    )
+    set_current_run_id(workflow_run_id)
+
+    workflow = await db_client.get_workflow(workflow_id, user_id)
+    if workflow:
+        set_current_org_id(workflow.organization_id)
+
+    ambient_noise_config = None
+    if workflow and workflow.workflow_configurations:
+        if "ambient_noise_configuration" in workflow.workflow_configurations:
+            ambient_noise_config = workflow.workflow_configurations[
+                "ambient_noise_configuration"
+            ]
+
+    audio_config = create_audio_config(WorkflowRunMode.LIVEKIT.value)
+
+    from api.services.configuration.ai_model_configuration import (
+        get_effective_ai_model_configuration_for_workflow,
+    )
+
+    workflow_run = await db_client.get_workflow_run(workflow_run_id, user_id)
+    run_configs = (
+        (workflow_run.definition.workflow_configurations or {}) if workflow_run else {}
+    )
+    user_config = await get_effective_ai_model_configuration_for_workflow(
+        user_id=user_id,
+        organization_id=workflow.organization_id if workflow else None,
+        workflow_configurations=run_configs,
+    )
+    is_realtime = bool(user_config.is_realtime and user_config.realtime is not None)
+
+    transport = await create_livekit_transport(
+        url,
+        token,
+        room_name,
         audio_config,
         ambient_noise_config,
         is_realtime=is_realtime,
