@@ -32,7 +32,7 @@ def _verify(body: bytes, auth_header: str):
     from livekit import api
 
     receiver = api.WebhookReceiver(
-        api.AccessToken(
+        api.TokenVerifier(
             os.environ["LIVEKIT_API_KEY"], os.environ["LIVEKIT_API_SECRET"]
         )
     )
