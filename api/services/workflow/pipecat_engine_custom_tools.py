@@ -24,7 +24,10 @@ from pipecat.utils.enums import EndTaskReason
 from api.db import db_client
 from api.enums import ToolCategory, WorkflowRunMode
 from api.services.pipecat.audio_playback import play_audio, play_audio_loop
-from api.services.pipecat.livekit_cold_transfer import cold_transfer_to_human
+from api.services.pipecat.livekit_transfer_flow import (
+    execute_cold_transfer,
+    valid_destination,
+)
 from api.services.telephony.call_transfer_manager import get_call_transfer_manager
 from api.services.telephony.factory import get_telephony_provider_for_run
 from api.services.telephony.transfer_event_protocol import TransferContext
@@ -829,12 +832,12 @@ class CustomToolManager:
     async def _handle_livekit_cold_transfer(
         self, config, workflow_run, function_call_params, properties
     ):
-        """LIVEKIT cold transfer: validate destination (C6), play TTS, SIP REFER,
-        then leave the room. Failures stay structured (C4); agent never lingers."""
+        """LIVEKIT cold transfer via the shared business-hours-gated preamble
+        (S-L3-PRESS0): destination validated (C6), then REFER in hours / configured
+        after-hours behavior out of hours. Failures stay structured (C4)."""
         destination = config.get("destination", "").strip()
-        # transfer_to is config-driven, format-validated (tel:+E164 or
-        # sip:queue@host), never caller input.
-        if not re.match(r"^(tel:\+[1-9]\d{1,14}|sip:[\w\-\.@:]+)$", destination):
+        # transfer_to is config-driven (tel:+E164 or sip:queue@host), never caller input.
+        if not valid_destination(destination):
             await self._handle_transfer_result(
                 {
                     "status": "failed",
@@ -859,18 +862,34 @@ class CustomToolManager:
             )
             return
 
-        await self._play_config_message(config)
+        result = await execute_cold_transfer(
+            self._engine,
+            room_name=room_name,
+            destination=destination,
+            schedule=config.get("schedule"),
+            after_hours_action=config.get("afterHoursAction"),
+            alternate_destination=config.get("alternateDestination"),
+            after_hours_message=config.get("afterHoursMessage"),
+            before_refer=lambda: self._play_config_message(config),
+        )
 
-        result = await cold_transfer_to_human(room_name, destination)
-        if result.get("status") == "success":
+        status = result.get("status")
+        if status == "success":
+            # Executor has already ended the call; record the tool result.
             await function_call_params.result_callback(
                 {"status": "transfer_success", "message": "Transferred to human"},
                 properties=FunctionCallResultProperties(run_llm=False),
             )
-            await self._engine.end_call_with_reason(
-                EndTaskReason.TRANSFER_CALL.value, abort_immediately=False
+        elif status == "after_hours":
+            # Executor already queued the announcement (and hung up if configured);
+            # AI resumes on the next user turn for back_to_ai.
+            await function_call_params.result_callback(
+                {
+                    "status": "after_hours",
+                    "action": result.get("action"),
+                    "message": "Outside business hours",
+                },
+                properties=FunctionCallResultProperties(run_llm=False),
             )
         else:
-            await self._handle_transfer_result(
-                result, function_call_params, properties
-            )
+            await self._handle_transfer_result(result, function_call_params, properties)
