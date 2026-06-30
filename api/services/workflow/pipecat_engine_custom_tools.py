@@ -832,8 +832,8 @@ class CustomToolManager:
         """LIVEKIT cold transfer: validate destination (C6), play TTS, SIP REFER,
         then leave the room. Failures stay structured (C4); agent never lingers."""
         destination = config.get("destination", "").strip()
-        # transfer_to is config-driven whitelist (tel:+E164 or sip:queue@host),
-        # never caller input.
+        # transfer_to is config-driven, format-validated (tel:+E164 or
+        # sip:queue@host), never caller input.
         if not re.match(r"^(tel:\+[1-9]\d{1,14}|sip:[\w\-\.@:]+)$", destination):
             await self._handle_transfer_result(
                 {
