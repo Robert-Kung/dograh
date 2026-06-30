@@ -55,6 +55,8 @@ from api.services.pipecat.service_factory import (
 from api.services.pipecat.tracing_config import (
     ensure_tracing,
 )
+from api.services.pipecat.press0_gate import Press0Gate
+from api.services.pipecat.livekit_transfer_flow import valid_destination
 from api.services.pipecat.transport_setup import (
     create_livekit_transport,
     create_webrtc_transport,
@@ -966,6 +968,21 @@ async def _run_pipeline_impl(
             )
         )
 
+    # Press-0 DTMF safety net (LiveKit only): a gate that cold-transfers on
+    # caller DTMF '0', reusing the workflow's transfer_call tool config.
+    press0_gate = None
+    if workflow_run and workflow_run.mode == WorkflowRunMode.LIVEKIT.value:
+        room_name = (workflow_run.initial_context or {}).get("room_name")
+        transfer_config = await engine.resolve_transfer_call_config()
+        if room_name and transfer_config and valid_destination(
+            transfer_config.get("destination", "")
+        ):
+            press0_gate = Press0Gate(engine, room_name=room_name, config=transfer_config)
+        else:
+            logger.info(
+                "press-0 gate not installed (no room_name or no valid transfer_call destination)"
+            )
+
     # Build the pipeline
     if is_realtime:
         pipeline = build_realtime_pipeline(
@@ -977,6 +994,7 @@ async def _run_pipeline_impl(
             pipeline_engine_callback_processor,
             pipeline_metrics_aggregator,
             voicemail_detector=voicemail_detector,
+            press0_gate=press0_gate,
         )
     else:
         pipeline = build_pipeline(
@@ -991,6 +1009,7 @@ async def _run_pipeline_impl(
             pipeline_metrics_aggregator,
             voicemail_detector=voicemail_detector,
             recording_router=recording_router,
+            press0_gate=press0_gate,
         )
 
     # Create pipeline task with audio configuration
