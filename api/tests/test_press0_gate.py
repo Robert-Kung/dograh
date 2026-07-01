@@ -5,6 +5,8 @@ real Press0Gate (needs the pipecat FrameProcessor base) and are skipped where
 pipecat is not installed; they run in CI/Docker.
 """
 
+import types
+
 import pytest
 
 try:
@@ -38,22 +40,32 @@ def test_window_boundary_inclusive():
 
 # --- gate frame routing (needs pipecat) -----------------------------------
 
-def _make_gate(monkeypatch, *, now_values):
-    """Build a Press0Gate with a fake engine/clock and a recording execute()."""
+def _make_gate(monkeypatch, *, now_values, execute_result=None):
+    """Build a Press0Gate with a fake engine/clock and a recording execute().
+
+    The transfer runs via self.create_task; the fake create_task collects the
+    coroutine so tests can await it deterministically via ``drain``.
+    """
     from api.services.pipecat import press0_gate as mod
     from api.services.pipecat.press0_gate import Press0Gate
 
-    calls = {"execute": [], "pushed": [], "interrupts": 0}
+    result = execute_result or {"status": "success", "action": "transferred"}
+    calls = {"execute": [], "pushed": [], "interrupts": 0, "queued": [], "tasks": []}
 
     async def fake_execute(engine, **kwargs):
         calls["execute"].append(kwargs)
-        return {"status": "success", "action": "transferred"}
+        return result
 
     monkeypatch.setattr(mod, "execute_cold_transfer", fake_execute)
 
+    async def queue_frame(frame):
+        calls["queued"].append(frame)
+
+    engine = types.SimpleNamespace(task=types.SimpleNamespace(queue_frame=queue_frame))
+
     clock = iter(now_values)
     gate = Press0Gate(
-        engine=object(),
+        engine=engine,
         room_name="room1",
         config={"destination": "tel:+886912345678", "schedule": None},
         debounce_seconds=0.5,
@@ -66,8 +78,20 @@ def _make_gate(monkeypatch, *, now_values):
     async def fake_interrupt():
         calls["interrupts"] += 1
 
+    def fake_create_task(coro, name=None):
+        calls["tasks"].append(coro)
+        return None
+
     gate.push_frame = fake_push
     gate.broadcast_interruption = fake_interrupt
+    gate.create_task = fake_create_task
+
+    async def drain():
+        for coro in calls["tasks"]:
+            await coro
+        calls["tasks"].clear()
+
+    calls["drain"] = drain
     return gate, calls
 
 
@@ -84,11 +108,13 @@ async def test_press_zero_transfers_and_is_swallowed(monkeypatch):
 
     gate, calls = _make_gate(monkeypatch, now_values=[1000.0])
     await gate.process_frame(_dtmf("0"), FrameDirection.DOWNSTREAM)
+    assert calls["interrupts"] == 1  # barge-in fires inline, before the task
+    assert calls["pushed"] == []  # 0 swallowed, not forwarded
+    await calls["drain"]()  # transfer runs off the frame loop
 
     assert len(calls["execute"]) == 1
     assert calls["execute"][0]["destination"] == "tel:+886912345678"
-    assert calls["interrupts"] == 1  # barge-in before transfer
-    assert calls["pushed"] == []  # 0 swallowed, not forwarded
+    assert calls["queued"] == []  # success → no fallback announcement
 
 
 @pytest.mark.skipif(not PIPECAT, reason="pipecat runtime not installed")
@@ -124,6 +150,7 @@ async def test_rapid_repeat_triggers_once(monkeypatch):
     gate, calls = _make_gate(monkeypatch, now_values=[1000.0, 1000.2])
     await gate.process_frame(_dtmf("0"), FrameDirection.DOWNSTREAM)
     await gate.process_frame(_dtmf("0"), FrameDirection.DOWNSTREAM)
+    await calls["drain"]()
 
     assert len(calls["execute"]) == 1  # only one transfer
     assert calls["pushed"] == []  # both 0s swallowed
@@ -136,5 +163,52 @@ async def test_repeat_after_window_triggers_again(monkeypatch):
     gate, calls = _make_gate(monkeypatch, now_values=[1000.0, 1000.7])
     await gate.process_frame(_dtmf("0"), FrameDirection.DOWNSTREAM)
     await gate.process_frame(_dtmf("0"), FrameDirection.DOWNSTREAM)
+    await calls["drain"]()
 
     assert len(calls["execute"]) == 2  # outside window → triggers again
+
+
+@pytest.mark.skipif(not PIPECAT, reason="pipecat runtime not installed")
+async def test_refer_failure_announces_fallback(monkeypatch):
+    from pipecat.frames.frames import TTSSpeakFrame
+    from pipecat.processors.frame_processor import FrameDirection
+
+    from api.services.pipecat.press0_gate import _DEFAULT_FAILURE_MESSAGE
+
+    gate, calls = _make_gate(
+        monkeypatch,
+        now_values=[1000.0],
+        execute_result={
+            "status": "failed",
+            "action": "transfer_failed",
+            "reason": "sip_refer_error",
+        },
+    )
+    await gate.process_frame(_dtmf("0"), FrameDirection.DOWNSTREAM)
+    await calls["drain"]()
+
+    # Caller is never left silent on failure (C4): a fallback is spoken.
+    assert len(calls["queued"]) == 1
+    frame = calls["queued"][0]
+    assert isinstance(frame, TTSSpeakFrame)
+    assert frame.text == _DEFAULT_FAILURE_MESSAGE
+
+
+@pytest.mark.skipif(not PIPECAT, reason="pipecat runtime not installed")
+async def test_already_transferring_is_silent(monkeypatch):
+    from pipecat.processors.frame_processor import FrameDirection
+
+    # The concurrent trigger owns the transfer; the loser must not double-announce.
+    gate, calls = _make_gate(
+        monkeypatch,
+        now_values=[1000.0],
+        execute_result={
+            "status": "failed",
+            "action": "transfer_failed",
+            "reason": "already_transferring",
+        },
+    )
+    await gate.process_frame(_dtmf("0"), FrameDirection.DOWNSTREAM)
+    await calls["drain"]()
+
+    assert calls["queued"] == []  # no announcement
