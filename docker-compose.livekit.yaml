@@ -1,0 +1,14 @@
+services:
+  minio:
+    container_name: dograh-minio-lk
+  api:
+    image: dograh-livekit-api:local
+    build:
+      context: .
+      dockerfile: api/Dockerfile
+    environment:
+      LIVEKIT_API_KEY: "${LIVEKIT_API_KEY:-devkey}"
+      LIVEKIT_API_SECRET: "${LIVEKIT_API_SECRET:-devsecret}"
+      LIVEKIT_URL: "${LIVEKIT_URL:-ws://localhost:7880}"
+  ui:
+    profiles: ["disabled"]
