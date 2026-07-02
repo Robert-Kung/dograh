@@ -950,6 +950,31 @@ class PipecatEngine:
                 exc_info=True,
             )
 
+    async def resolve_transfer_call_config(self) -> dict | None:
+        """Return the workflow's ``transfer_call`` tool config, or None if absent.
+
+        Single source of truth for the cold-transfer target shared by the LLM
+        voice tool and the press-0 DTMF gate. Scans every node's tools (a press-0
+        safety net is global, so the target is workflow-wide, not per-node) and
+        returns the first ``transfer_call`` tool's ``config``.
+        """
+        tool_uuids: set[str] = set()
+        for node in self.workflow.nodes.values():
+            for tu in getattr(node, "tool_uuids", None) or []:
+                tool_uuids.add(tu)
+        if not tool_uuids:
+            return None
+
+        organization_id = await self._get_organization_id()
+        if not organization_id:
+            return None
+
+        tools = await db_client.get_tools_by_uuids(list(tool_uuids), organization_id)
+        for tool in tools:
+            if tool.category == ToolCategory.TRANSFER_CALL.value:
+                return (tool.definition or {}).get("config", {})
+        return None
+
     async def close_mcp_sessions(self) -> None:
         """Close all open MCP tool sessions.
 

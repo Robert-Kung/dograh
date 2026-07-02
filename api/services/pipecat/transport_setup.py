@@ -8,6 +8,7 @@ from api.services.pipecat.audio_config import AudioConfig
 from api.services.pipecat.audio_mixer import build_audio_out_mixer
 from api.services.pipecat.transport_params import realtime_param_overrides
 from pipecat.transports.base_transport import TransportParams
+from pipecat.transports.livekit.transport import LiveKitParams, LiveKitTransport
 from pipecat.transports.smallwebrtc.connection import SmallWebRTCConnection
 from pipecat.transports.smallwebrtc.transport import SmallWebRTCTransport
 
@@ -27,6 +28,34 @@ async def create_webrtc_transport(
     return SmallWebRTCTransport(
         webrtc_connection=webrtc_connection,
         params=TransportParams(
+            audio_in_enabled=True,
+            audio_out_enabled=True,
+            audio_in_sample_rate=audio_config.transport_in_sample_rate,
+            audio_out_sample_rate=audio_config.transport_out_sample_rate,
+            audio_out_mixer=mixer,
+            **realtime_param_overrides(is_realtime),
+        ),
+    )
+
+
+async def create_livekit_transport(
+    url: str,
+    token: str,
+    room_name: str,
+    audio_config: AudioConfig,
+    ambient_noise_config: dict | None = None,
+    is_realtime: bool = False,
+):
+    """Create a transport for LiveKit rooms (headless agent participant)."""
+    mixer = await build_audio_out_mixer(
+        audio_config.transport_out_sample_rate, ambient_noise_config
+    )
+
+    return LiveKitTransport(
+        url=url,
+        token=token,
+        room_name=room_name,
+        params=LiveKitParams(
             audio_in_enabled=True,
             audio_out_enabled=True,
             audio_in_sample_rate=audio_config.transport_in_sample_rate,
