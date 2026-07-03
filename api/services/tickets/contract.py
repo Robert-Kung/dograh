@@ -76,3 +76,124 @@ SUMMARY_LIST_MAX_ITEMS = 20
 def ticket_id_for_run(workflow_run_id: int) -> str:
     """Deterministic ticket id for a workflow run (idempotency by construction)."""
     return f"{TICKET_ID_PREFIX}{workflow_run_id}"
+
+
+# --- Tool JSON Schemas (the contract package) ------------------------------
+#
+# Source of truth for the shipped contract: the conformance CLI validates
+# wrappers against these, and a drift test asserts the built-in server's
+# registered tools stay in sync. `_TICKET_VIEW` is the success shape shared
+# by every tool; failures are always the error envelope instead.
+
+_TICKET_ID_SCHEMA = {"type": "string", "pattern": "^[A-Za-z0-9_-]{1,64}$"}
+_CALLER_NUMBER_SCHEMA = {
+    "type": "string",
+    "description": "E.164 (+<digits>) or empty string for anonymous callers",
+    "maxLength": CALLER_NUMBER_MAX_LEN,
+}
+
+_TICKET_VIEW = {
+    "type": "object",
+    "description": "Ticket resource; unknown extra fields must be tolerated",
+    "properties": {
+        "ticket_id": _TICKET_ID_SCHEMA,
+        "workflow_run_id": {"type": "integer"},
+        "caller_number": _CALLER_NUMBER_SCHEMA,
+        "room_name": {"type": "string"},
+        "transfer_reason": {"type": "string"},
+        "summary": {"type": ["object", "null"]},
+        "notes": {"type": "array"},
+        "created_at": {"type": ["string", "null"]},
+        "contract_version": {"type": "string"},
+    },
+    "required": ["ticket_id", "workflow_run_id", "contract_version"],
+}
+
+ERROR_ENVELOPE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "error": {
+            "type": "object",
+            "properties": {
+                "code": {"type": "string", "enum": list(ERROR_CODES)},
+                "message": {"type": "string"},
+                "retryable": {"type": "boolean"},
+            },
+            "required": ["code", "message", "retryable"],
+        }
+    },
+    "required": ["error"],
+}
+
+TOOL_SCHEMAS = {
+    "create_ticket": {
+        "required": True,
+        "input": {
+            "type": "object",
+            "properties": {
+                "ticket_id": _TICKET_ID_SCHEMA,
+                "workflow_run_id": {"type": "integer", "exclusiveMinimum": 0},
+                "caller_number": _CALLER_NUMBER_SCHEMA,
+                "room_name": {"type": "string", "maxLength": ROOM_NAME_MAX_LEN},
+                "transfer_reason": {
+                    "type": "string",
+                    "maxLength": TRANSFER_REASON_MAX_LEN,
+                },
+            },
+            "required": ["ticket_id", "workflow_run_id"],
+        },
+        "output": {**_TICKET_VIEW, "description": "Created or existing ticket"},
+    },
+    "append_ticket_note": {
+        "required": True,
+        "input": {
+            "type": "object",
+            "properties": {
+                "ticket_id": _TICKET_ID_SCHEMA,
+                "note_type": {"type": "string", "enum": list(NOTE_TYPES)},
+                "content": {
+                    "description": "string (<=4000 chars) or summary object",
+                    "anyOf": [
+                        {"type": "string", "maxLength": NOTE_CONTENT_MAX_LEN},
+                        {"type": "object"},
+                    ],
+                },
+            },
+            "required": ["ticket_id", "note_type", "content"],
+        },
+        "output": _TICKET_VIEW,
+    },
+    "get_ticket": {
+        "required": False,
+        "input": {
+            "type": "object",
+            "properties": {"ticket_id": _TICKET_ID_SCHEMA},
+            "required": ["ticket_id"],
+        },
+        "output": _TICKET_VIEW,
+    },
+    "find_tickets_by_caller": {
+        "required": False,
+        "input": {
+            "type": "object",
+            "properties": {
+                "caller_number": _CALLER_NUMBER_SCHEMA,
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": FIND_TICKETS_MAX_LIMIT,
+                    "default": FIND_TICKETS_DEFAULT_LIMIT,
+                },
+            },
+            "required": ["caller_number"],
+        },
+        "output": {
+            "type": "object",
+            "properties": {
+                "tickets": {"type": "array", "items": _TICKET_VIEW},
+                "contract_version": {"type": "string"},
+            },
+            "required": ["tickets", "contract_version"],
+        },
+    },
+}

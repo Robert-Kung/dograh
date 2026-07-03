@@ -68,6 +68,13 @@ async def lifespan(app: FastAPI):
         await sync_manager.start()
         set_worker_sync_manager(sync_manager)
 
+        # Loud config-load check of every org's ticket MCP server (S-L4):
+        # a broken/missing-tool server must surface now, not on the first
+        # transfer. Background task — startup never waits on remote probes.
+        from api.services.tickets.startup_check import schedule_startup_check
+
+        schedule_startup_check()
+
         yield  # Run app
 
         # Shutdown sequence - this runs when FastAPI is shutting down
