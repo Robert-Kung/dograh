@@ -91,6 +91,7 @@ class Press0Gate(FrameProcessor):
             after_hours_action=self._after_hours_action,
             alternate_destination=self._alternate_destination,
             after_hours_message=self._after_hours_message,
+            transfer_reason="press0",
         )
         logger.info(f"press-0 cold transfer result: {result}")
 

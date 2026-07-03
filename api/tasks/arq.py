@@ -47,6 +47,7 @@ from api.tasks.knowledge_base_processing import process_knowledge_base_document
 from api.tasks.run_integrations import run_integrations_post_workflow_run
 from api.tasks.s3_upload import upload_voicemail_audio_to_s3
 from api.tasks.ticket_retention import enforce_ticket_retention
+from api.tasks.transfer_handoff import summarize_transfer_handoff
 from api.tasks.workflow_completion import process_workflow_completion
 
 from arq import cron
@@ -60,6 +61,7 @@ class WorkerSettings:
         sync_campaign_source,
         process_campaign_batch,
         process_knowledge_base_document,
+        summarize_transfer_handoff,
     ]
     cron_jobs = [
         # PDPA ticket retention (C7) — daily, off-peak UTC.

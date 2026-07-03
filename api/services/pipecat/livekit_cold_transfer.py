@@ -21,13 +21,16 @@ async def cold_transfer_to_human(
     human_destination: str,
     *,
     play_dialtone: bool = False,
+    headers: dict[str, str] | None = None,
     lk: api.LiveKitAPI | None = None,
 ) -> dict:
     """Cold-transfer the room's SIP caller to a human queue via SIP REFER.
 
     ``human_destination`` is a config value (``tel:+886...`` or
-    ``sip:queue@host``), never caller-supplied. Returns a structured result so
-    the LLM can respond on failure instead of dropping the call.
+    ``sip:queue@host``), never caller-supplied. ``headers`` are attached to
+    the REFER (UUI attached-data, e.g. the S-L4 ticket correlation id);
+    platform-generated values only. Returns a structured result so the LLM
+    can respond on failure instead of dropping the call.
     """
     own = lk is None
     if own:
@@ -53,6 +56,7 @@ async def cold_transfer_to_human(
                 participant_identity=identity,
                 transfer_to=human_destination,
                 play_dialtone=play_dialtone,
+                headers=headers or {},
             )
         )
         return {"status": "success", "action": "transferred"}

@@ -79,13 +79,36 @@ def plan_transfer(
     }[action]
 
 
-async def _do_refer(engine, room_name: str, destination: str, lk) -> dict:
-    """Issue the SIP REFER; on success end the call, on failure stay structured (C4, §3.5)."""
+async def _do_refer(
+    engine, room_name: str, destination: str, lk, transfer_reason: str = "unknown"
+) -> dict:
+    """Issue the SIP REFER; on success end the call, on failure stay structured (C4, §3.5).
+
+    S-L4 handoff wraps the REFER here: ticket id into the REFER headers,
+    skeleton write in the background before it, summary job enqueued after
+    the outcome is known. An unconfigured or failing handoff changes nothing
+    about the transfer itself (C4/D5).
+    """
     from pipecat.utils.enums import EndTaskReason
 
     from api.services.pipecat.livekit_cold_transfer import cold_transfer_to_human
+    from api.services.pipecat.transfer_context_handoff import (
+        finalize_transfer_handoff,
+        prepare_transfer_handoff,
+    )
 
-    result = await cold_transfer_to_human(room_name, destination, lk=lk)
+    plan = await prepare_transfer_handoff(
+        engine, room_name=room_name, transfer_reason=transfer_reason, lk=lk
+    )
+
+    result = await cold_transfer_to_human(
+        room_name,
+        destination,
+        headers=plan.refer_headers if plan else None,
+        lk=lk,
+    )
+    if plan is not None:
+        await finalize_transfer_handoff(plan, result.get("status", "failed"))
     if result.get("status") == "success":
         await engine.end_call_with_reason(
             EndTaskReason.TRANSFER_CALL.value, abort_immediately=False
@@ -107,6 +130,7 @@ async def execute_cold_transfer(
     before_refer: Callable[[], Awaitable[None]] | None = None,
     now: datetime | None = None,
     lk=None,
+    transfer_reason: str = "unknown",
 ) -> dict:
     """Run the shared cold-transfer flow and return a structured result (never raises).
 
@@ -124,6 +148,8 @@ async def execute_cold_transfer(
             path plays its configured transfer message here).
         now: Evaluation instant; defaults to current UTC.
         lk: Optional injected LiveKitAPI (tests).
+        transfer_reason: Trigger label recorded on the handoff ticket
+            ("voice_tool" | "press0"); never caller-derived.
     """
     if not valid_destination(destination):
         return {"status": "failed", "action": "transfer_failed", "reason": "invalid_destination"}
@@ -136,7 +162,10 @@ async def execute_cold_transfer(
 
         if decision is TransferDecision.AFTER_HOURS_ALTERNATE:
             if valid_destination(alternate_destination):
-                return await _do_refer(engine, room_name, alternate_destination, lk)
+                # A night queue is still a human pickup — same handoff.
+                return await _do_refer(
+                    engine, room_name, alternate_destination, lk, transfer_reason
+                )
             # Configured for alternate queue but no valid target — fall back to
             # keeping the caller with the AI rather than dropping them (C4).
             logger.warning("alternate_queue selected but alternate_destination invalid; back_to_ai")
@@ -145,7 +174,7 @@ async def execute_cold_transfer(
         if decision is TransferDecision.REFER:
             if before_refer is not None:
                 await before_refer()
-            return await _do_refer(engine, room_name, destination, lk)
+            return await _do_refer(engine, room_name, destination, lk, transfer_reason)
 
         # After-hours announce branches.
         from pipecat.frames.frames import TTSSpeakFrame
