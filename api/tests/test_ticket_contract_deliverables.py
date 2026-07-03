@@ -9,11 +9,7 @@ built-in server's registered tools must not drift from the shipped
 TOOL_SCHEMAS, and the startup check must classify missing tools loudly.
 """
 
-import asyncio
-import socket
-
 import pytest
-import uvicorn
 
 from api.services.pipecat.transfer_context_handoff import call_ticket_tool
 from api.services.tickets import contract
@@ -21,48 +17,16 @@ from api.services.tickets.config import TicketServerConfig
 from api.services.tickets.conformance import ConformanceSession, run_conformance
 from api.services.tickets.reference_server import build_reference_mcp
 from api.services.tickets.startup_check import probe_ticket_server
+from api.tests.support.mcp_http_server import ThreadedMcpServer
 
 pytestmark = pytest.mark.asyncio
 
 
-def _free_port() -> int:
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
-
-
-@pytest.fixture(scope="session")
-async def reference_url():
-    """The reference server on real streamable HTTP (uvicorn in-process).
-
-    Session-scoped deliberately: the mcp/uvicorn stack misbehaves after
-    repeated in-loop server start/stop cycles (the third server's
-    responses never complete), and one long-lived server is also the
-    realistic shape. Tests use disjoint ticket/run ids.
-    """
-    port = _free_port()
-    mcp = build_reference_mcp()
-    app = mcp.http_app(path="/mcp", stateless_http=True)
-    server = uvicorn.Server(
-        uvicorn.Config(
-            app,
-            host="127.0.0.1",
-            port=port,
-            log_level="error",
-            # A lingering streamable-HTTP connection must never turn
-            # shutdown into an unbounded drain (hangs the whole suite).
-            timeout_graceful_shutdown=2,
-        )
-    )
-    task = asyncio.create_task(server.serve())
-    for _ in range(100):
-        if server.started:
-            break
-        await asyncio.sleep(0.05)
-    assert server.started, "reference server failed to start"
-    yield f"http://127.0.0.1:{port}/mcp"
-    server.should_exit = True
-    await task
+@pytest.fixture
+def reference_url():
+    """The reference server on real streamable HTTP (own thread + loop)."""
+    with ThreadedMcpServer(build_reference_mcp()) as server:
+        yield server.url
 
 
 # ── 4.4 Substitutability: platform client ↔ reference server ────────────────
@@ -200,7 +164,6 @@ async def test_startup_probe_full_server_reports_clean(reference_url):
 async def test_startup_probe_flags_missing_tools():
     from fastmcp import FastMCP
 
-    port = _free_port()
     partial = FastMCP("partial")
 
     @partial.tool
@@ -208,28 +171,9 @@ async def test_startup_probe_flags_missing_tools():
         """Stub."""
         return {}
 
-    app = partial.http_app(path="/mcp", stateless_http=True)
-    server = uvicorn.Server(
-        uvicorn.Config(
-            app,
-            host="127.0.0.1",
-            port=port,
-            log_level="error",
-            timeout_graceful_shutdown=2,
-        )
-    )
-    task = asyncio.create_task(server.serve())
-    for _ in range(100):
-        if server.started:
-            break
-        await asyncio.sleep(0.05)
-
-    try:
-        config = TicketServerConfig(url=f"http://127.0.0.1:{port}/mcp", api_key="any")
+    with ThreadedMcpServer(partial) as server:
+        config = TicketServerConfig(url=server.url, api_key="any")
         status = await probe_ticket_server(config, org_id=1)
-    finally:
-        server.should_exit = True
-        await task
 
     assert status["reachable"] is True
     assert status["missing_required"] == ["append_ticket_note"]
