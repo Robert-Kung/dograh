@@ -1,6 +1,7 @@
 from fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 
+from api.constants import ENABLE_TICKET_MCP
 from api.mcp_server.instructions import DOGRAH_MCP_INSTRUCTIONS
 from api.mcp_server.tools.catalog import (
     list_credentials,
@@ -53,3 +54,32 @@ _DOCS_TOOL_ANNOTATIONS = ToolAnnotations(
 
 for _tool in (list_docs, read_doc, search_docs):
     mcp.tool(_tool, annotations=_DOCS_TOOL_ANNOTATIONS)
+
+# Ticket tools (S-L4-SCREENPOP) are flag-gated: the shared MCP surface is
+# reachable by workflow-editing agents in the same org, so exposing ticket
+# PII is an explicit deployment decision, not a default.
+if ENABLE_TICKET_MCP:
+    from api.mcp_server.tools.tickets import (
+        append_ticket_note,
+        create_ticket,
+        find_tickets_by_caller,
+        get_ticket,
+    )
+
+    _TICKET_WRITE_ANNOTATIONS = ToolAnnotations(
+        readOnlyHint=False,
+        idempotentHint=True,
+        destructiveHint=False,
+        openWorldHint=False,
+    )
+    _TICKET_READ_ANNOTATIONS = ToolAnnotations(
+        readOnlyHint=True,
+        idempotentHint=True,
+        destructiveHint=False,
+        openWorldHint=False,
+    )
+
+    mcp.tool(create_ticket, annotations=_TICKET_WRITE_ANNOTATIONS)
+    mcp.tool(append_ticket_note, annotations=_TICKET_WRITE_ANNOTATIONS)
+    mcp.tool(get_ticket, annotations=_TICKET_READ_ANNOTATIONS)
+    mcp.tool(find_tickets_by_caller, annotations=_TICKET_READ_ANNOTATIONS)
