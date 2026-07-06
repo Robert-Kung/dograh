@@ -91,9 +91,11 @@ def is_open(schedule: dict | None, now: datetime) -> bool:
         today = _DAY_KEYS[now.weekday()]
         yesterday = _DAY_KEYS[(now.weekday() - 1) % 7]
 
-        return _covered_same_day(schedule.get(today, []), t) or _covered_by_prev_day_wrap(
-            schedule.get(yesterday, []), t
-        )
+        return _covered_same_day(
+            schedule.get(today, []), t
+        ) or _covered_by_prev_day_wrap(schedule.get(yesterday, []), t)
     except (ValueError, KeyError, TypeError) as e:
-        logger.warning("Unparseable business-hours schedule %r; failing open: %s", schedule, e)
+        logger.warning(
+            "Unparseable business-hours schedule %r; failing open: %s", schedule, e
+        )
         return True

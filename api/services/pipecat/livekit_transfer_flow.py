@@ -69,8 +69,10 @@ def plan_transfer(
     if is_open(schedule, now):
         return TransferDecision.REFER
 
-    action = after_hours_action if after_hours_action in _SUPPORTED_AFTER_HOURS else (
-        DEFAULT_AFTER_HOURS_ACTION
+    action = (
+        after_hours_action
+        if after_hours_action in _SUPPORTED_AFTER_HOURS
+        else (DEFAULT_AFTER_HOURS_ACTION)
     )
     return {
         "back_to_ai": TransferDecision.AFTER_HOURS_BACK_TO_AI,
@@ -89,13 +91,12 @@ async def _do_refer(
     the outcome is known. An unconfigured or failing handoff changes nothing
     about the transfer itself (C4/D5).
     """
-    from pipecat.utils.enums import EndTaskReason
-
     from api.services.pipecat.livekit_cold_transfer import cold_transfer_to_human
     from api.services.pipecat.transfer_context_handoff import (
         finalize_transfer_handoff,
         prepare_transfer_handoff,
     )
+    from pipecat.utils.enums import EndTaskReason
 
     plan = await prepare_transfer_handoff(
         engine, room_name=room_name, transfer_reason=transfer_reason, lk=lk
@@ -152,13 +153,23 @@ async def execute_cold_transfer(
             ("voice_tool" | "press0"); never caller-derived.
     """
     if not valid_destination(destination):
-        return {"status": "failed", "action": "transfer_failed", "reason": "invalid_destination"}
+        return {
+            "status": "failed",
+            "action": "transfer_failed",
+            "reason": "invalid_destination",
+        }
 
     if getattr(engine, "_livekit_transfer_in_progress", False):
-        return {"status": "failed", "action": "transfer_failed", "reason": "already_transferring"}
+        return {
+            "status": "failed",
+            "action": "transfer_failed",
+            "reason": "already_transferring",
+        }
     engine._livekit_transfer_in_progress = True
     try:
-        decision = plan_transfer(schedule, after_hours_action, now or datetime.now(timezone.utc))
+        decision = plan_transfer(
+            schedule, after_hours_action, now or datetime.now(timezone.utc)
+        )
 
         if decision is TransferDecision.AFTER_HOURS_ALTERNATE:
             if valid_destination(alternate_destination):
@@ -168,7 +179,9 @@ async def execute_cold_transfer(
                 )
             # Configured for alternate queue but no valid target — fall back to
             # keeping the caller with the AI rather than dropping them (C4).
-            logger.warning("alternate_queue selected but alternate_destination invalid; back_to_ai")
+            logger.warning(
+                "alternate_queue selected but alternate_destination invalid; back_to_ai"
+            )
             decision = TransferDecision.AFTER_HOURS_BACK_TO_AI
 
         if decision is TransferDecision.REFER:
@@ -181,7 +194,10 @@ async def execute_cold_transfer(
         from pipecat.utils.enums import EndTaskReason
 
         await engine.task.queue_frame(
-            TTSSpeakFrame(after_hours_message or _DEFAULT_AFTER_HOURS_MESSAGE, persist_to_logs=True)
+            TTSSpeakFrame(
+                after_hours_message or _DEFAULT_AFTER_HOURS_MESSAGE,
+                persist_to_logs=True,
+            )
         )
         if decision is TransferDecision.AFTER_HOURS_HANGUP:
             await engine.end_call_with_reason(

@@ -1376,7 +1376,9 @@ class TicketModel(Base):
     # Idempotency key: one ticket per workflow run per org. Plain integer,
     # not an FK — ticket retention (C7) is independent of run lifecycle.
     workflow_run_id = Column(Integer, nullable=False)
-    caller_number = Column(String, nullable=False, default="")  # E.164 or "" (anonymous)
+    caller_number = Column(
+        String, nullable=False, default=""
+    )  # E.164 or "" (anonymous)
     room_name = Column(String, nullable=False, default="")
     transfer_reason = Column(String, nullable=False, default="")
     summary = Column(JSON, nullable=True)  # fixed-schema handoff summary
