@@ -21,6 +21,9 @@ MASK_CHAR = "*"
 MASK_MARKER = "***"  # substring that indicates a masked key
 SERVICE_SECRET_FIELDS = ("api_key", "credentials", "aws_access_key", "aws_secret_key")
 MODEL_OVERRIDE_FIELDS = ("llm", "tts", "stt", "realtime")
+# Mirrors api.services.tickets.config.TICKET_MCP_CONFIG_KEY; kept as a literal
+# because that module pulls in the DB layer, which masking must not import.
+TICKET_SERVER_CONFIG_KEY = "ticket_mcp_server"
 
 
 def contains_masked_key(value: str | list[str] | None) -> bool:
@@ -164,6 +167,11 @@ def mask_workflow_configurations(config: Optional[Dict]) -> Optional[Dict]:
     v2_override = masked.get("model_configuration_v2_override")
     if isinstance(v2_override, dict):
         _mask_nested_service_secrets(v2_override)
+
+    # The ticket MCP override carries a live org bearer credential (S-L4).
+    ticket_server = masked.get(TICKET_SERVER_CONFIG_KEY)
+    if isinstance(ticket_server, dict) and ticket_server.get("api_key"):
+        ticket_server["api_key"] = _mask_secret_value(ticket_server["api_key"])
 
     return masked
 
