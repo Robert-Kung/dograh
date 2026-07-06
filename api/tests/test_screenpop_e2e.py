@@ -111,9 +111,15 @@ def _wire(config: TicketServerConfig, enqueued: list):
         enqueued.append((function_name, args))
 
     return (
-        patch.object(handoff.db_client, "get_workflow_run", AsyncMock(return_value=run_row)),
-        patch.object(handoff.db_client, "validate_api_key", AsyncMock(return_value=None)),
-        patch.object(handoff, "resolve_ticket_server_config", AsyncMock(return_value=config)),
+        patch.object(
+            handoff.db_client, "get_workflow_run", AsyncMock(return_value=run_row)
+        ),
+        patch.object(
+            handoff.db_client, "validate_api_key", AsyncMock(return_value=None)
+        ),
+        patch.object(
+            handoff, "resolve_ticket_server_config", AsyncMock(return_value=config)
+        ),
         patch("api.tasks.arq.enqueue_job", fake_enqueue),
     )
 
@@ -128,13 +134,17 @@ def _job_wiring(config: TicketServerConfig):
         run_inference=AsyncMock(return_value=CANNED_SUMMARY_JSON),
     )
     return (
-        patch.object(job_module.db_client, "get_workflow_run", AsyncMock(return_value=run_row)),
+        patch.object(
+            job_module.db_client, "get_workflow_run", AsyncMock(return_value=run_row)
+        ),
         patch.object(
             job_module.db_client,
             "get_workflow_by_id",
             AsyncMock(return_value=types.SimpleNamespace(user_id=3)),
         ),
-        patch.object(job_module, "resolve_ticket_server_config", AsyncMock(return_value=config)),
+        patch.object(
+            job_module, "resolve_ticket_server_config", AsyncMock(return_value=config)
+        ),
         patch(
             "api.services.pipecat.transfer_context_handoff._verify_credential_org",
             AsyncMock(return_value=True),
@@ -182,7 +192,9 @@ async def test_full_pipeline_transfer_to_screen_pop(contract_server_url):
     assert ticket_id in cap["headers"][handoff.UUI_HEADER]
 
     # 3. Skeleton is immediately queryable — by ticket id and by number.
-    skeleton = await handoff.call_ticket_tool(config, "get_ticket", {"ticket_id": ticket_id})
+    skeleton = await handoff.call_ticket_tool(
+        config, "get_ticket", {"ticket_id": ticket_id}
+    )
     assert skeleton["workflow_run_id"] == RUN_ID
     assert skeleton["caller_number"] == CALLER
     assert skeleton["summary"] is None  # summary not in yet
@@ -196,7 +208,9 @@ async def test_full_pipeline_transfer_to_screen_pop(contract_server_url):
         await summarize_transfer_handoff(None, snapshot)
 
     # 5. Screen-pop: human picks up, queries by the header's ticket id…
-    ticket = await handoff.call_ticket_tool(config, "get_ticket", {"ticket_id": ticket_id})
+    ticket = await handoff.call_ticket_tool(
+        config, "get_ticket", {"ticket_id": ticket_id}
+    )
     assert ticket["summary"]["intent"] == "dispute a double charge"
     assert ticket["summary"]["verified_identity"] == "unknown"  # never LLM-inferred
     assert ticket["notes"][0]["note_type"] == "summary"
@@ -234,6 +248,46 @@ async def test_failed_refer_leaves_marked_ticket_not_ghost(contract_server_url):
         await summarize_transfer_handoff(None, snapshot)
 
     ticket_id = contract.ticket_id_for_run(run_id)
-    ticket = await handoff.call_ticket_tool(config, "get_ticket", {"ticket_id": ticket_id})
+    ticket = await handoff.call_ticket_tool(
+        config, "get_ticket", {"ticket_id": ticket_id}
+    )
     assert ticket["summary"] is None  # no fake "transferred" summary
     assert [n["note_type"] for n in ticket["notes"]] == ["transfer_failed"]
+
+
+async def test_job_outruns_lost_skeleton_write_still_yields_ticket(
+    contract_server_url,
+):
+    """Race leg: the summary job runs while the background skeleton write
+    never lands (job outran it, or a worker restart dropped it). The job's
+    idempotent get-or-create still produces a queryable screen-pop ticket;
+    only the caller-number channel degrades (the number resolves inside the
+    background write, so this snapshot carries "")."""
+    config = TicketServerConfig(url=contract_server_url, api_key="e2e-token")
+    enqueued: list = []
+    run_id = RUN_ID + 2
+    w1, w2, w3, w4 = _wire(config, enqueued)
+
+    with w1, w2, w3, w4, patch.object(handoff, "_write_skeleton", AsyncMock()):
+        result = await execute_cold_transfer(
+            _engine(run_id=run_id),
+            room_name="cs-+886277001234",
+            destination="tel:+886900000000",
+            schedule=None,
+            lk=_fake_lk({}),
+            transfer_reason="voice_tool",
+        )
+        # Deliberately no _drain_background(): the skeleton never lands.
+
+    assert result["status"] == "success"
+    function_name, (snapshot,) = enqueued[0]
+    j1, j2, j3, j4, j5, j6 = _job_wiring(config)
+    with j1, j2, j3, j4, j5, j6:
+        await summarize_transfer_handoff(None, snapshot)
+
+    ticket_id = contract.ticket_id_for_run(run_id)
+    ticket = await handoff.call_ticket_tool(
+        config, "get_ticket", {"ticket_id": ticket_id}
+    )
+    assert ticket["summary"]["intent"] == "dispute a double charge"
+    assert [n["note_type"] for n in ticket["notes"]] == ["summary"]

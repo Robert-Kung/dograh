@@ -40,6 +40,7 @@ TICKET_HEADER = "X-Dograh-Ticket-Id"
 # snapshot travels through the ARQ queue.
 SNAPSHOT_MAX_MESSAGES = 60
 SNAPSHOT_MAX_TEXT_LEN = 2000
+SNAPSHOT_MAX_CONTEXT_KEYS = 50
 
 # S-L7-OBS wiring point: process-local failure counter + the structured
 # "context_write: failed" log marker emitted by _record_write_failure.
@@ -82,9 +83,34 @@ class HandoffPlan:
             "organization_id": self.organization_id,
             "transfer_reason": self.transfer_reason,
             "refer_status": refer_status,
+            # Best-effort at enqueue time: the background skeleton write may
+            # not have resolved the caller number yet ("" then). The job's
+            # get-or-create uses these so a late or lost skeleton write still
+            # yields a queryable ticket.
+            "caller_number": self.caller_number,
+            "room_name": self.room_name,
             "messages": self.snapshot_messages,
             "gathered_context": self.gathered_context,
         }
+
+
+def snapshot_gathered_context(raw) -> dict:
+    """Scalar values only, strings truncated, key count capped.
+
+    The snapshot is a second copy of caller PII that rides the ARQ queue
+    outside the ticket store's retention story (C7) — keep it to the minimum
+    the summary job needs (deterministic flags like `identity_verified` plus
+    short scalar context), never nested payloads.
+    """
+    out: dict = {}
+    for key, value in (raw or {}).items():
+        if len(out) >= SNAPSHOT_MAX_CONTEXT_KEYS:
+            break
+        if value is None or isinstance(value, (bool, int, float)):
+            out[key] = value
+        elif isinstance(value, str):
+            out[key] = value[:SNAPSHOT_MAX_TEXT_LEN]
+    return out
 
 
 def snapshot_messages(context) -> list[dict]:
@@ -233,7 +259,9 @@ async def prepare_transfer_handoff(
                 transfer_reason or "unknown", contract.TRANSFER_REASON_MAX_LEN
             ),
             snapshot_messages=snapshot_messages(getattr(engine, "context", None)),
-            gathered_context=dict(getattr(engine, "_gathered_context", None) or {}),
+            gathered_context=snapshot_gathered_context(
+                getattr(engine, "_gathered_context", None)
+            ),
         )
 
         task = asyncio.create_task(_write_skeleton(plan, lk=lk))

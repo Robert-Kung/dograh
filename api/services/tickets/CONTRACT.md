@@ -104,6 +104,11 @@ obligation your CRM already fulfills. Deletion/anonymization is part of
 the contract's obligations now precisely because retrofitting it later
 would be a breaking change.
 
+On the platform side, the in-flight conversation snapshot that feeds the
+summary job is bounded (message and context caps) and short-lived (queue
+payload plus a 60-second result TTL in Redis) — the ticket store you
+implement is the only durable copy this contract creates.
+
 ## Correlation channels (how the ticket reaches the human)
 
 1. **Primary**: the platform attaches the ticket id to the SIP REFER as

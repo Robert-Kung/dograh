@@ -46,6 +46,40 @@ async def _append_note_with_retry(config, ticket_id: str, note_type: str, conten
     return False
 
 
+async def _ensure_ticket_exists(config, snapshot: dict) -> None:
+    """Idempotent get-or-create before any append.
+
+    The skeleton write is a detached background task on the call's event loop;
+    this job can outrun it (append would hit NOT_FOUND, which is
+    non-retryable) and a worker drain/restart can drop it entirely. Creating
+    here is a no-op when the skeleton already landed — the existing ticket
+    wins, including its caller_number. Failures are logged and deliberately
+    not fatal: the append that follows produces the definitive error."""
+    from api.services.pipecat.transfer_context_handoff import call_ticket_tool
+
+    try:
+        result = await call_ticket_tool(
+            config,
+            "create_ticket",
+            {
+                "ticket_id": snapshot["ticket_id"],
+                "workflow_run_id": snapshot["workflow_run_id"],
+                "caller_number": snapshot.get("caller_number", ""),
+                "room_name": snapshot.get("room_name", ""),
+                "transfer_reason": snapshot.get("transfer_reason", ""),
+            },
+        )
+        if contract.is_error(result):
+            logger.warning(
+                f"job-side ticket get-or-create rejected for "
+                f"{snapshot['ticket_id']}: {result['error']}"
+            )
+    except Exception as e:
+        logger.warning(
+            f"job-side ticket get-or-create failed for {snapshot['ticket_id']}: {e!r}"
+        )
+
+
 async def summarize_transfer_handoff(_ctx, snapshot: dict) -> None:
     ticket_id = snapshot.get("ticket_id")
     workflow_run_id = snapshot.get("workflow_run_id")
@@ -77,6 +111,8 @@ async def summarize_transfer_handoff(_ctx, snapshot: dict) -> None:
             f"for ticket {ticket_id}"
         )
         return
+
+    await _ensure_ticket_exists(config, snapshot)
 
     if snapshot.get("refer_status") != "success":
         # The caller never left the AI — mark the ticket instead of

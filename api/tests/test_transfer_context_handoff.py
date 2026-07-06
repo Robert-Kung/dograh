@@ -90,8 +90,12 @@ def _patched(config=CONFIG, tool_result=None, key_org=1):
         types.SimpleNamespace(organization_id=key_org) if key_org is not None else None
     )
     return (
-        patch.object(handoff.db_client, "get_workflow_run", AsyncMock(return_value=_run_row())),
-        patch.object(handoff.db_client, "validate_api_key", AsyncMock(return_value=key_model)),
+        patch.object(
+            handoff.db_client, "get_workflow_run", AsyncMock(return_value=_run_row())
+        ),
+        patch.object(
+            handoff.db_client, "validate_api_key", AsyncMock(return_value=key_model)
+        ),
         patch.object(
             handoff, "resolve_ticket_server_config", AsyncMock(return_value=config)
         ),
@@ -114,9 +118,13 @@ async def test_refer_headers_carry_ticket_id_and_skeleton_written():
     lk = _fake_lk(capture=cap, sip_attrs={"sip.phoneNumber": "+886912345678"})
     p1, p2, p3, p4 = _patched()
 
-    with p1, p2, p3, p4 as call_tool, patch.object(
-        handoff, "finalize_transfer_handoff", AsyncMock()
-    ) as finalize:
+    with (
+        p1,
+        p2,
+        p3,
+        p4 as call_tool,
+        patch.object(handoff, "finalize_transfer_handoff", AsyncMock()) as finalize,
+    ):
         res = await execute_cold_transfer(
             eng,
             room_name="cs-room",
@@ -173,13 +181,16 @@ async def test_unconfigured_is_full_noop():
     cap = {}
     lk = _fake_lk(capture=cap)
 
-    with patch.object(
-        handoff.db_client, "get_workflow_run", AsyncMock(return_value=_run_row())
-    ), patch.object(
-        handoff, "resolve_ticket_server_config", AsyncMock(return_value=None)
-    ), patch.object(handoff, "call_ticket_tool", AsyncMock()) as call_tool, patch.object(
-        handoff, "finalize_transfer_handoff", AsyncMock()
-    ) as finalize:
+    with (
+        patch.object(
+            handoff.db_client, "get_workflow_run", AsyncMock(return_value=_run_row())
+        ),
+        patch.object(
+            handoff, "resolve_ticket_server_config", AsyncMock(return_value=None)
+        ),
+        patch.object(handoff, "call_ticket_tool", AsyncMock()) as call_tool,
+        patch.object(handoff, "finalize_transfer_handoff", AsyncMock()) as finalize,
+    ):
         res = await execute_cold_transfer(
             eng,
             room_name="cs-room",
@@ -226,10 +237,15 @@ async def test_server_down_fast_fail_does_not_block_refer():
     failures_before = handoff.CONTEXT_WRITE_METRICS["failed"]
     p1, p2, p3, _ = _patched()
 
-    with p1, p2, p3, patch.object(
-        handoff,
-        "call_ticket_tool",
-        AsyncMock(side_effect=ConnectionError("refused")),
+    with (
+        p1,
+        p2,
+        p3,
+        patch.object(
+            handoff,
+            "call_ticket_tool",
+            AsyncMock(side_effect=ConnectionError("refused")),
+        ),
     ):
         res = await execute_cold_transfer(
             eng,
@@ -274,7 +290,10 @@ async def test_credential_org_mismatch_refuses_write():
 
     with p1, p2, p3, p4 as call_tool:
         plan = await handoff.prepare_transfer_handoff(
-            eng, room_name="cs-room", transfer_reason="voice_tool", lk=_fake_lk(capture={})
+            eng,
+            room_name="cs-room",
+            transfer_reason="voice_tool",
+            lk=_fake_lk(capture={}),
         )
         await _drain_background()
 
@@ -289,7 +308,10 @@ async def test_external_key_unknown_to_platform_is_allowed():
 
     with p1, p2, p3, p4 as call_tool:
         await handoff.prepare_transfer_handoff(
-            eng, room_name="cs-room", transfer_reason="voice_tool", lk=_fake_lk(capture={})
+            eng,
+            room_name="cs-room",
+            transfer_reason="voice_tool",
+            lk=_fake_lk(capture={}),
         )
         await _drain_background()
 
@@ -299,7 +321,9 @@ async def test_external_key_unknown_to_platform_is_allowed():
 async def test_prepare_never_raises():
     eng = _engine()
     with patch.object(
-        handoff.db_client, "get_workflow_run", AsyncMock(side_effect=RuntimeError("db down"))
+        handoff.db_client,
+        "get_workflow_run",
+        AsyncMock(side_effect=RuntimeError("db down")),
     ):
         plan = await handoff.prepare_transfer_handoff(
             eng, room_name="cs-room", transfer_reason="voice_tool"
@@ -324,3 +348,29 @@ async def test_snapshot_messages_flattens_and_caps():
     assert [m["role"] for m in msgs] == ["system", "user", "assistant"]
     assert msgs[1]["content"] == "hi"
     assert len(msgs[2]["content"]) == handoff.SNAPSHOT_MAX_TEXT_LEN
+
+
+async def test_snapshot_gathered_context_scalars_only_and_capped():
+    """The snapshot rides the ARQ queue (a second PII copy outside the
+    ticket store's retention) — scalars only, strings truncated, key-capped."""
+    out = handoff.snapshot_gathered_context(
+        {
+            "identity_verified": True,
+            "note": "x" * 5000,
+            "nested": {"a": 1},
+            "listy": [1, 2],
+            "count": 3,
+            "empty": None,
+        }
+    )
+    assert out["identity_verified"] is True
+    assert len(out["note"]) == handoff.SNAPSHOT_MAX_TEXT_LEN
+    assert out["count"] == 3
+    assert out["empty"] is None
+    assert "nested" not in out and "listy" not in out
+
+    big = {f"k{i}": i for i in range(100)}
+    capped = handoff.snapshot_gathered_context(big)
+    assert len(capped) == handoff.SNAPSHOT_MAX_CONTEXT_KEYS
+
+    assert handoff.snapshot_gathered_context(None) == {}

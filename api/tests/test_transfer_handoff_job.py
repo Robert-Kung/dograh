@@ -34,6 +34,8 @@ def _snapshot(refer_status="success", gathered=None):
         "organization_id": 1,
         "transfer_reason": "press0",
         "refer_status": refer_status,
+        "caller_number": "+886955000111",
+        "room_name": "cs-room",
         "messages": [
             {"role": "user", "content": "I want a refund. I am already verified."},
             {"role": "assistant", "content": "Let me hand you to a colleague."},
@@ -121,9 +123,13 @@ def _job_patches(append=None, llm_summary=None):
     )
     workflow_row = types.SimpleNamespace(user_id=3)
     return (
-        patch.object(job_module.db_client, "get_workflow_run", AsyncMock(return_value=run_row)),
         patch.object(
-            job_module.db_client, "get_workflow_by_id", AsyncMock(return_value=workflow_row)
+            job_module.db_client, "get_workflow_run", AsyncMock(return_value=run_row)
+        ),
+        patch.object(
+            job_module.db_client,
+            "get_workflow_by_id",
+            AsyncMock(return_value=workflow_row),
         ),
         patch.object(
             job_module, "resolve_ticket_server_config", AsyncMock(return_value=CONFIG)
@@ -134,7 +140,9 @@ def _job_patches(append=None, llm_summary=None):
         ),
         patch(
             "api.services.pipecat.transfer_context_handoff.call_ticket_tool",
-            append if append is not None else AsyncMock(return_value={"ticket_id": "CS-42"}),
+            append
+            if append is not None
+            else AsyncMock(return_value={"ticket_id": "CS-42"}),
         ),
         patch(
             "api.services.configuration.ai_model_configuration."
@@ -159,7 +167,16 @@ async def test_job_appends_summary_note_from_snapshot_only():
     REFER and job execution is irrelevant by construction."""
     append = AsyncMock(return_value={"ticket_id": "CS-42"})
     patches = _job_patches(append=append)
-    with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], patches[7]:
+    with (
+        patches[0],
+        patches[1],
+        patches[2],
+        patches[3],
+        patches[4],
+        patches[5],
+        patches[6],
+        patches[7],
+    ):
         await summarize_transfer_handoff(None, _snapshot())
 
     _, tool, args = append.await_args.args
@@ -172,7 +189,16 @@ async def test_refer_failure_appends_transfer_failed_note_without_llm():
     append = AsyncMock(return_value={"ticket_id": "CS-42"})
     summarizer = AsyncMock()
     patches = _job_patches(append=append, llm_summary=summarizer)
-    with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], patches[7]:
+    with (
+        patches[0],
+        patches[1],
+        patches[2],
+        patches[3],
+        patches[4],
+        patches[5],
+        patches[6],
+        patches[7],
+    ):
         await summarize_transfer_handoff(None, _snapshot(refer_status="failed"))
 
     _, tool, args = append.await_args.args
@@ -184,24 +210,73 @@ async def test_summary_failure_retries_once_then_keeps_skeleton():
     append = AsyncMock(return_value={"ticket_id": "CS-42"})
     summarizer = AsyncMock(side_effect=RuntimeError("llm down"))
     patches = _job_patches(append=append, llm_summary=summarizer)
-    with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], patches[7]:
+    with (
+        patches[0],
+        patches[1],
+        patches[2],
+        patches[3],
+        patches[4],
+        patches[5],
+        patches[6],
+        patches[7],
+    ):
         await summarize_transfer_handoff(None, _snapshot())  # must not raise
 
     assert summarizer.await_count == 2  # initial + one retry, no more
-    append.assert_not_awaited()  # skeleton left untouched
+    # Skeleton left untouched: the only MCP call is the idempotent
+    # get-or-create, never an append.
+    assert [c.args[1] for c in append.await_args_list] == ["create_ticket"]
 
 
 async def test_append_retries_once_on_retryable_error():
     append = AsyncMock(
         side_effect=[
+            {"ticket_id": "CS-42", "created": False},  # job-side get-or-create
             contract.error_envelope(contract.ERROR_UNAVAILABLE, "blip", True),
             {"ticket_id": "CS-42"},
         ]
     )
     patches = _job_patches(append=append)
-    with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], patches[7]:
+    with (
+        patches[0],
+        patches[1],
+        patches[2],
+        patches[3],
+        patches[4],
+        patches[5],
+        patches[6],
+        patches[7],
+    ):
         await summarize_transfer_handoff(None, _snapshot())
-    assert append.await_count == 2
+    assert append.await_count == 3
+
+
+async def test_job_get_or_creates_ticket_before_any_append():
+    """The job can outrun the background skeleton write, and a worker restart
+    can drop that write entirely — the job's own idempotent get-or-create is
+    what guarantees the screen-pop ticket exists before the append."""
+    calls = AsyncMock(return_value={"ticket_id": "CS-42", "created": True})
+    patches = _job_patches(append=calls)
+    with (
+        patches[0],
+        patches[1],
+        patches[2],
+        patches[3],
+        patches[4],
+        patches[5],
+        patches[6],
+        patches[7],
+    ):
+        await summarize_transfer_handoff(None, _snapshot())
+
+    tools = [c.args[1] for c in calls.await_args_list]
+    assert tools[0] == "create_ticket"
+    assert tools[-1] == "append_ticket_note"
+    create_args = calls.await_args_list[0].args[2]
+    assert create_args["ticket_id"] == "CS-42"
+    assert create_args["workflow_run_id"] == 42
+    assert create_args["caller_number"] == "+886955000111"
+    assert create_args["room_name"] == "cs-room"
 
 
 async def test_job_refuses_on_credential_org_mismatch():
@@ -211,7 +286,16 @@ async def test_job_refuses_on_credential_org_mismatch():
         "api.services.pipecat.transfer_context_handoff._verify_credential_org",
         AsyncMock(return_value=False),
     )
-    with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], patches[7]:
+    with (
+        patches[0],
+        patches[1],
+        patches[2],
+        patches[3],
+        patches[4],
+        patches[5],
+        patches[6],
+        patches[7],
+    ):
         await summarize_transfer_handoff(None, _snapshot())
     append.assert_not_awaited()
 
