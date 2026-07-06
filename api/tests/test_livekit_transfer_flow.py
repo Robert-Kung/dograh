@@ -33,6 +33,7 @@ except ImportError:
 
 # --- planner (pure) -------------------------------------------------------
 
+
 def test_open_hours_always_refer():
     assert plan_transfer(SCHED, "announce_and_hangup", OPEN) is TransferDecision.REFER
 
@@ -42,19 +43,31 @@ def test_no_schedule_refers_failopen():
 
 
 def test_after_hours_back_to_ai():
-    assert plan_transfer(SCHED, "back_to_ai", CLOSED) is TransferDecision.AFTER_HOURS_BACK_TO_AI
+    assert (
+        plan_transfer(SCHED, "back_to_ai", CLOSED)
+        is TransferDecision.AFTER_HOURS_BACK_TO_AI
+    )
 
 
 def test_after_hours_hangup():
-    assert plan_transfer(SCHED, "announce_and_hangup", CLOSED) is TransferDecision.AFTER_HOURS_HANGUP
+    assert (
+        plan_transfer(SCHED, "announce_and_hangup", CLOSED)
+        is TransferDecision.AFTER_HOURS_HANGUP
+    )
 
 
 def test_after_hours_alternate():
-    assert plan_transfer(SCHED, "alternate_queue", CLOSED) is TransferDecision.AFTER_HOURS_ALTERNATE
+    assert (
+        plan_transfer(SCHED, "alternate_queue", CLOSED)
+        is TransferDecision.AFTER_HOURS_ALTERNATE
+    )
 
 
 def test_after_hours_unknown_falls_back_to_default():
-    assert plan_transfer(SCHED, "carrier_pigeon", CLOSED) is TransferDecision.AFTER_HOURS_BACK_TO_AI
+    assert (
+        plan_transfer(SCHED, "carrier_pigeon", CLOSED)
+        is TransferDecision.AFTER_HOURS_BACK_TO_AI
+    )
 
 
 def test_after_hours_unset_falls_back_to_default():
@@ -70,6 +83,7 @@ def test_valid_destination():
 
 
 # --- executor (needs pipecat) ---------------------------------------------
+
 
 def _fake_engine():
     frames = []
@@ -95,7 +109,9 @@ def _fake_lk(*, sip_caller=True, raise_on_transfer=False):
 
     captured = {}
     participants = (
-        [types.SimpleNamespace(kind=SIP_KIND, identity="sip_caller")] if sip_caller else []
+        [types.SimpleNamespace(kind=SIP_KIND, identity="sip_caller")]
+        if sip_caller
+        else []
     )
 
     async def list_participants(req):
@@ -151,7 +167,12 @@ async def test_refer_failure_no_retry_no_end_call():
     eng = _fake_engine()
     lk, _ = _fake_lk(raise_on_transfer=True)
     res = await execute_cold_transfer(
-        eng, room_name="room1", destination="tel:+886912345678", schedule=SCHED, now=OPEN, lk=lk
+        eng,
+        room_name="room1",
+        destination="tel:+886912345678",
+        schedule=SCHED,
+        now=OPEN,
+        lk=lk,
     )
     assert res["status"] == "failed"
     assert res["reason"] == "sip_refer_error"
@@ -164,7 +185,9 @@ async def test_invalid_destination_rejected():
     from api.services.pipecat.livekit_transfer_flow import execute_cold_transfer
 
     eng = _fake_engine()
-    res = await execute_cold_transfer(eng, room_name="room1", destination="0912", now=OPEN)
+    res = await execute_cold_transfer(
+        eng, room_name="room1", destination="0912", now=OPEN
+    )
     assert res["reason"] == "invalid_destination"
 
 
@@ -176,7 +199,12 @@ async def test_idempotency_rejects_second_trigger():
     eng._livekit_transfer_in_progress = True  # already transferring
     lk, _ = _fake_lk()
     res = await execute_cold_transfer(
-        eng, room_name="room1", destination="tel:+886912345678", schedule=SCHED, now=OPEN, lk=lk
+        eng,
+        room_name="room1",
+        destination="tel:+886912345678",
+        schedule=SCHED,
+        now=OPEN,
+        lk=lk,
     )
     assert res["reason"] == "already_transferring"
 

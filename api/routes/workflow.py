@@ -30,11 +30,16 @@ from api.services.configuration.ai_model_configuration import (
 )
 from api.services.configuration.check_validity import UserConfigurationValidator
 from api.services.configuration.masking import (
+    TICKET_SERVER_CONFIG_KEY,
+    contains_masked_key,
     mask_workflow_configurations,
     mask_workflow_definition,
     merge_workflow_api_keys,
 )
-from api.services.configuration.merge import merge_workflow_configuration_secrets
+from api.services.configuration.merge import (
+    merge_ticket_server_secret,
+    merge_workflow_configuration_secrets,
+)
 from api.services.configuration.resolve import (
     enrich_overrides_with_api_keys,
     resolve_effective_config,
@@ -1040,6 +1045,48 @@ async def update_workflow(
         # Validate model overrides. v2 uses a complete workflow-level model
         # configuration; legacy v1 uses partial service overlays.
         workflow_configurations = request.workflow_configurations
+
+        # Ticket-server bearer key round-trip: responses mask it, so a save
+        # that echoes the mask must restore the stored real key.
+        ticket_override = (workflow_configurations or {}).get(TICKET_SERVER_CONFIG_KEY)
+        if isinstance(ticket_override, dict) and contains_masked_key(
+            ticket_override.get("api_key")
+            if isinstance(ticket_override.get("api_key"), str)
+            else None
+        ):
+            existing_workflow = await db_client.get_workflow(
+                workflow_id, organization_id=user.selected_organization_id
+            )
+            if existing_workflow is None:
+                raise HTTPException(
+                    status_code=404, detail=f"Workflow with id {workflow_id} not found"
+                )
+            existing_draft = await db_client.get_draft_version(workflow_id)
+            existing_configs = (
+                existing_draft.workflow_configurations if existing_draft else None
+            )
+            if not existing_configs:
+                existing_configs = (
+                    existing_workflow.released_definition.workflow_configurations
+                    if existing_workflow.released_definition
+                    else None
+                )
+            workflow_configurations = merge_ticket_server_secret(
+                workflow_configurations, existing_configs
+            )
+            # A mask that no longer matches the stored key (rotated key, stale
+            # client, draft without a ticket config) must never be persisted as
+            # the live bearer credential — handoff writes would 401 silently.
+            merged_key = (
+                workflow_configurations.get(TICKET_SERVER_CONFIG_KEY) or {}
+            ).get("api_key")
+            if isinstance(merged_key, str) and contains_masked_key(merged_key):
+                raise HTTPException(
+                    status_code=422,
+                    detail="The ticket_mcp_server api_key appears to be masked. "
+                    "Please provide the actual value, not the masked value.",
+                )
+
         if workflow_configurations and workflow_configurations.get(
             WORKFLOW_MODEL_CONFIGURATION_V2_OVERRIDE_KEY
         ):

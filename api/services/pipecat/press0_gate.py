@@ -13,11 +13,10 @@ from collections.abc import Callable
 
 from loguru import logger
 
+from api.services.pipecat.livekit_transfer_flow import execute_cold_transfer
 from pipecat.audio.dtmf.types import KeypadEntry
 from pipecat.frames.frames import Frame, InputDTMFFrame, TTSSpeakFrame
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
-
-from api.services.pipecat.livekit_transfer_flow import execute_cold_transfer
 
 _DEBOUNCE_SECONDS = 0.5
 _DEFAULT_FAILURE_MESSAGE = "抱歉，目前無法為您轉接，將由 AI 繼續為您服務。"
@@ -54,7 +53,9 @@ class Press0Gate(FrameProcessor):
         self._after_hours_action = config.get("afterHoursAction")
         self._alternate_destination = config.get("alternateDestination")
         self._after_hours_message = config.get("afterHoursMessage")
-        self._failure_message = config.get("transferFailedMessage") or _DEFAULT_FAILURE_MESSAGE
+        self._failure_message = (
+            config.get("transferFailedMessage") or _DEFAULT_FAILURE_MESSAGE
+        )
         self._debounce_seconds = debounce_seconds
         self._monotonic = monotonic  # NB: not _clock — FrameProcessor owns that
         self._last_trigger = float("-inf")
@@ -91,6 +92,7 @@ class Press0Gate(FrameProcessor):
             after_hours_action=self._after_hours_action,
             alternate_destination=self._alternate_destination,
             after_hours_message=self._after_hours_message,
+            transfer_reason="press0",
         )
         logger.info(f"press-0 cold transfer result: {result}")
 
@@ -98,7 +100,10 @@ class Press0Gate(FrameProcessor):
         # spoken feedback — unlike the voice path, DTMF has no LLM turn to inform
         # the caller. Announce a fallback so they are never left in silence (C4).
         # already_transferring is skipped: the concurrent trigger is handling it.
-        if result.get("status") == "failed" and result.get("reason") != "already_transferring":
+        if (
+            result.get("status") == "failed"
+            and result.get("reason") != "already_transferring"
+        ):
             await self._engine.task.queue_frame(
                 TTSSpeakFrame(self._failure_message, persist_to_logs=True)
             )

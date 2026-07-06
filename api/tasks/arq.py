@@ -39,6 +39,9 @@ REDIS_SETTINGS = RedisSettings(
     ssl_check_hostname=False if use_ssl else None,
 )
 
+from arq import cron
+from arq.worker import func
+
 from api.tasks.campaign_tasks import (
     process_campaign_batch,
     sync_campaign_source,
@@ -46,6 +49,8 @@ from api.tasks.campaign_tasks import (
 from api.tasks.knowledge_base_processing import process_knowledge_base_document
 from api.tasks.run_integrations import run_integrations_post_workflow_run
 from api.tasks.s3_upload import upload_voicemail_audio_to_s3
+from api.tasks.ticket_retention import enforce_ticket_retention
+from api.tasks.transfer_handoff import summarize_transfer_handoff
 from api.tasks.workflow_completion import process_workflow_completion
 
 
@@ -57,8 +62,15 @@ class WorkerSettings:
         sync_campaign_source,
         process_campaign_batch,
         process_knowledge_base_document,
+        # Short result TTL: the arq result blob embeds the job args, and this
+        # job's snapshot carries conversation PII (C7 — no long-lived second
+        # copy in Redis). Default keep_result is an hour.
+        func(summarize_transfer_handoff, keep_result=60),
     ]
-    cron_jobs = []
+    cron_jobs = [
+        # PDPA ticket retention (C7) — daily, off-peak UTC.
+        cron(enforce_ticket_retention, hour={19}, minute={30}),
+    ]
     redis_settings = REDIS_SETTINGS
     max_jobs = 10
 

@@ -1354,3 +1354,49 @@ class KnowledgeBaseChunkModel(Base):
             postgresql_ops={"embedding": "vector_cosine_ops"},
         ),
     )
+
+
+class TicketModel(Base):
+    """Built-in ticket store (S-L4-SCREENPOP) — default/reference implementation
+    of the ticket MCP contract. Deliberately minimal: no state machine,
+    assignment, SLA, or search (those trigger a real CRM evaluation instead
+    of growing this table). PII lives in caller_number / summary / notes and
+    is subject to retention anonymization (C7).
+    """
+
+    __tablename__ = "tickets"
+
+    id = Column(Integer, primary_key=True, index=True)
+    organization_id = Column(
+        Integer, ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False
+    )
+    # Correlation key carried in REFER headers; platform-generated,
+    # deterministic per run (CS-<workflow_run_id>).
+    ticket_id = Column(String, nullable=False)
+    # Idempotency key: one ticket per workflow run per org. Plain integer,
+    # not an FK — ticket retention (C7) is independent of run lifecycle.
+    workflow_run_id = Column(Integer, nullable=False)
+    caller_number = Column(
+        String, nullable=False, default=""
+    )  # E.164 or "" (anonymous)
+    room_name = Column(String, nullable=False, default="")
+    transfer_reason = Column(String, nullable=False, default="")
+    summary = Column(JSON, nullable=True)  # fixed-schema handoff summary
+    notes = Column(JSON, nullable=False, default=list)  # append-only
+    anonymized_at = Column(DateTime(timezone=True), nullable=True)  # PDPA audit mark
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+    updated_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(UTC),
+        onupdate=lambda: datetime.now(UTC),
+    )
+
+    organization = relationship("OrganizationModel")
+
+    __table_args__ = (
+        UniqueConstraint(
+            "organization_id", "workflow_run_id", name="_ticket_org_run_uc"
+        ),
+        UniqueConstraint("organization_id", "ticket_id", name="_ticket_org_tid_uc"),
+        Index("ix_tickets_org_caller", "organization_id", "caller_number"),
+    )

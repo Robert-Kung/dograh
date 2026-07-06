@@ -19,7 +19,9 @@ DEFAULT_ROOM_PREFIX = "cs-"
 DidResolver = Callable[[str], Awaitable[Optional[tuple[int, int]]]]
 
 
-def parse_did_from_room(room_name: str, prefix: str = DEFAULT_ROOM_PREFIX) -> str | None:
+def parse_did_from_room(
+    room_name: str, prefix: str = DEFAULT_ROOM_PREFIX
+) -> str | None:
     """Extract the dialed DID from a LiveKit room name like ``cs-+886...``."""
     if not room_name or not room_name.startswith(prefix):
         return None
@@ -35,9 +37,7 @@ def _sign_agent_token(room_name: str, identity: str) -> str:
     from livekit import api
 
     return (
-        api.AccessToken(
-            os.environ["LIVEKIT_API_KEY"], os.environ["LIVEKIT_API_SECRET"]
-        )
+        api.AccessToken(os.environ["LIVEKIT_API_KEY"], os.environ["LIVEKIT_API_SECRET"])
         .with_identity(identity)
         .with_grants(
             api.VideoGrants(

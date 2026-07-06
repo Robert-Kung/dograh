@@ -22,6 +22,7 @@ pytestmark = pytest.mark.skipif(not PIPECAT, reason="pipecat runtime not install
 
 # --- debounce (pure) ------------------------------------------------------
 
+
 def test_first_press_always_triggers():
     assert debounce_ok(float("-inf"), 100.0, 0.5) is True
 
@@ -39,6 +40,7 @@ def test_window_boundary_inclusive():
 
 
 # --- gate frame routing (needs pipecat) -----------------------------------
+
 
 def _make_gate(monkeypatch, *, now_values, execute_result=None):
     """Build a Press0Gate with a fake engine/clock and a recording execute().

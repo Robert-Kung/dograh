@@ -11,7 +11,9 @@ from api.schemas.ai_model_configuration import EffectiveAIModelConfiguration
 from api.services.configuration.masking import (
     MODEL_OVERRIDE_FIELDS,
     SERVICE_SECRET_FIELDS,
+    TICKET_SERVER_CONFIG_KEY,
     contains_masked_key,
+    is_mask_of,
     resolve_masked_api_keys,
 )
 
@@ -157,3 +159,33 @@ def merge_workflow_configuration_secrets(
         )
 
     return merged
+
+
+def merge_ticket_server_secret(
+    incoming_config: dict | None,
+    existing_config: dict | None,
+) -> dict | None:
+    """Restore `ticket_mcp_server.api_key` when the client sends back the mask.
+
+    API responses mask the ticket-server bearer key; a round-trip save must not
+    overwrite the stored real key with the masked placeholder.
+    """
+    if not incoming_config or not existing_config:
+        return incoming_config
+
+    incoming_ticket = incoming_config.get(TICKET_SERVER_CONFIG_KEY)
+    existing_ticket = existing_config.get(TICKET_SERVER_CONFIG_KEY)
+    if not isinstance(incoming_ticket, dict) or not isinstance(existing_ticket, dict):
+        return incoming_config
+
+    incoming_key = incoming_ticket.get("api_key")
+    existing_key = existing_ticket.get("api_key")
+    if (
+        isinstance(incoming_key, str)
+        and isinstance(existing_key, str)
+        and is_mask_of(incoming_key, existing_key)
+    ):
+        merged = copy.deepcopy(incoming_config)
+        merged[TICKET_SERVER_CONFIG_KEY]["api_key"] = existing_key
+        return merged
+    return incoming_config

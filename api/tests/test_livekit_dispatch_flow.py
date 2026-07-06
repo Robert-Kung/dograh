@@ -1,6 +1,5 @@
 """Dispatch flow tests (S-L1-DISPATCH): C4 fallback on unresolved DID."""
 
-import os
 import sys
 import types
 

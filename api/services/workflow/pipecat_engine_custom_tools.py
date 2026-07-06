@@ -871,6 +871,7 @@ class CustomToolManager:
             alternate_destination=config.get("alternateDestination"),
             after_hours_message=config.get("afterHoursMessage"),
             before_refer=lambda: self._play_config_message(config),
+            transfer_reason="voice_tool",
         )
 
         status = result.get("status")

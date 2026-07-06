@@ -121,7 +121,8 @@ class TelephonyPhoneNumberClient(BaseDBClient):
                     WorkflowModel.id == TelephonyPhoneNumberModel.inbound_workflow_id,
                 )
                 .where(
-                    TelephonyPhoneNumberModel.address_normalized == normalized.canonical,
+                    TelephonyPhoneNumberModel.address_normalized
+                    == normalized.canonical,
                     TelephonyPhoneNumberModel.is_active.is_(True),
                 )
                 .limit(2)
