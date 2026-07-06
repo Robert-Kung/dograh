@@ -24,6 +24,7 @@ from api.services.tickets.sanitize import (
     require_note_type,
     require_text,
     require_ticket_id,
+    validate_summary_content,
 )
 
 
@@ -102,18 +103,7 @@ async def append_ticket_note(ticket_id: str, note_type: str, content) -> dict:
         if isinstance(content, str):
             require_text(content, "content", contract.NOTE_CONTENT_MAX_LEN)
         elif isinstance(content, dict):
-            for key, value in content.items():
-                if key not in contract.SUMMARY_FIELDS:
-                    raise TicketValidationError(f"unknown summary field: {key}")
-                if isinstance(value, str):
-                    require_text(value, key, contract.SUMMARY_TEXT_MAX_LEN)
-                elif isinstance(value, list):
-                    if len(value) > contract.SUMMARY_LIST_MAX_ITEMS:
-                        raise TicketValidationError(f"{key} has too many items")
-                    for item in value:
-                        require_text(str(item), key, contract.SUMMARY_TEXT_MAX_LEN)
-                else:
-                    raise TicketValidationError(f"{key} must be a string or list")
+            validate_summary_content(content)
         else:
             raise TicketValidationError("content must be a string or object")
     except TicketValidationError as e:

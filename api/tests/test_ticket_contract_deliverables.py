@@ -78,9 +78,7 @@ async def test_platform_client_runs_all_four_tools_against_reference(reference_u
     )
     assert [t["ticket_id"] for t in found["tickets"]] == ["CS-9001"]
 
-    not_found = await call_ticket_tool(
-        config, "get_ticket", {"ticket_id": "CS-nope"}
-    )
+    not_found = await call_ticket_tool(config, "get_ticket", {"ticket_id": "CS-nope"})
     assert not_found["error"]["code"] == contract.ERROR_NOT_FOUND
 
 
@@ -140,12 +138,14 @@ async def test_builtin_tools_match_contract_schemas():
 
 
 async def test_required_optional_tiering_matches_contract():
-    assert tuple(
-        n for n, s in contract.TOOL_SCHEMAS.items() if s["required"]
-    ) == contract.REQUIRED_TOOLS
-    assert tuple(
-        n for n, s in contract.TOOL_SCHEMAS.items() if not s["required"]
-    ) == contract.OPTIONAL_TOOLS
+    assert (
+        tuple(n for n, s in contract.TOOL_SCHEMAS.items() if s["required"])
+        == contract.REQUIRED_TOOLS
+    )
+    assert (
+        tuple(n for n, s in contract.TOOL_SCHEMAS.items() if not s["required"])
+        == contract.OPTIONAL_TOOLS
+    )
 
 
 # ── 4.3 Startup check ────────────────────────────────────────────────────────

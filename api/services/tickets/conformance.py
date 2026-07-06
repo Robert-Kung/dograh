@@ -105,7 +105,9 @@ async def run_conformance(session: ConformanceSession) -> list[CheckResult]:
             CheckResult(
                 f"tools/list exposes required tool `{tool}`",
                 tool in tool_names,
-                "missing — the platform write path cannot function" if tool not in tool_names else "",
+                "missing — the platform write path cannot function"
+                if tool not in tool_names
+                else "",
             )
         )
     optional_present = {t for t in contract.OPTIONAL_TOOLS if t in tool_names}
@@ -162,9 +164,7 @@ async def run_conformance(session: ConformanceSession) -> list[CheckResult]:
             "append_ticket_note appends without mutating existing fields",
             not contract.is_error(appended)
             and appended.get("caller_number") == caller
-            and any(
-                n.get("note_type") == "summary" for n in appended.get("notes", [])
-            ),
+            and any(n.get("note_type") == "summary" for n in appended.get("notes", [])),
             f"got: {appended}",
         )
     )
@@ -220,6 +220,31 @@ async def run_conformance(session: ConformanceSession) -> list[CheckResult]:
         )
     )
 
+    unknown_field = await session.call(
+        "append_ticket_note",
+        {
+            "ticket_id": f"CONF-{run_a}",
+            "note_type": "summary",
+            "content": {"intent": "probe", "admin_override": True},
+        },
+    )
+    results.append(
+        CheckResult(
+            "unknown summary fields are rejected or ignored, never stored",
+            _is_valid_envelope(unknown_field)
+            or (
+                not contract.is_error(unknown_field)
+                and "admin_override" not in (unknown_field.get("summary") or {})
+                and not any(
+                    isinstance(n.get("content"), dict)
+                    and "admin_override" in n["content"]
+                    for n in unknown_field.get("notes", [])
+                )
+            ),
+            f"got: {unknown_field}",
+        )
+    )
+
     anonymous = await session.call(
         "create_ticket",
         {"ticket_id": f"CONF-{run_b}", "workflow_run_id": run_b, "caller_number": ""},
@@ -253,9 +278,7 @@ async def run_conformance(session: ConformanceSession) -> list[CheckResult]:
         )
 
     if "find_tickets_by_caller" in optional_present:
-        found = await session.call(
-            "find_tickets_by_caller", {"caller_number": caller}
-        )
+        found = await session.call("find_tickets_by_caller", {"caller_number": caller})
         results.append(
             CheckResult(
                 "find_tickets_by_caller returns tickets most-recent-first",
@@ -292,7 +315,9 @@ async def run_conformance(session: ConformanceSession) -> list[CheckResult]:
 
 def print_report(results: list[CheckResult]) -> bool:
     ok = True
-    print(f"\nTicket MCP contract conformance (contract_version {contract.CONTRACT_VERSION})")
+    print(
+        f"\nTicket MCP contract conformance (contract_version {contract.CONTRACT_VERSION})"
+    )
     print("=" * 72)
     for r in results:
         mark = "PASS" if r.passed else "FAIL"

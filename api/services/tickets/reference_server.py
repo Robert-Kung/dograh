@@ -27,6 +27,7 @@ from api.services.tickets.sanitize import (
     require_note_type,
     require_text,
     require_ticket_id,
+    validate_summary_content,
 )
 
 
@@ -54,7 +55,9 @@ class InMemoryTicketStore:
                 transfer_reason, "transfer_reason", contract.TRANSFER_REASON_MAX_LEN
             )
             if not isinstance(workflow_run_id, int) or workflow_run_id <= 0:
-                raise TicketValidationError("workflow_run_id must be a positive integer")
+                raise TicketValidationError(
+                    "workflow_run_id must be a positive integer"
+                )
         except TicketValidationError as e:
             return contract.error_envelope(
                 contract.ERROR_VALIDATION_FAILED, str(e), False
@@ -85,7 +88,12 @@ class InMemoryTicketStore:
             note_type = require_note_type(note_type)
             if isinstance(content, str):
                 require_text(content, "content", contract.NOTE_CONTENT_MAX_LEN)
-            elif not isinstance(content, dict):
+            elif isinstance(content, dict):
+                # Same strict posture as the built-in server: unknown summary
+                # fields are rejected, never stored (the contract's "never
+                # store fields outside the contract").
+                validate_summary_content(content)
+            else:
                 raise TicketValidationError("content must be a string or object")
         except TicketValidationError as e:
             return contract.error_envelope(

@@ -204,6 +204,15 @@ async def test_validation_rejections(db_session):
         )
         assert unknown_field["error"]["code"] == contract.ERROR_VALIDATION_FAILED
 
+        # Server-side closed set (defense in depth): a compromised client
+        # cannot plant a trusted-looking verification claim.
+        bogus_identity = await append_ticket_note(
+            "CS-705",
+            "summary",
+            {"intent": "x", "verified_identity": "definitely verified"},
+        )
+        assert bogus_identity["error"]["code"] == contract.ERROR_VALIDATION_FAILED
+
         overlong_note = await append_ticket_note(
             "CS-705", "generic", "y" * (contract.NOTE_CONTENT_MAX_LEN + 1)
         )

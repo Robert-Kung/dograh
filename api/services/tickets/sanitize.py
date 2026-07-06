@@ -62,6 +62,34 @@ def require_note_type(value) -> str:
     return value
 
 
+def validate_summary_content(content: dict) -> None:
+    """Server-side posture for summary-shaped note content: reject, don't fix.
+
+    Field whitelist, text/list caps, and — because it lands in front of a
+    human agent as trust signal — `verified_identity` restricted to its
+    closed value set. Shared by the built-in server and the reference
+    server so wrapper engineers copy the strict posture (C6/C8-TRUST).
+    """
+    for key, value in content.items():
+        if key not in contract.SUMMARY_FIELDS:
+            raise TicketValidationError(f"unknown summary field: {key}")
+        if key == "verified_identity":
+            if value not in contract.VERIFIED_IDENTITY_VALUES:
+                raise TicketValidationError(
+                    "verified_identity must be one of "
+                    f"{list(contract.VERIFIED_IDENTITY_VALUES)}"
+                )
+        elif isinstance(value, str):
+            require_text(value, key, contract.SUMMARY_TEXT_MAX_LEN)
+        elif isinstance(value, list):
+            if len(value) > contract.SUMMARY_LIST_MAX_ITEMS:
+                raise TicketValidationError(f"{key} has too many items")
+            for item in value:
+                require_text(str(item), key, contract.SUMMARY_TEXT_MAX_LEN)
+        else:
+            raise TicketValidationError(f"{key} must be a string or list")
+
+
 def clean_summary(summary: dict) -> dict:
     """Coerce a summary onto the fixed contract schema (client pre-send).
 
