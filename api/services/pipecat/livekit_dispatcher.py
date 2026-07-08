@@ -54,13 +54,16 @@ def _sign_agent_token(room_name: str, identity: str) -> str:
 async def dispatch_livekit_call(
     room_name: str,
     resolver: DidResolver,
-    fallback: Callable[[str, str], Awaitable[None]],
+    fallback: Callable[..., Awaitable[None]],
     livekit_url: str | None = None,
 ) -> None:
     """Resolve an inbound LiveKit call and launch the agent (non-blocking).
 
     Never fails silently (C4): unresolved DID or launch error routes to
-    ``fallback(room_name, reason)``.
+    ``fallback(room_name, reason, workflow_run_id=None)``. Real launch
+    failures happen inside the fire-and-forget pipeline task, so the task's
+    done callback — not the synchronous ``try`` — is what routes them to
+    ``fallback`` (S-L3-SAFETYNET).
     """
     did = parse_did_from_room(room_name)
     if not did:
@@ -91,8 +94,21 @@ async def dispatch_livekit_call(
     url = livekit_url or os.environ["LIVEKIT_URL"]
     token = _sign_agent_token(room_name, f"agent-{workflow_run.id}")
 
+    def _on_pipeline_done(task: asyncio.Task) -> None:
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is None:
+            return
+        # Only reached when the pipeline's own safetynet failed to contain the
+        # error — last-resort dispatch-face fallback.
+        logger.opt(exception=exc).error(
+            f"LiveKit pipeline task died for {room_name}: {exc}"
+        )
+        asyncio.create_task(fallback(room_name, "launch_failed", workflow_run.id))
+
     try:
-        asyncio.create_task(
+        task = asyncio.create_task(
             run_pipeline_livekit(
                 url=url,
                 token=token,
@@ -102,6 +118,7 @@ async def dispatch_livekit_call(
                 user_id=user_id,
             )
         )
+        task.add_done_callback(_on_pipeline_done)
     except Exception as e:
         logger.exception(f"LiveKit pipeline launch failed for {room_name}: {e}")
-        await fallback(room_name, "launch_failed")
+        await fallback(room_name, "launch_failed", workflow_run.id)
