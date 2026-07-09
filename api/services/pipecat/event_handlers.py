@@ -69,6 +69,7 @@ def register_event_handlers(
     pre_call_fetch_task: asyncio.Task | None = None,
     user_provider_id: str | None = None,
     integration_runtime_sessions: list[IntegrationRuntimeSession] | None = None,
+    consent_gate=None,
 ):
     """Register all event handlers for transport and task events.
 
@@ -151,6 +152,11 @@ def register_event_handlers(
                         f"Pre-call fetch complete, merged keys: "
                         f"{list(fetch_result.keys())}"
                     )
+
+            # S-L8-RECORD: the recording notice precedes the greeting — both
+            # go through the same FIFO task.queue_frame, so ordering holds.
+            if consent_gate is not None:
+                await consent_gate.play_notice()
 
             # Set the start node now (after pre-call fetch data is merged)
             # so that render_template() has the complete _call_context_vars.
@@ -367,22 +373,31 @@ def register_event_handlers(
         bot_audio_temp_path = None
         transcript_temp_path = None
 
+        # S-L8-RECORD fail-safe: no successfully played notice, no recording
+        # artifacts. Transcript is unaffected (necessary service processing).
+        allow_recording = consent_gate is None or consent_gate.should_record
+        if not allow_recording:
+            logger.info(
+                f"recording skipped for run {workflow_run_id}: consent notice "
+                "not configured or not played (S-L8-RECORD fail-safe)"
+            )
+
         try:
-            if not in_memory_audio_buffers.mixed.is_empty:
+            if allow_recording and not in_memory_audio_buffers.mixed.is_empty:
                 audio_temp_path = (
                     await in_memory_audio_buffers.mixed.write_to_temp_file()
                 )
             else:
                 logger.debug("Audio buffer is empty, skipping upload")
 
-            if not in_memory_audio_buffers.user.is_empty:
+            if allow_recording and not in_memory_audio_buffers.user.is_empty:
                 user_audio_temp_path = (
                     await in_memory_audio_buffers.user.write_to_temp_file()
                 )
             else:
                 logger.debug("User audio buffer is empty, skipping upload")
 
-            if not in_memory_audio_buffers.bot.is_empty:
+            if allow_recording and not in_memory_audio_buffers.bot.is_empty:
                 bot_audio_temp_path = (
                     await in_memory_audio_buffers.bot.write_to_temp_file()
                 )

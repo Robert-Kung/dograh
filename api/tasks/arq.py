@@ -47,6 +47,7 @@ from api.tasks.campaign_tasks import (
     sync_campaign_source,
 )
 from api.tasks.knowledge_base_processing import process_knowledge_base_document
+from api.tasks.recording_retention import enforce_recording_retention
 from api.tasks.run_integrations import run_integrations_post_workflow_run
 from api.tasks.s3_upload import upload_voicemail_audio_to_s3
 from api.tasks.ticket_retention import enforce_ticket_retention
@@ -70,6 +71,8 @@ class WorkerSettings:
     cron_jobs = [
         # PDPA ticket retention (C7) — daily, off-peak UTC.
         cron(enforce_ticket_retention, hour={19}, minute={30}),
+        # PDPA recording retention (S-L8-RECORD) — daily, off-peak UTC.
+        cron(enforce_recording_retention, hour={19}, minute={45}),
     ]
     redis_settings = REDIS_SETTINGS
     max_jobs = 10

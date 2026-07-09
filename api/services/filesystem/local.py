@@ -58,6 +58,15 @@ class LocalFileSystem(BaseFileSystem):
         except Exception:
             return False
 
+    async def adelete_file(self, file_path: str) -> bool:
+        try:
+            full_path = self._get_full_path(file_path)
+            if os.path.exists(full_path):
+                os.remove(full_path)
+            return True
+        except Exception:
+            return False
+
     async def aget_signed_url(
         self, file_path: str, expiration: int = 3600
     ) -> Optional[str]:
