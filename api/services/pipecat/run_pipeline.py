@@ -407,6 +407,21 @@ async def run_pipeline_livekit(
             call_context_vars=call_context_vars,
             user_provider_id=user_provider_id,
         )
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        # S-L3-SAFETYNET: a fatal error anywhere in the LiveKit run — startup
+        # (DB, transport connect) or mid-call — must never strand the caller in
+        # a silent room (C4). Server-side REFER to the fallback queue, or an
+        # explicit room delete; the run-id latch makes this a no-op when the
+        # mid-call safetynet already handled it. Re-raised so the failure stays
+        # visible to error telemetry and the dispatcher's done callback (which
+        # the latch dedupes).
+        logger.exception(f"LiveKit pipeline fatal error for room {room_name}")
+        from api.services.pipecat.livekit_safetynet import server_side_safetynet
+
+        await server_side_safetynet(room_name, "pipeline_exception", workflow_run_id)
+        raise
     finally:
         unregister_active_call(workflow_run_id)
 
@@ -1042,6 +1057,28 @@ async def _run_pipeline_impl(
     )
     task.add_observer(feedback_observer)
 
+    # S-L3-SAFETYNET watchdog (LiveKit only): fatal ErrorFrames and owed-reply
+    # silence trigger a one-shot fallback cold transfer (C4).
+    safetynet_watchdog = None
+    if workflow_run and workflow_run.mode == WorkflowRunMode.LIVEKIT.value:
+        safetynet_room = (workflow_run.initial_context or {}).get("room_name")
+        if safetynet_room:
+            from api.services.pipecat.livekit_safetynet import (
+                SafetynetWatchdog,
+                midcall_safetynet,
+            )
+
+            async def _on_safetynet_fatal(reason: str) -> None:
+                await midcall_safetynet(
+                    engine,
+                    room_name=safetynet_room,
+                    reason=reason,
+                    workflow_run_id=workflow_run_id,
+                )
+
+            safetynet_watchdog = SafetynetWatchdog(on_fatal=_on_safetynet_fatal)
+            task.add_observer(safetynet_watchdog)
+
     # Register latency observer to log user-to-bot response latency
     if task.user_bot_latency_observer:
 
@@ -1107,5 +1144,7 @@ async def _run_pipeline_impl(
         # task-affine; this finally runs in the same task as initialize(),
         # whereas engine.cleanup() runs in a pipecat event-handler task.
         await engine.close_mcp_sessions()
+        if safetynet_watchdog is not None:
+            await safetynet_watchdog.stop()
         await feedback_observer.cleanup()
         logger.debug(f"Cleaned up context providers for workflow run {workflow_run_id}")

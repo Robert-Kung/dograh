@@ -75,6 +75,12 @@ async def lifespan(app: FastAPI):
 
         schedule_startup_check()
 
+        # Fail loudly on malformed safetynet config (S-L3-SAFETYNET, C6): the
+        # dispatch face has no call-time validation hook.
+        from api.services.pipecat.livekit_safetynet import validate_safetynet_config
+
+        validate_safetynet_config()
+
         yield  # Run app
 
         # Shutdown sequence - this runs when FastAPI is shutting down

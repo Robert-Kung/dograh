@@ -54,54 +54,76 @@ def _sign_agent_token(room_name: str, identity: str) -> str:
 async def dispatch_livekit_call(
     room_name: str,
     resolver: DidResolver,
-    fallback: Callable[[str, str], Awaitable[None]],
+    fallback: Callable[[str, str, Optional[int]], Awaitable[None]],
     livekit_url: str | None = None,
 ) -> None:
     """Resolve an inbound LiveKit call and launch the agent (non-blocking).
 
-    Never fails silently (C4): unresolved DID or launch error routes to
-    ``fallback(room_name, reason)``.
+    Never fails silently (C4): unresolved DID or any launch error routes to
+    ``fallback(room_name, reason, workflow_run_id)``. The pipeline itself
+    contains its fatal errors via the safetynet and re-raises; the task's done
+    callback routes the escaped exception back through ``fallback`` as a
+    last resort, deduped by the safetynet's run-id latch (S-L3-SAFETYNET).
     """
     did = parse_did_from_room(room_name)
     if not did:
-        await fallback(room_name, "no_did")
+        await fallback(room_name, "no_did", None)
         return
 
     resolved = await resolver(did)
     if not resolved:
-        await fallback(room_name, "unmapped_did")
+        await fallback(room_name, "unmapped_did", None)
         return
 
     from loguru import logger
 
     from api.db import db_client
     from api.enums import CallType, WorkflowRunMode
+    from api.services.pipecat.livekit_safetynet import spawn
     from api.services.pipecat.run_pipeline import run_pipeline_livekit
 
     workflow_id, user_id = resolved
-    workflow_run = await db_client.create_workflow_run(
-        name=f"livekit-{room_name}",
-        workflow_id=workflow_id,
-        mode=WorkflowRunMode.LIVEKIT.value,
-        user_id=user_id,
-        call_type=CallType.INBOUND,
-        initial_context={"did": did, "room_name": room_name, "direction": "inbound"},
-    )
-
-    url = livekit_url or os.environ["LIVEKIT_URL"]
-    token = _sign_agent_token(room_name, f"agent-{workflow_run.id}")
-
+    workflow_run_id: Optional[int] = None
     try:
-        asyncio.create_task(
+        workflow_run = await db_client.create_workflow_run(
+            name=f"livekit-{room_name}",
+            workflow_id=workflow_id,
+            mode=WorkflowRunMode.LIVEKIT.value,
+            user_id=user_id,
+            call_type=CallType.INBOUND,
+            initial_context={
+                "did": did,
+                "room_name": room_name,
+                "direction": "inbound",
+            },
+        )
+        workflow_run_id = workflow_run.id
+
+        url = livekit_url or os.environ["LIVEKIT_URL"]
+        token = _sign_agent_token(room_name, f"agent-{workflow_run_id}")
+
+        def _on_pipeline_done(task: asyncio.Task) -> None:
+            if task.cancelled():
+                return
+            exc = task.exception()
+            if exc is None:
+                return
+            logger.opt(exception=exc).error(
+                f"LiveKit pipeline task died for {room_name}: {exc}"
+            )
+            spawn(fallback(room_name, "launch_failed", workflow_run_id))
+
+        task = asyncio.create_task(
             run_pipeline_livekit(
                 url=url,
                 token=token,
                 room_name=room_name,
                 workflow_id=workflow_id,
-                workflow_run_id=workflow_run.id,
+                workflow_run_id=workflow_run_id,
                 user_id=user_id,
             )
         )
+        task.add_done_callback(_on_pipeline_done)
     except Exception as e:
         logger.exception(f"LiveKit pipeline launch failed for {room_name}: {e}")
-        await fallback(room_name, "launch_failed")
+        await fallback(room_name, "launch_failed", workflow_run_id)
