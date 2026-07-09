@@ -5,15 +5,6 @@ import asyncio
 import types
 
 import pytest
-
-from api.services.pipecat import livekit_safetynet as sn
-from api.services.pipecat.livekit_safetynet import (
-    SafetynetWatchdog,
-    claim,
-    midcall_safetynet,
-    server_side_safetynet,
-    validate_safetynet_config,
-)
 from pipecat.frames.frames import (
     BotStartedSpeakingFrame,
     ClientConnectedFrame,
@@ -24,11 +15,21 @@ from pipecat.frames.frames import (
     VADUserStartedSpeakingFrame,
 )
 
+from api.services.pipecat import livekit_safetynet as sn
+from api.services.pipecat.livekit_safetynet import (
+    SafetynetWatchdog,
+    claim,
+    midcall_safetynet,
+    release,
+    server_side_safetynet,
+    validate_safetynet_config,
+)
+
 
 @pytest.fixture(autouse=True)
 def _reset_latch():
-    sn._fired_rooms.clear()
-    sn._fired_history.clear()
+    sn._fired_runs.clear()
+    sn._fired_order.clear()
     yield
 
 
@@ -44,8 +45,6 @@ def events(monkeypatch):
 
 
 def _fake_lk(participants, *, raise_on_transfer=False):
-    from api.services.pipecat.livekit_cold_transfer import SIP_KIND  # noqa: F401
-
     captured = {"deleted": [], "transfers": []}
 
     async def list_participants(req):
@@ -71,6 +70,13 @@ def _sip_caller():
     from api.services.pipecat.livekit_cold_transfer import SIP_KIND
 
     return types.SimpleNamespace(kind=SIP_KIND, identity="sip_abc")
+
+
+async def await_fallback(fallback_coro):
+    """Await the route's _fallback and the background safetynet task it spawns."""
+    task = await fallback_coro
+    if task is not None:
+        await task
 
 
 # --- config validation (1.1) ---
@@ -105,13 +111,33 @@ def test_validate_config_nonpositive_seconds_fails(monkeypatch):
         validate_safetynet_config()
 
 
-# --- once-per-call latch ---
+# --- once-per-run latch ---
 
 
-def test_claim_is_sticky():
-    assert claim("cs-+886900")
-    assert not claim("cs-+886900")
-    assert claim("cs-+886901")
+def test_claim_is_sticky_per_run():
+    assert claim(41)
+    assert not claim(41)
+    assert claim(42)
+
+
+def test_claim_without_run_id_never_latches():
+    # Pre-run dispatch failures repeat per DID (room names are cs-<DID>);
+    # latching them would poison the phone number for later calls.
+    assert claim(None)
+    assert claim(None)
+
+
+def test_release_reopens_claim():
+    assert claim(41)
+    release(41)
+    assert claim(41)
+
+
+def test_claim_evicts_oldest_beyond_cap():
+    for i in range(sn._MAX_FIRED + 1):
+        assert claim(i)
+    assert claim(0)  # evicted, claimable again
+    assert not claim(sn._MAX_FIRED)
 
 
 # --- dispatch face (2.x) ---
@@ -123,7 +149,6 @@ async def test_non_cs_room_ignored(monkeypatch, events):
     await server_side_safetynet("playground-room", "no_did", lk=lk)
     assert cap["transfers"] == [] and cap["deleted"] == []
     assert events == []
-    assert claim("playground-room")  # latch untouched
 
 
 @pytest.mark.asyncio
@@ -176,13 +201,26 @@ async def test_dispatch_unconfigured_queue_deletes_room(monkeypatch, events):
 
 
 @pytest.mark.asyncio
-async def test_dispatch_second_trigger_skipped(monkeypatch, events):
+async def test_dispatch_second_trigger_same_run_skipped(monkeypatch, events):
     monkeypatch.setenv("SAFETYNET_FALLBACK_QUEUE", "tel:+886900000000")
     lk, cap = _fake_lk([_sip_caller()])
-    await server_side_safetynet("cs-+886912", "launch_failed", lk=lk)
-    await server_side_safetynet("cs-+886912", "pipeline_exception", lk=lk)
+    await server_side_safetynet("cs-+886912", "launch_failed", workflow_run_id=9, lk=lk)
+    await server_side_safetynet(
+        "cs-+886912", "pipeline_exception", workflow_run_id=9, lk=lk
+    )
     assert cap["transfers"] == ["tel:+886900000000"]
     assert len([e for e in events if e["event"] == "safetynet.triggered"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_dispatch_next_call_same_room_not_poisoned(monkeypatch, events):
+    """Room names repeat per DID (cs-{call.to}): a fired safetynet for one call
+    must not block the next call's safetynet on the same number."""
+    monkeypatch.setenv("SAFETYNET_FALLBACK_QUEUE", "tel:+886900000000")
+    lk, cap = _fake_lk([_sip_caller()])
+    await server_side_safetynet("cs-+886912", "launch_failed", workflow_run_id=1, lk=lk)
+    await server_side_safetynet("cs-+886912", "launch_failed", workflow_run_id=2, lk=lk)
+    assert len(cap["transfers"]) == 2
 
 
 @pytest.mark.asyncio
@@ -225,6 +263,32 @@ async def test_launch_failed_via_done_callback(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_prelaunch_failure_routes_to_fallback(monkeypatch):
+    """DB/env/token failures before the task exists must also hit fallback,
+    not escape to the webhook handler as a 500."""
+    from api.services.pipecat import livekit_dispatcher
+
+    async def resolver(did):
+        return (1, 2)
+
+    async def broken_create_workflow_run(**kw):
+        raise RuntimeError("db blip")
+
+    fb = {}
+
+    async def fallback(room, reason, workflow_run_id=None):
+        fb.update(reason=reason, workflow_run_id=workflow_run_id)
+
+    from api.db import db_client
+
+    monkeypatch.setattr(db_client, "create_workflow_run", broken_create_workflow_run)
+    await livekit_dispatcher.dispatch_livekit_call(
+        "cs-+886912345678", resolver, fallback
+    )
+    assert fb == {"reason": "launch_failed", "workflow_run_id": None}
+
+
+@pytest.mark.asyncio
 async def test_route_fallback_wired_to_safetynet(monkeypatch):
     from api.routes import livekit as livekit_route
 
@@ -234,7 +298,7 @@ async def test_route_fallback_wired_to_safetynet(monkeypatch):
         called.update(room=room, reason=reason, workflow_run_id=workflow_run_id)
 
     monkeypatch.setattr(sn, "server_side_safetynet", fake_safetynet)
-    await livekit_route._fallback("cs-+886912", "no_did")
+    await await_fallback(livekit_route._fallback("cs-+886912", "no_did"))
     assert called == {"room": "cs-+886912", "reason": "no_did", "workflow_run_id": None}
 
 
@@ -246,16 +310,17 @@ async def test_e2e_route_fallback_refers_caller(monkeypatch, events):
     from api.services.pipecat import livekit_cold_transfer
 
     monkeypatch.setenv("SAFETYNET_FALLBACK_QUEUE", "sip:queue@pbx.example")
+    monkeypatch.setenv("LIVEKIT_URL", "ws://test")
+    monkeypatch.setenv("LIVEKIT_API_KEY", "k")
+    monkeypatch.setenv("LIVEKIT_API_SECRET", "s")
     captured = {}
 
     async def fake_transfer(room, destination, **kwargs):
         captured.update(room=room, destination=destination)
         return {"status": "success", "action": "transferred"}
 
-    monkeypatch.setattr(
-        livekit_cold_transfer, "cold_transfer_to_human", fake_transfer
-    )
-    await livekit_route._fallback("cs-+886912345678", "unmapped_did")
+    monkeypatch.setattr(livekit_cold_transfer, "cold_transfer_to_human", fake_transfer)
+    await await_fallback(livekit_route._fallback("cs-+886912345678", "unmapped_did"))
     assert captured == {
         "room": "cs-+886912345678",
         "destination": "sip:queue@pbx.example",
@@ -312,11 +377,15 @@ async def test_midcall_bypasses_business_hours(monkeypatch, events):
         monkeypatch, {"status": "success", "action": "transferred"}
     )
     engine, frames, _ = _fake_engine()
-    await midcall_safetynet(engine, room_name="cs-+886912", reason="bot_silence")
+    await midcall_safetynet(
+        engine, room_name="cs-+886912", reason="bot_silence", workflow_run_id=11
+    )
     assert captured["schedule"] is None
     assert captured["destination"] == "tel:+886900000000"
     assert captured["transfer_reason"] == "safetynet"
-    assert any("轉接專員" in getattr(f, "text", "") for f in frames)  # pre-REFER announce
+    assert any(
+        "轉接專員" in getattr(f, "text", "") for f in frames
+    )  # pre-REFER announce
     assert [e["event"] for e in events] == [
         "safetynet.triggered",
         "safetynet.transfer_ok",
@@ -330,7 +399,9 @@ async def test_midcall_destination_falls_back_to_workflow_config(monkeypatch, ev
         monkeypatch, {"status": "success", "action": "transferred"}
     )
     engine, _, _ = _fake_engine()
-    await midcall_safetynet(engine, room_name="cs-+886912", reason="fatal_error")
+    await midcall_safetynet(
+        engine, room_name="cs-+886912", reason="fatal_error", workflow_run_id=11
+    )
     assert captured["destination"] == "tel:+886955555555"
 
 
@@ -342,7 +413,9 @@ async def test_midcall_failure_announces_and_ends(monkeypatch, events):
         {"status": "failed", "action": "transfer_failed", "reason": "sip_refer_error"},
     )
     engine, frames, calls = _fake_engine()
-    await midcall_safetynet(engine, room_name="cs-+886912", reason="bot_silence")
+    await midcall_safetynet(
+        engine, room_name="cs-+886912", reason="bot_silence", workflow_run_id=11
+    )
     assert any("請稍後再撥" in getattr(f, "text", "") for f in frames)
     assert calls == ["pipeline_error"]
     assert [e["event"] for e in events] == [
@@ -364,7 +437,9 @@ async def test_midcall_yields_to_inflight_transfer(monkeypatch, events):
         },
     )
     engine, _, calls = _fake_engine()
-    await midcall_safetynet(engine, room_name="cs-+886912", reason="fatal_error")
+    await midcall_safetynet(
+        engine, room_name="cs-+886912", reason="fatal_error", workflow_run_id=11
+    )
     assert calls == []  # the in-flight transfer owns the exit
     assert [e["event"] for e in events] == ["safetynet.triggered"]
 
@@ -382,12 +457,20 @@ async def test_midcall_engine_exception_falls_back_to_server_side(monkeypatch, e
     called = {}
 
     async def fake_server_side(room, reason, workflow_run_id=None, lk=None):
-        called.update(room=room, reason=reason)
+        called.update(room=room, reason=reason, workflow_run_id=workflow_run_id)
 
     monkeypatch.setattr(sn, "server_side_safetynet", fake_server_side)
     engine, _, _ = _fake_engine()
-    await midcall_safetynet(engine, room_name="cs-+886912", reason="bot_silence")
-    assert called == {"room": "cs-+886912", "reason": "midcall_safetynet_error"}
+    await midcall_safetynet(
+        engine, room_name="cs-+886912", reason="bot_silence", workflow_run_id=11
+    )
+    # release() reopened the claim so the server-side path can take over
+    assert called == {
+        "room": "cs-+886912",
+        "reason": "midcall_safetynet_error",
+        "workflow_run_id": 11,
+    }
+    assert claim(11)
 
 
 @pytest.mark.asyncio
@@ -398,9 +481,13 @@ async def test_midcall_second_trigger_skipped(monkeypatch, events):
         {"status": "failed", "action": "transfer_failed", "reason": "sip_refer_error"},
     )
     engine, _, _ = _fake_engine()
-    await midcall_safetynet(engine, room_name="cs-+886912", reason="bot_silence")
+    await midcall_safetynet(
+        engine, room_name="cs-+886912", reason="bot_silence", workflow_run_id=11
+    )
     captured.clear()
-    await midcall_safetynet(engine, room_name="cs-+886912", reason="fatal_error")
+    await midcall_safetynet(
+        engine, room_name="cs-+886912", reason="fatal_error", workflow_run_id=11
+    )
     assert captured == {}  # sticky latch: no second transfer even after failure
 
 
@@ -432,7 +519,8 @@ async def test_watchdog_fires_on_owed_reply_silence():
     assert not wd.due(t[0])
     t[0] = 8.1
     assert wd.due(t[0])
-    await wd._fire("bot_silence")
+    wd._fire("bot_silence")
+    await asyncio.sleep(0)
     assert fired == ["bot_silence"]
     await wd.stop()
 
@@ -507,9 +595,31 @@ async def test_watchdog_fatal_error_fires_immediately():
     t, fired = [0.0], []
     wd = _watchdog(t, fired)
     await wd.on_push_frame(_push(ErrorFrame("llm dead", fatal=True)))
+    await asyncio.sleep(0)
     assert fired == ["fatal_error"]
     await wd.on_push_frame(_push(ErrorFrame("stt dead", fatal=True)))
+    await asyncio.sleep(0)
     assert fired == ["fatal_error"]  # fires once
+    await wd.stop()
+
+
+@pytest.mark.asyncio
+async def test_watchdog_fatal_error_does_not_block_frame_path():
+    """on_push_frame is awaited inline on the frame path; the safetynet's
+    announce + REFER I/O must run in a background task, not inline."""
+    started = asyncio.Event()
+    release_cb = asyncio.Event()
+
+    async def slow_on_fatal(reason):
+        started.set()
+        await release_cb.wait()
+
+    wd = SafetynetWatchdog(on_fatal=slow_on_fatal, threshold_seconds=8.0)
+    await asyncio.wait_for(
+        wd.on_push_frame(_push(ErrorFrame("llm dead", fatal=True))), timeout=1.0
+    )
+    await asyncio.wait_for(started.wait(), timeout=1.0)
+    release_cb.set()
     await wd.stop()
 
 
@@ -518,6 +628,7 @@ async def test_watchdog_nonfatal_error_ignored():
     t, fired = [0.0], []
     wd = _watchdog(t, fired)
     await wd.on_push_frame(_push(ErrorFrame("transient", fatal=False)))
+    await asyncio.sleep(0)
     assert fired == []
     await wd.stop()
 
@@ -529,9 +640,7 @@ async def test_watchdog_monitor_loop_fires():
     async def on_fatal(reason):
         fired.append(reason)
 
-    wd = SafetynetWatchdog(
-        on_fatal=on_fatal, threshold_seconds=0.02, poll_seconds=0.01
-    )
+    wd = SafetynetWatchdog(on_fatal=on_fatal, threshold_seconds=0.02, poll_seconds=0.01)
     await wd.on_push_frame(_push(UserStoppedSpeakingFrame()))
     await asyncio.sleep(0.1)
     assert fired == ["bot_silence"]

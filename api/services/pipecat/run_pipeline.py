@@ -413,12 +413,15 @@ async def run_pipeline_livekit(
         # S-L3-SAFETYNET: a fatal error anywhere in the LiveKit run — startup
         # (DB, transport connect) or mid-call — must never strand the caller in
         # a silent room (C4). Server-side REFER to the fallback queue, or an
-        # explicit room delete; the room-level latch makes this a no-op when
-        # the mid-call safetynet already handled it.
+        # explicit room delete; the run-id latch makes this a no-op when the
+        # mid-call safetynet already handled it. Re-raised so the failure stays
+        # visible to error telemetry and the dispatcher's done callback (which
+        # the latch dedupes).
         logger.exception(f"LiveKit pipeline fatal error for room {room_name}")
         from api.services.pipecat.livekit_safetynet import server_side_safetynet
 
         await server_side_safetynet(room_name, "pipeline_exception", workflow_run_id)
+        raise
     finally:
         unregister_active_call(workflow_run_id)
 

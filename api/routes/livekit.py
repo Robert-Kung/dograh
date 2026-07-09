@@ -22,14 +22,14 @@ async def _did_resolver(did: str) -> tuple[int, int] | None:
     return await db_client.find_inbound_workflow_for_did(did)
 
 
-async def _fallback(
-    room_name: str, reason: str, workflow_run_id: int | None = None
-) -> None:
+async def _fallback(room_name: str, reason: str, workflow_run_id: int | None = None):
     # C4: never silent — REFER the caller to the fallback human queue, or end
-    # the call explicitly. Non-cs- rooms are logged and left alone.
-    from api.services.pipecat.livekit_safetynet import server_side_safetynet
+    # the call explicitly. Runs in the background: the safetynet does SIP
+    # REFER network I/O and the webhook must ack fast (a slow response makes
+    # LiveKit redeliver room_started). Non-cs- rooms are logged and left alone.
+    from api.services.pipecat.livekit_safetynet import server_side_safetynet, spawn
 
-    await server_side_safetynet(room_name, reason, workflow_run_id)
+    return spawn(server_side_safetynet(room_name, reason, workflow_run_id))
 
 
 def _verify(body: bytes, auth_header: str):

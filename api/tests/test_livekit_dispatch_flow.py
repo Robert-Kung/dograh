@@ -51,7 +51,7 @@ async def test_unmapped_did_routes_to_fallback():
     async def resolver(did):
         return None
 
-    async def fallback(room, reason):
+    async def fallback(room, reason, workflow_run_id=None):
         fb["room"], fb["reason"] = room, reason
 
     await dispatch_livekit_call("cs-+886912345678", resolver, fallback)
@@ -65,7 +65,7 @@ async def test_no_did_routes_to_fallback():
     async def resolver(did):
         raise AssertionError("resolver should not run without a DID")
 
-    async def fallback(room, reason):
+    async def fallback(room, reason, workflow_run_id=None):
         fb["reason"] = reason
 
     await dispatch_livekit_call("garbage-room", resolver, fallback)
