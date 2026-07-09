@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 from pipecat.processors.aggregators.llm_context import LLMSpecificMessage
+from pipecat.tests import MockLLMService
 
 from api.db.models import OrganizationModel, UserModel
 from api.schemas.ai_model_configuration import EffectiveAIModelConfiguration
@@ -12,7 +13,6 @@ from api.services.workflow.text_chat_runner import (
     _serialize_text_chat_checkpoint_messages,
 )
 from api.tests.integrations._run_pipeline_helpers import USER_CONFIGURATION
-from pipecat.tests import MockLLMService
 
 
 def _log_texts(logs: dict | None, event_type: str) -> list[str]:

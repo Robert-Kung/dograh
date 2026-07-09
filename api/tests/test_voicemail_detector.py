@@ -25,6 +25,7 @@ from pipecat.processors.aggregators.llm_response_universal import (
     LLMUserAggregatorParams,
 )
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
+from pipecat.tests import MockLLMService
 from pipecat.turns.user_start import (
     TranscriptionUserTurnStartStrategy,
     VADUserTurnStartStrategy,
@@ -36,7 +37,6 @@ from pipecat.turns.user_turn_strategies import UserTurnStrategies
 from pipecat.utils.time import time_now_iso8601
 
 from api.services.pipecat.worker_runner import run_pipeline_worker
-from pipecat.tests import MockLLMService
 
 
 class FrameInjector(FrameProcessor):
