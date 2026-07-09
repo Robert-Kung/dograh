@@ -214,6 +214,12 @@ def retention_env(monkeypatch):
     monkeypatch.setattr(db_client, "clear_recording_artifacts", fake_clear)
     monkeypatch.setattr(db_client, "create_recording_retention_audit", fake_audit)
     monkeypatch.setattr(rr, "get_storage_for_backend", lambda backend: state["fs"])
+    state["events"] = []
+    monkeypatch.setattr(
+        rr,
+        "log_retention_event",
+        lambda run_id, keys, days: state["events"].append(run_id),
+    )
     return state
 
 
@@ -243,6 +249,7 @@ async def test_retention_deletes_all_tracks_and_audits(retention_env):
     assert retention_env["cleared"] == [1]
     assert retention_env["audits"][0]["result"] == "ok"
     assert retention_env["audits"][0]["retention_days"] == 180
+    assert retention_env["events"] == [1]  # retention.recording_deleted emitted
 
 
 @pytest.mark.asyncio
@@ -253,6 +260,7 @@ async def test_retention_single_failure_continues_batch(retention_env):
     retention_env["runs"] = [_run(1), _run(2)]
     await enforce_recording_retention(None)
     assert retention_env["cleared"] == [2]  # run 1 left for the next sweep
+    assert retention_env["events"] == [2]  # no deletion event for the failed run
     results = {a["run_id"]: a["result"] for a in retention_env["audits"]}
     assert results[1].startswith("failed")
     assert results[2] == "ok"

@@ -17,6 +17,23 @@ from api.services.storage import get_storage_for_backend
 from api.utils.recording_artifacts import get_recording_storage_key
 
 
+def log_retention_event(
+    workflow_run_id: int, object_keys: list[str], days: int
+) -> None:
+    """Structured ``retention.recording_deleted`` event (S-L7-OBS field shape)."""
+    logger.bind(
+        call_event="retention.recording_deleted",
+        room_name="",
+        reason=f"retention_days={days}",
+        workflow_run_id=workflow_run_id,
+        elapsed_ms=None,
+        object_keys=object_keys,
+    ).warning(
+        f"retention.recording_deleted workflow_run_id={workflow_run_id} "
+        f"keys={len(object_keys)} retention_days={days}"
+    )
+
+
 def _object_keys(run) -> list[str]:
     keys = [run.recording_url]
     for track in ("user", "bot"):
@@ -48,6 +65,7 @@ async def enforce_recording_retention(_ctx) -> None:
             await db_client.create_recording_retention_audit(
                 run.id, object_keys=keys, retention_days=days, result="ok"
             )
+            log_retention_event(run.id, keys, days)
             deleted += 1
         except Exception as e:
             # Leave the row intact — recording_url still set means the next
