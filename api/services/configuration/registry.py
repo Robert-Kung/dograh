@@ -843,7 +843,11 @@ class DeepgramTTSConfiguration(BaseServiceConfiguration):
             return "aura-2"
 
 
-ELEVENLABS_TTS_MODELS = ["eleven_flash_v2_5"]
+ELEVENLABS_TTS_MODELS = [
+    "eleven_flash_v2_5",
+    "eleven_turbo_v2_5",
+    "eleven_multilingual_v2",
+]
 
 
 @register_tts
@@ -857,8 +861,14 @@ class ElevenlabsTTSConfiguration(BaseServiceConfiguration):
     speed: float = Field(default=1.0, ge=0.1, le=2.0, description="Speed of the voice.")
     model: str = Field(
         default="eleven_flash_v2_5",
-        description="ElevenLabs TTS model.",
-        json_schema_extra={"examples": ELEVENLABS_TTS_MODELS},
+        description=(
+            "ElevenLabs TTS model. eleven_multilingual_v2 covers zh; "
+            "flash/turbo v2.5 are the low-latency options."
+        ),
+        json_schema_extra={
+            "examples": ELEVENLABS_TTS_MODELS,
+            "allow_custom_input": True,
+        },
     )
     base_url: str = Field(
         default="https://api.elevenlabs.io",
@@ -877,8 +887,9 @@ class GoogleTTSConfiguration(BaseTTSConfiguration):
     model: str = Field(
         default="chirp_3_hd",
         description=(
-            "Google Cloud low-latency TTS engine. Dograh maps this to Pipecat's "
-            "streaming Google TTS service for Chirp 3 HD and Journey voices."
+            "Google Cloud TTS engine hint. The voice name decides the transport: "
+            "Chirp 3 HD / Journey voices stream; other voice families "
+            "(Wavenet/Standard/Neural2, e.g. the cmn-TW voices) use the HTTP API."
         ),
         json_schema_extra={
             "examples": GOOGLE_TTS_MODELS,
@@ -887,7 +898,11 @@ class GoogleTTSConfiguration(BaseTTSConfiguration):
     )
     voice: str = Field(
         default="en-US-Chirp3-HD-Charon",
-        description="Google Cloud voice name. Use a Chirp 3 HD or Journey voice for streaming TTS.",
+        description=(
+            "Google Cloud voice name. Chirp 3 HD / Journey voices use streaming "
+            "TTS; Wavenet/Standard/Neural2 voices (e.g. 'cmn-TW-Wavenet-A') use "
+            "the HTTP synthesize API."
+        ),
         json_schema_extra={
             "examples": GOOGLE_TTS_VOICES,
             "allow_custom_input": True,
@@ -1349,7 +1364,7 @@ class CartesiaSTTConfiguration(BaseSTTConfiguration):
     )
 
 
-OPENAI_STT_MODELS = ["gpt-4o-transcribe"]
+OPENAI_STT_MODELS = ["gpt-4o-transcribe", "gpt-4o-mini-transcribe"]
 
 
 @register_stt
@@ -1358,8 +1373,14 @@ class OpenAISTTConfiguration(BaseSTTConfiguration):
     provider: Literal[ServiceProviders.OPENAI] = ServiceProviders.OPENAI
     model: str = Field(
         default="gpt-4o-transcribe",
-        description="OpenAI transcription model.",
-        json_schema_extra={"examples": OPENAI_STT_MODELS},
+        description=(
+            "OpenAI transcription model. Custom values are allowed for "
+            "OpenAI-compatible endpoints (see base_url)."
+        ),
+        json_schema_extra={
+            "examples": OPENAI_STT_MODELS,
+            "allow_custom_input": True,
+        },
     )
     base_url: str = Field(
         default="https://api.openai.com/v1",

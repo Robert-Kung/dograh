@@ -42,7 +42,12 @@ from pipecat.services.elevenlabs.tts import ElevenLabsTTSService, ElevenLabsTTSS
 from pipecat.services.gladia.stt import GladiaSTTService, GladiaSTTSettings
 from pipecat.services.google.llm import GoogleLLMService, GoogleLLMSettings
 from pipecat.services.google.stt import GoogleSTTService, GoogleSTTSettings
-from pipecat.services.google.tts import GoogleTTSService, GoogleTTSSettings
+from pipecat.services.google.tts import (
+    GoogleHttpTTSService,
+    GoogleHttpTTSSettings,
+    GoogleTTSService,
+    GoogleTTSSettings,
+)
 from pipecat.services.google.vertex.llm import (
     GoogleVertexLLMService,
     GoogleVertexLLMSettings,
@@ -464,18 +469,35 @@ def create_tts_service(
         location = getattr(user_config.tts, "location", None) or None
         credentials = getattr(user_config.tts, "credentials", None)
 
-        settings_kwargs = {
-            "model": model,
-            "voice": voice,
-            "language": language,
-        }
-        if speed is not None and speed != 1.0:
-            settings_kwargs["speaking_rate"] = speed
+        # Streaming Google TTS serves only Chirp 3 HD / Journey voices. Every
+        # other voice family (Wavenet/Standard/Neural2 — including the only
+        # cmn-TW voices) must go through the HTTP synthesize API.
+        if "Chirp3-HD" in voice or "Journey" in voice:
+            settings_kwargs = {
+                "model": model,
+                "voice": voice,
+                "language": language,
+            }
+            if speed is not None and speed != 1.0:
+                settings_kwargs["speaking_rate"] = speed
 
-        return GoogleTTSService(
+            return GoogleTTSService(
+                credentials=credentials,
+                location=location,
+                settings=GoogleTTSSettings(**settings_kwargs),
+                text_filters=[xml_function_tag_filter],
+                skip_aggregator_types=["recording_router", "recording"],
+                silence_time_s=1.0,
+            )
+
+        http_settings_kwargs = {"voice": voice, "language": language}
+        if speed is not None and speed != 1.0:
+            http_settings_kwargs["speaking_rate"] = speed
+
+        return GoogleHttpTTSService(
             credentials=credentials,
             location=location,
-            settings=GoogleTTSSettings(**settings_kwargs),
+            settings=GoogleHttpTTSSettings(**http_settings_kwargs),
             text_filters=[xml_function_tag_filter],
             skip_aggregator_types=["recording_router", "recording"],
             silence_time_s=1.0,
