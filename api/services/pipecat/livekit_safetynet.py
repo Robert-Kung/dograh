@@ -37,8 +37,13 @@ from typing import Optional
 
 from loguru import logger
 
+from api.services.observability import call_events
+from api.services.observability.call_outcome import record_call_outcome
 from api.services.pipecat.livekit_dispatcher import DEFAULT_ROOM_PREFIX
 from api.services.pipecat.livekit_transfer_flow import valid_destination
+from api.utils.background import (
+    spawn,  # noqa: F401 — re-export; callers import from here
+)
 from pipecat.frames.frames import (
     BotStartedSpeakingFrame,
     ClientConnectedFrame,
@@ -58,18 +63,6 @@ _ANNOUNCE_TIMEOUT_SECONDS = 2.0
 _MAX_FIRED = 1024
 _fired_runs: set[int] = set()
 _fired_order: deque = deque()
-
-# Strong refs for fire-and-forget safetynet tasks: the event loop only holds a
-# weak reference, and a GC'd task would silently drop the last-resort fallback.
-_background_tasks: set = set()
-
-
-def spawn(coro) -> asyncio.Task:
-    """Run ``coro`` in the background, holding a strong reference until done."""
-    task = asyncio.create_task(coro)
-    _background_tasks.add(task)
-    task.add_done_callback(_background_tasks.discard)
-    return task
 
 
 def fallback_queue() -> Optional[str]:
@@ -112,16 +105,18 @@ def log_event(
     workflow_run_id: Optional[int] = None,
     elapsed_ms: Optional[int] = None,
 ) -> None:
-    """Emit one structured ``safetynet.*`` event (S-L7-OBS contract)."""
-    logger.bind(
-        safetynet_event=event,
+    """Emit one structured ``safetynet.*`` event (S-L7-OBS contract).
+
+    Event names and fields are the published contract; delivery goes through
+    the unified call-event path (structured log + alerting).
+    """
+    call_events.emit(
+        event,
         room_name=room_name,
         reason=reason,
         workflow_run_id=workflow_run_id,
         elapsed_ms=elapsed_ms,
-    ).warning(
-        f"{event} room={room_name} reason={reason} "
-        f"workflow_run_id={workflow_run_id} elapsed_ms={elapsed_ms}"
+        safetynet_event=event,  # published bind key from S-L3-SAFETYNET — keep
     )
 
 
@@ -212,6 +207,12 @@ async def server_side_safetynet(
                         workflow_run_id=workflow_run_id,
                         elapsed_ms=_elapsed(),
                     )
+                    await record_call_outcome(
+                        None,
+                        workflow_run_id,
+                        outcome="transferred:safetynet",
+                        transfer_reason="safetynet",
+                    )
                     return
                 log_event(
                     "safetynet.transfer_failed",
@@ -232,6 +233,12 @@ async def server_side_safetynet(
             reason=reason,
             workflow_run_id=workflow_run_id,
             elapsed_ms=_elapsed(),
+        )
+        await record_call_outcome(
+            None,
+            workflow_run_id,
+            outcome="safetynet_terminated",
+            transfer_reason="safetynet",
         )
     except Exception as e:
         # Last resort: the safetynet itself must never take the process down.
@@ -343,6 +350,12 @@ async def midcall_safetynet(
             workflow_run_id=workflow_run_id,
             elapsed_ms=_elapsed(),
         )
+        await record_call_outcome(
+            engine,
+            workflow_run_id,
+            outcome="safetynet_terminated",
+            transfer_reason="safetynet",
+        )
     except Exception as e:
         logger.exception(f"mid-call safetynet failed for {room_name}: {e}")
         # The engine is too broken to end the call itself — server-side exit.
@@ -381,10 +394,17 @@ class SafetynetWatchdog(BaseObserver):
         threshold_seconds: Optional[float] = None,
         poll_seconds: float = 0.5,
         clock: Callable[[], float] = time.monotonic,
+        room_name: Optional[str] = None,
+        workflow_run_id: Optional[int] = None,
         **kwargs,
     ):
         super().__init__(**kwargs)
         self._on_fatal = on_fatal
+        self._room_name = room_name
+        self._workflow_run_id = workflow_run_id
+        # An ErrorFrame is observed once per processor hop; dedup by frame id
+        # so one provider error counts once in the alert window (S-L7-OBS).
+        self._seen_errors: deque = deque(maxlen=100)
         self._threshold = (
             threshold_seconds
             if threshold_seconds is not None
@@ -411,6 +431,14 @@ class SafetynetWatchdog(BaseObserver):
         if isinstance(frame, ErrorFrame):
             if frame.fatal:
                 self._fire("fatal_error")
+            elif frame.id not in self._seen_errors:
+                self._seen_errors.append(frame.id)
+                call_events.emit(
+                    "provider.error",
+                    room_name=self._room_name or "",
+                    reason=str(frame.error)[:200],
+                    workflow_run_id=self._workflow_run_id,
+                )
             return
 
         if isinstance(frame, (ClientConnectedFrame, UserStoppedSpeakingFrame)):

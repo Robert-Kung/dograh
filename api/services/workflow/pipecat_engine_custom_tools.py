@@ -26,7 +26,6 @@ from api.enums import ToolCategory, WorkflowRunMode
 from api.services.pipecat.audio_playback import play_audio, play_audio_loop
 from api.services.pipecat.livekit_transfer_flow import (
     execute_cold_transfer,
-    valid_destination,
 )
 from api.services.telephony.call_transfer_manager import get_call_transfer_manager
 from api.services.telephony.factory import get_telephony_provider_for_run
@@ -835,22 +834,29 @@ class CustomToolManager:
         """LIVEKIT cold transfer via the shared business-hours-gated preamble
         (S-L3-PRESS0): destination validated (C6), then REFER in hours / configured
         after-hours behavior out of hours. Failures stay structured (C4)."""
+        # transfer_to is config-driven (tel:+E164 or sip:queue@host), never
+        # caller input (C6); execute_cold_transfer validates it and emits the
+        # transfer.failed event on a config typo (S-L7-OBS).
         destination = config.get("destination", "").strip()
-        # transfer_to is config-driven (tel:+E164 or sip:queue@host), never caller input.
-        if not valid_destination(destination):
-            await self._handle_transfer_result(
-                {
-                    "status": "failed",
-                    "action": "transfer_failed",
-                    "reason": "invalid_destination",
-                },
-                function_call_params,
-                properties,
-            )
-            return
 
         room_name = (workflow_run.initial_context or {}).get("room_name")
         if not room_name:
+            from api.services.observability.call_events import emit
+            from api.services.observability.call_outcome import record_call_outcome
+
+            emit(
+                "transfer.failed",
+                room_name="",
+                reason="no_room",
+                workflow_run_id=workflow_run.id,
+                transfer_reason="voice_tool",
+            )
+            await record_call_outcome(
+                self._engine,
+                workflow_run.id,
+                outcome="transfer_failed:voice_tool",
+                transfer_reason="voice_tool",
+            )
             await self._handle_transfer_result(
                 {
                     "status": "failed",

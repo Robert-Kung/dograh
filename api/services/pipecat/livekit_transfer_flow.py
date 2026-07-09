@@ -91,12 +91,15 @@ async def _do_refer(
     the outcome is known. An unconfigured or failing handoff changes nothing
     about the transfer itself (C4/D5).
     """
+    from api.services.observability.call_events import emit
+    from api.services.observability.call_outcome import record_call_outcome
     from api.services.pipecat.livekit_cold_transfer import cold_transfer_to_human
     from api.services.pipecat.transfer_context_handoff import (
         finalize_transfer_handoff,
         prepare_transfer_handoff,
     )
     from pipecat.utils.enums import EndTaskReason
+    from pipecat.utils.run_context import get_current_run_id
 
     plan = await prepare_transfer_handoff(
         engine, room_name=room_name, transfer_reason=transfer_reason, lk=lk
@@ -110,7 +113,35 @@ async def _do_refer(
     )
     if plan is not None:
         await finalize_transfer_handoff(plan, result.get("status", "failed"))
-    if result.get("status") == "success":
+
+    # S-L7-OBS: every cold transfer — voice tool, press-0, safetynet — funnels
+    # through here, so this is the single emission point for transfer events
+    # and the call-outcome tag.
+    try:
+        run_id = get_current_run_id()
+        workflow_run_id = int(run_id) if run_id is not None else None
+    except (TypeError, ValueError):
+        workflow_run_id = None
+    succeeded = result.get("status") == "success"
+    emit(
+        "transfer.ok" if succeeded else "transfer.failed",
+        room_name=room_name,
+        reason=transfer_reason if succeeded else result.get("reason", "unknown"),
+        workflow_run_id=workflow_run_id,
+        transfer_reason=transfer_reason,
+    )
+    await record_call_outcome(
+        engine,
+        workflow_run_id,
+        outcome=(
+            f"transferred:{transfer_reason}"
+            if succeeded
+            else f"transfer_failed:{transfer_reason}"
+        ),
+        transfer_reason=transfer_reason,
+    )
+
+    if succeeded:
         await engine.end_call_with_reason(
             EndTaskReason.TRANSFER_CALL.value, abort_immediately=False
         )
@@ -153,6 +184,30 @@ async def execute_cold_transfer(
             ("voice_tool" | "press0"); never caller-derived.
     """
     if not valid_destination(destination):
+        # Pre-flight failure never reaches _do_refer — emit here so a config
+        # typo still alerts and tags the call (S-L7-OBS H2).
+        from api.services.observability.call_events import emit
+        from api.services.observability.call_outcome import record_call_outcome
+        from pipecat.utils.run_context import get_current_run_id
+
+        try:
+            run_id = get_current_run_id()
+            workflow_run_id = int(run_id) if run_id is not None else None
+        except (TypeError, ValueError):
+            workflow_run_id = None
+        emit(
+            "transfer.failed",
+            room_name=room_name,
+            reason="invalid_destination",
+            workflow_run_id=workflow_run_id,
+            transfer_reason=transfer_reason,
+        )
+        await record_call_outcome(
+            engine,
+            workflow_run_id,
+            outcome=f"transfer_failed:{transfer_reason}",
+            transfer_reason=transfer_reason,
+        )
         return {
             "status": "failed",
             "action": "transfer_failed",
