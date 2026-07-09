@@ -221,7 +221,7 @@ GOOGLE_STT_LANGUAGES = (
 )
 
 GOOGLE_TTS_MODELS = ("chirp_3_hd",)
-GOOGLE_TTS_VOICES = ("en-US-Chirp3-HD-Charon",)
+GOOGLE_TTS_VOICES = ("en-US-Chirp3-HD-Charon", "cmn-TW-Wavenet-A")
 GOOGLE_TTS_LANGUAGES = (
     "ar-XA",
     "bn-IN",
@@ -255,6 +255,7 @@ GOOGLE_TTS_LANGUAGES = (
     "lt-LT",
     "ml-IN",
     "cmn-CN",
+    "cmn-TW",
     "mr-IN",
     "nb-NO",
     "pl-PL",

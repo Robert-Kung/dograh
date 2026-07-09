@@ -110,6 +110,7 @@ AZURE_SPEECH_STT_LANGUAGES = [
     "ja-JP",
     "ko-KR",
     "zh-CN",
+    "zh-TW",
     "pt-BR",
     "pt-PT",
     "ru-RU",
