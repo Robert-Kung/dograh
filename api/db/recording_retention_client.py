@@ -6,7 +6,7 @@ recording artifacts needs its own writer. The audit table is insert-only.
 
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 
 from api.db.base_client import BaseDBClient
 from api.db.models import RecordingRetentionAuditModel, WorkflowRunModel
@@ -20,14 +20,20 @@ class RecordingRetentionClient(BaseDBClient):
 
         Anchored on ``created_at`` (call start) — the model has no ended-at
         column, and call start is always ≤ call end, so this errs conservative.
-        ``recording_url`` doubles as the idempotency marker: cleared rows never
-        match again, and failed rows are re-picked on the next sweep.
+        A still-set ``recording_url`` **or** ``transcript_url`` marks the row
+        pending (consent-declined calls have transcripts but no recording):
+        cleared rows never match again, failed rows re-picked next sweep.
         """
         cutoff = datetime.now(UTC) - timedelta(days=retention_days)
         async with self.async_session() as session:
             result = await session.execute(
                 select(WorkflowRunModel)
-                .where(WorkflowRunModel.recording_url.isnot(None))
+                .where(
+                    or_(
+                        WorkflowRunModel.recording_url.isnot(None),
+                        WorkflowRunModel.transcript_url.isnot(None),
+                    )
+                )
                 .where(WorkflowRunModel.created_at < cutoff)
                 .order_by(WorkflowRunModel.id)
                 .limit(limit)

@@ -287,3 +287,58 @@ def test_expired_query_boundaries():
     old = datetime.now(UTC) - timedelta(days=days + 1)
     fresh = datetime.now(UTC) - timedelta(days=days - 1)
     assert old < cutoff < fresh
+
+
+@pytest.mark.asyncio
+async def test_realtime_pipeline_no_notice_no_recording(monkeypatch, consent_events):
+    """Speech-to-speech has no TTS service — a queued notice would be silently
+    dropped; consent must not be recorded (H1)."""
+    monkeypatch.setenv("RECORD_CONSENT_NOTICE_TEXT", "本通話將錄音。")
+    engine, frames = _fake_engine()
+    gate = RecordingConsentGate(
+        engine, room_name="cs-+886912", workflow_run_id=7, is_realtime=True
+    )
+    await gate.play_notice()
+    assert not gate.should_record
+    assert frames == []
+    assert consent_events[0][0] == "consent.notice_failed"
+    assert consent_events[0][1]["reason"] == "realtime_no_tts_path"
+
+
+@pytest.mark.asyncio
+async def test_audio_greeting_no_notice_no_recording(monkeypatch, consent_events):
+    """Audio greetings bypass the pipeline FIFO — notice-first can't be
+    guaranteed, so fail-safe applies (H2)."""
+    monkeypatch.setenv("RECORD_CONSENT_NOTICE_TEXT", "本通話將錄音。")
+    engine, frames = _fake_engine()
+    engine.workflow = types.SimpleNamespace(start_node_id="n1")
+    engine.get_node_greeting = lambda node_id: ("audio", "42")
+    gate = RecordingConsentGate(engine, room_name="cs-+886912", workflow_run_id=7)
+    await gate.play_notice()
+    assert not gate.should_record
+    assert frames == []
+    assert consent_events[0][1]["reason"] == "audio_greeting_ordering_unsupported"
+
+
+@pytest.mark.asyncio
+async def test_text_greeting_still_records(monkeypatch, consent_events, db_updates):
+    monkeypatch.setenv("RECORD_CONSENT_NOTICE_TEXT", "本通話將錄音。")
+    engine, frames = _fake_engine()
+    engine.workflow = types.SimpleNamespace(start_node_id="n1")
+    engine.get_node_greeting = lambda node_id: ("text", "您好")
+    gate = RecordingConsentGate(engine, room_name="cs-+886912", workflow_run_id=7)
+    await gate.play_notice()
+    assert gate.should_record
+    assert len(frames) == 1
+
+
+@pytest.mark.asyncio
+async def test_retention_picks_transcript_only_runs(retention_env):
+    """Consent-declined calls have a transcript but no recording — they must
+    still expire (H3)."""
+    from api.tasks.recording_retention import enforce_recording_retention
+
+    retention_env["runs"] = [_run(3, recording=None, transcript="transcripts/3.txt")]
+    await enforce_recording_retention(None)
+    assert retention_env["fs"].deleted == ["transcripts/3.txt"]
+    assert retention_env["cleared"] == [3]

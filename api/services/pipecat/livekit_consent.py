@@ -73,15 +73,28 @@ class RecordingConsentGate:
     unrecorded — never interrupted.
     """
 
-    def __init__(self, engine, *, room_name: str, workflow_run_id: int):
+    def __init__(
+        self, engine, *, room_name: str, workflow_run_id: int, is_realtime: bool = False
+    ):
         self._engine = engine
         self._room_name = room_name
         self._workflow_run_id = workflow_run_id
+        self._is_realtime = is_realtime
         self._notice_played = False
 
     @property
     def should_record(self) -> bool:
         return self._notice_played
+
+    def _start_greeting_is_audio(self) -> bool:
+        try:
+            workflow = getattr(self._engine, "workflow", None)
+            if workflow is None:
+                return False
+            info = self._engine.get_node_greeting(workflow.start_node_id)
+            return bool(info) and info[0] == "audio"
+        except Exception:
+            return False
 
     async def play_notice(self) -> None:
         text = consent_notice_text()
@@ -89,6 +102,29 @@ class RecordingConsentGate:
             logger.info(
                 f"RECORD_CONSENT_NOTICE_TEXT not set; call {self._workflow_run_id} "
                 "proceeds without notice and without recording (fail-safe)"
+            )
+            return
+        if self._is_realtime:
+            # Speech-to-speech pipelines have no TTS service — a queued
+            # TTSSpeakFrame would be silently dropped while we wrongly record
+            # consent. Fail-safe: no notice, no recording.
+            log_consent_event(
+                "consent.notice_failed",
+                room_name=self._room_name,
+                reason="realtime_no_tts_path",
+                workflow_run_id=self._workflow_run_id,
+            )
+            return
+        if self._start_greeting_is_audio():
+            # Audio greetings inject via the transport output queue, bypassing
+            # the pipeline FIFO the notice rides on — notice-before-greeting
+            # can't be guaranteed. Fail-safe: no notice, no recording.
+            # (MVP inbound workflows must use text greetings; S-L2-AGENT.)
+            log_consent_event(
+                "consent.notice_failed",
+                room_name=self._room_name,
+                reason="audio_greeting_ordering_unsupported",
+                workflow_run_id=self._workflow_run_id,
             )
             return
         try:
@@ -130,7 +166,9 @@ class RecordingConsentGate:
             logger.error(f"failed to persist consent record: {e}")
 
 
-def maybe_build_consent_gate(workflow_run, engine) -> Optional[RecordingConsentGate]:
+def maybe_build_consent_gate(
+    workflow_run, engine, is_realtime: bool = False
+) -> Optional[RecordingConsentGate]:
     """A gate for every LIVEKIT inbound call; None leaves behavior unchanged."""
     from api.enums import WorkflowRunMode
 
@@ -141,5 +179,8 @@ def maybe_build_consent_gate(workflow_run, engine) -> Optional[RecordingConsentG
         return None
     room_name = context.get("room_name") or ""
     return RecordingConsentGate(
-        engine, room_name=room_name, workflow_run_id=workflow_run.id
+        engine,
+        room_name=room_name,
+        workflow_run_id=workflow_run.id,
+        is_realtime=is_realtime,
     )

@@ -1083,7 +1083,9 @@ async def _run_pipeline_impl(
     # gated on the notice outcome (LIVEKIT inbound only).
     from api.services.pipecat.livekit_consent import maybe_build_consent_gate
 
-    consent_gate = maybe_build_consent_gate(workflow_run, engine)
+    consent_gate = maybe_build_consent_gate(
+        workflow_run, engine, is_realtime=is_realtime
+    )
 
     # Register latency observer to log user-to-bot response latency
     if task.user_bot_latency_observer:
