@@ -81,6 +81,11 @@ async def lifespan(app: FastAPI):
 
         validate_safetynet_config()
 
+        # S-L7-OBS: say once whether call alerting is active.
+        from api.services.observability.alerts import log_alert_startup_status
+
+        log_alert_startup_status()
+
         # S-L8-RECORD: recording retention config must be sane at boot.
         from api.services.pipecat.livekit_consent import validate_recording_config
 

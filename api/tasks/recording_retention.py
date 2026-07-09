@@ -20,17 +20,15 @@ from api.utils.recording_artifacts import get_recording_storage_key
 def log_retention_event(
     workflow_run_id: int, object_keys: list[str], days: int
 ) -> None:
-    """Structured ``retention.recording_deleted`` event (S-L7-OBS field shape)."""
-    logger.bind(
-        call_event="retention.recording_deleted",
+    """Structured ``retention.recording_deleted`` event via the unified path."""
+    from api.services.observability.call_events import emit
+
+    emit(
+        "retention.recording_deleted",
         room_name="",
         reason=f"retention_days={days}",
         workflow_run_id=workflow_run_id,
-        elapsed_ms=None,
         object_keys=object_keys,
-    ).warning(
-        f"retention.recording_deleted workflow_run_id={workflow_run_id} "
-        f"keys={len(object_keys)} retention_days={days}"
     )
 
 

@@ -1076,7 +1076,11 @@ async def _run_pipeline_impl(
                     workflow_run_id=workflow_run_id,
                 )
 
-            safetynet_watchdog = SafetynetWatchdog(on_fatal=_on_safetynet_fatal)
+            safetynet_watchdog = SafetynetWatchdog(
+                on_fatal=_on_safetynet_fatal,
+                room_name=safetynet_room,
+                workflow_run_id=workflow_run_id,
+            )
             task.add_observer(safetynet_watchdog)
 
     # S-L8-RECORD: recording notice before any conversation; recording is
@@ -1145,6 +1149,11 @@ async def _run_pipeline_impl(
         # Run the pipeline
         await run_pipeline_worker(task)
         logger.info(f"Task completed for run {workflow_run_id}")
+        # S-L7-OBS: tag calls that ended without any transfer/safetynet outcome.
+        if workflow_run and workflow_run.mode == WorkflowRunMode.LIVEKIT.value:
+            from api.services.observability.call_outcome import record_call_outcome
+
+            await record_call_outcome(engine, workflow_run_id, outcome="ai_completed")
     except asyncio.CancelledError:
         logger.warning("Received CancelledError in _run_pipeline")
     finally:

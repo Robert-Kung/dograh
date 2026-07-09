@@ -53,16 +53,10 @@ def log_consent_event(
     reason: str,
     workflow_run_id: Optional[int] = None,
 ) -> None:
-    """Structured ``consent.*`` events (same field shape as safetynet/obs)."""
-    logger.bind(
-        call_event=event,
-        room_name=room_name,
-        reason=reason,
-        workflow_run_id=workflow_run_id,
-        elapsed_ms=None,
-    ).warning(
-        f"{event} room={room_name} reason={reason} workflow_run_id={workflow_run_id}"
-    )
+    """Structured ``consent.*`` events via the unified call-event path."""
+    from api.services.observability.call_events import emit
+
+    emit(event, room_name=room_name, reason=reason, workflow_run_id=workflow_run_id)
 
 
 class RecordingConsentGate:
