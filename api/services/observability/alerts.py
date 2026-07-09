@@ -60,7 +60,13 @@ def notify(event: str, fields: dict) -> None:
 
 def _format(event: str, fields: dict) -> str:
     parts = [f"[{event}]"]
-    for key in ("room_name", "reason", "workflow_run_id", "elapsed_ms"):
+    for key in (
+        "room_name",
+        "reason",
+        "transfer_reason",
+        "workflow_run_id",
+        "elapsed_ms",
+    ):
         value = fields.get(key)
         if value is not None:
             parts.append(f"{key}={value}")
@@ -93,9 +99,10 @@ async def _count_and_alert(url: str, event: str, fields: dict) -> None:
         count = await r.incr(key)
         if count == 1:
             await r.expire(key, window_seconds())
-        if count >= threshold():
-            # Reset so the next burst starts a fresh window instead of
-            # alerting on every subsequent occurrence.
+        if count == threshold():
+            # Exactly-at-threshold: INCR is atomic, so precisely one concurrent
+            # caller sees this value — no duplicate summaries. Reset so the
+            # next burst starts a fresh window.
             await r.delete(key)
             await _send(
                 url,

@@ -116,6 +116,7 @@ def log_event(
         reason=reason,
         workflow_run_id=workflow_run_id,
         elapsed_ms=elapsed_ms,
+        safetynet_event=event,  # published bind key from S-L3-SAFETYNET — keep
     )
 
 

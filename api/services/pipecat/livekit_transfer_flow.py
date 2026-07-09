@@ -117,8 +117,11 @@ async def _do_refer(
     # S-L7-OBS: every cold transfer — voice tool, press-0, safetynet — funnels
     # through here, so this is the single emission point for transfer events
     # and the call-outcome tag.
-    run_id = get_current_run_id()
-    workflow_run_id = int(run_id) if run_id is not None else None
+    try:
+        run_id = get_current_run_id()
+        workflow_run_id = int(run_id) if run_id is not None else None
+    except (TypeError, ValueError):
+        workflow_run_id = None
     succeeded = result.get("status") == "success"
     emit(
         "transfer.ok" if succeeded else "transfer.failed",
@@ -181,6 +184,30 @@ async def execute_cold_transfer(
             ("voice_tool" | "press0"); never caller-derived.
     """
     if not valid_destination(destination):
+        # Pre-flight failure never reaches _do_refer — emit here so a config
+        # typo still alerts and tags the call (S-L7-OBS H2).
+        from api.services.observability.call_events import emit
+        from api.services.observability.call_outcome import record_call_outcome
+        from pipecat.utils.run_context import get_current_run_id
+
+        try:
+            run_id = get_current_run_id()
+            workflow_run_id = int(run_id) if run_id is not None else None
+        except (TypeError, ValueError):
+            workflow_run_id = None
+        emit(
+            "transfer.failed",
+            room_name=room_name,
+            reason="invalid_destination",
+            workflow_run_id=workflow_run_id,
+            transfer_reason=transfer_reason,
+        )
+        await record_call_outcome(
+            engine,
+            workflow_run_id,
+            outcome=f"transfer_failed:{transfer_reason}",
+            transfer_reason=transfer_reason,
+        )
         return {
             "status": "failed",
             "action": "transfer_failed",

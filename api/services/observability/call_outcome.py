@@ -34,6 +34,13 @@ async def record_call_outcome(
 ) -> None:
     try:
         previous = getattr(engine, "_call_outcome", None) if engine else None
+        if previous is None and engine is None and workflow_run_id is not None:
+            # Engine-free paths (server-side safetynet) can't see what another
+            # engine instance already recorded — read it back before writing.
+            from api.db import db_client
+
+            run = await db_client.get_workflow_run_by_id(workflow_run_id)
+            previous = ((run.annotations or {}) if run else {}).get("call_outcome")
         if previous is not None and _rank(outcome) <= _rank(previous):
             return
         if engine is not None:

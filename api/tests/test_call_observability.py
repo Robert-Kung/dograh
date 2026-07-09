@@ -175,6 +175,8 @@ async def test_safetynet_log_event_goes_through_emit(monkeypatch):
     assert captured[0][0] == "safetynet.triggered"
     assert captured[0][1]["room_name"] == "cs-+886912"
     assert captured[0][1]["workflow_run_id"] == 5
+    # published bind key from S-L3-SAFETYNET must survive the unified path
+    assert captured[0][1]["safetynet_event"] == "safetynet.triggered"
 
 
 # --- watchdog provider.error emission (2.2) ---
@@ -397,3 +399,47 @@ async def test_refer_success_emits_transfer_ok_and_outcome(monkeypatch, db_updat
     assert res["status"] == "success"
     assert emitted[0][0] == "transfer.ok"
     assert engine._call_outcome == "transferred:safetynet"
+
+
+@pytest.mark.asyncio
+async def test_invalid_destination_preflight_emits_transfer_failed(
+    monkeypatch, db_updates
+):
+    """A config typo never reaches _do_refer — it must still alert and tag (H2)."""
+    from api.services.pipecat.livekit_transfer_flow import execute_cold_transfer
+
+    emitted = []
+    monkeypatch.setattr(
+        call_events, "emit", lambda event, **fields: emitted.append((event, fields))
+    )
+    engine = _fake_engine()
+    res = await execute_cold_transfer(
+        engine,
+        room_name="cs-+886912",
+        destination="0912345678",  # not tel:+E164 / sip:
+        schedule=None,
+        transfer_reason="voice_tool",
+    )
+    assert res["reason"] == "invalid_destination"
+    assert emitted[0][0] == "transfer.failed"
+    assert emitted[0][1]["reason"] == "invalid_destination"
+    assert engine._call_outcome == "transfer_failed:voice_tool"
+
+
+@pytest.mark.asyncio
+async def test_engine_free_outcome_respects_db_precedence(monkeypatch):
+    """Server-side safetynet (engine=None) must not clobber a recorded success (M1)."""
+    from api.db import db_client
+
+    updates = []
+
+    async def fake_update(run_id, **kwargs):
+        updates.append(kwargs)
+
+    async def fake_get(run_id):
+        return types.SimpleNamespace(annotations={"call_outcome": "transferred:press0"})
+
+    monkeypatch.setattr(db_client, "update_workflow_run", fake_update)
+    monkeypatch.setattr(db_client, "get_workflow_run_by_id", fake_get)
+    await record_call_outcome(None, 7, outcome="safetynet_terminated")
+    assert updates == []  # equal rank, first wins — no overwrite
