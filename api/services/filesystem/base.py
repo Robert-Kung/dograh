@@ -111,3 +111,15 @@ class BaseFileSystem(ABC):
             bool: True if file was copied successfully, False otherwise
         """
         pass
+
+    @abstractmethod
+    async def adelete_file(self, file_path: str) -> bool:
+        """Delete a file from the filesystem.
+
+        Args:
+            file_path: Path of the file to delete
+
+        Returns:
+            bool: True if the file was deleted (or already absent), False on error
+        """
+        pass

@@ -1083,6 +1083,14 @@ async def _run_pipeline_impl(
             )
             task.add_observer(safetynet_watchdog)
 
+    # S-L8-RECORD: recording notice before any conversation; recording is
+    # gated on the notice outcome (LIVEKIT inbound only).
+    from api.services.pipecat.livekit_consent import maybe_build_consent_gate
+
+    consent_gate = maybe_build_consent_gate(
+        workflow_run, engine, is_realtime=is_realtime
+    )
+
     # Register latency observer to log user-to-bot response latency
     if task.user_bot_latency_observer:
 
@@ -1132,6 +1140,7 @@ async def _run_pipeline_impl(
         pre_call_fetch_task=pre_call_fetch_task,
         user_provider_id=user_provider_id,
         integration_runtime_sessions=integration_runtime_sessions,
+        consent_gate=consent_gate,
     )
 
     register_audio_data_handler(audio_buffer, workflow_run_id, in_memory_audio_buffer)

@@ -77,6 +77,14 @@ class S3FileSystem(BaseFileSystem):
         except ClientError:
             return False
 
+    async def adelete_file(self, file_path: str) -> bool:
+        try:
+            async with self.session.client("s3", **self._client_kwargs()) as s3_client:
+                await s3_client.delete_object(Bucket=self.bucket_name, Key=file_path)
+            return True
+        except ClientError:
+            return False
+
     async def aget_signed_url(
         self,
         file_path: str,

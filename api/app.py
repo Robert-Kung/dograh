@@ -86,6 +86,11 @@ async def lifespan(app: FastAPI):
 
         log_alert_startup_status()
 
+        # S-L8-RECORD: recording retention config must be sane at boot.
+        from api.services.pipecat.livekit_consent import validate_recording_config
+
+        validate_recording_config()
+
         yield  # Run app
 
         # Shutdown sequence - this runs when FastAPI is shutting down

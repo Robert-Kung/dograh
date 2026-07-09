@@ -1400,3 +1400,20 @@ class TicketModel(Base):
         UniqueConstraint("organization_id", "ticket_id", name="_ticket_org_tid_uc"),
         Index("ix_tickets_org_caller", "organization_id", "caller_number"),
     )
+
+
+class RecordingRetentionAuditModel(Base):
+    """Insert-only audit trail for recording deletions (S-L8-RECORD, PDPA).
+
+    One row per retention deletion: which run, when, which storage objects,
+    under which retention setting, and the outcome.
+    """
+
+    __tablename__ = "recording_retention_audit"
+
+    id = Column(Integer, primary_key=True, index=True)
+    workflow_run_id = Column(Integer, nullable=False, index=True)
+    deleted_at = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+    object_keys = Column(JSON, nullable=False, default=list)
+    retention_days = Column(Integer, nullable=False)
+    result = Column(String, nullable=False, default="ok")
