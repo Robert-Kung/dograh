@@ -797,6 +797,8 @@ async def _run_pipeline_impl(
         embeddings_api_version=embeddings_api_version,
         has_recordings=has_recordings,
         context_compaction_enabled=context_compaction_enabled,
+        workflow_run_mode=workflow_run.mode,
+        room_name=(workflow_run.initial_context or {}).get("room_name"),
     )
 
     # Create pipeline components
