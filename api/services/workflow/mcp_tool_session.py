@@ -191,6 +191,12 @@ class McpToolSession:
             s for s in self._schemas if self._name_map.get(s.name) in allowed_raw_names
         ]
 
+    def raw_name(self, namespaced_name: str) -> Optional[str]:
+        """Original server-side tool name for a namespaced LLM name (or None).
+        Trust registry lookups key on raw names, which are stable across
+        per-credential namespacing (S-L8-TRUST)."""
+        return self._name_map.get(namespaced_name)
+
     def discovered_tools(self) -> List[Dict[str, str]]:
         """Raw MCP tool catalog for UI/cache: ``[{name, description}]``
         using the *raw* server names (not the namespaced LLM names).

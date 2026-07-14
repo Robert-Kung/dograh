@@ -17,7 +17,7 @@ from pipecat.services.settings import LLMSettings
 from pipecat.utils.enums import EndTaskReason
 
 from api.db import db_client
-from api.enums import ToolCategory
+from api.enums import ToolCategory, WorkflowRunMode
 from api.services.pipecat.audio_playback import play_audio
 from api.services.workflow.workflow_graph import Node, WorkflowGraph
 
@@ -78,6 +78,8 @@ class PipecatEngine:
         embeddings_api_version: Optional[str] = None,
         has_recordings: bool = False,
         context_compaction_enabled: bool = False,
+        workflow_run_mode: Optional[str] = None,
+        room_name: Optional[str] = None,
     ):
         self.task = task
         self.llm = llm
@@ -153,6 +155,47 @@ class PipecatEngine:
             None
         )
 
+        # S-L8-TRUST: mode passed at construction (registration happens per
+        # node transition, where a DB fetch per tool would be wasteful);
+        # room_name feeds trust.* event fields. Both LIVEKIT-only.
+        self._workflow_run_mode: Optional[str] = workflow_run_mode
+        self._room_name: Optional[str] = room_name
+        # Lazily resolved caller E.164 for platform-bound params (None =
+        # not yet resolved; "" = resolved to anonymous/unavailable).
+        self._caller_e164_cache: Optional[str] = None
+
+    @property
+    def trust_enforced(self) -> bool:
+        """Deny-by-default tool trust boundary is LIVEKIT-only (C3)."""
+        return self._workflow_run_mode == WorkflowRunMode.LIVEKIT.value
+
+    def trust_event_context(self) -> dict:
+        return {
+            "room_name": self._room_name or "",
+            "workflow_run_id": self._workflow_run_id,
+        }
+
+    async def get_platform_bound_values(self) -> dict:
+        """Platform-side truth for identity params (C6 source binding)."""
+        values: dict = {"workflow_run_id": self._workflow_run_id}
+        if self._room_name:
+            if self._caller_e164_cache is None:
+                try:
+                    from api.services.pipecat.livekit_cold_transfer import livekit_api
+                    from api.services.pipecat.transfer_context_handoff import (
+                        get_caller_number,
+                    )
+
+                    async with livekit_api() as lk:
+                        self._caller_e164_cache = await get_caller_number(
+                            self._room_name, lk
+                        )
+                except Exception as e:
+                    logger.debug(f"caller E.164 lookup failed: {e}")
+                    self._caller_e164_cache = ""
+            values["caller_e164"] = self._caller_e164_cache
+        return values
+
     async def _get_organization_id(self) -> Optional[int]:
         """Get and cache the organization ID from workflow run."""
         if self._organization_id is None:
@@ -206,6 +249,8 @@ class PipecatEngine:
         """Update LLM settings with the composed system prompt and tool list."""
 
         if functions:
+            if self.trust_enforced:
+                self._assert_no_dormant_registration_paths(functions)
             tools_schema = ToolsSchema(standard_tools=functions)
             self.context.set_tools(tools_schema)
 
@@ -215,6 +260,30 @@ class PipecatEngine:
             self.llm._context = self.context
 
         await self.llm._update_settings(LLMSettings(system_instruction=system_prompt))
+
+    def _assert_no_dormant_registration_paths(self, functions: list) -> None:
+        """S-L8-TRUST: fail fast if anything could bypass the guarded
+        registration seams — a handler-carrying FunctionSchema would be
+        auto-registered by pipecat's ``_register_advertised_tool_handlers``,
+        and a catch-all ``register_function(None, ...)`` would answer for
+        every undeclared tool. Neither is silently tolerable on LIVEKIT."""
+        for schema in functions:
+            if getattr(schema, "handler", None) is not None:
+                name = getattr(schema, "name", repr(schema))
+                logger.bind(call_event="trust.dormant_path", tool_name=name).error(
+                    f"handler-carrying FunctionSchema '{name}' on LIVEKIT path"
+                )
+                raise RuntimeError(
+                    f"S-L8-TRUST: FunctionSchema '{name}' carries a handler; "
+                    f"advertised schemas must register through the guarded seams"
+                )
+        if None in getattr(self.llm, "_functions", {}):
+            logger.bind(call_event="trust.dormant_path", tool_name="<catch-all>").error(
+                "catch-all register_function(None) present on LIVEKIT path"
+            )
+            raise RuntimeError(
+                "S-L8-TRUST: catch-all function handler is not allowed on LIVEKIT"
+            )
 
     def _format_prompt(self, prompt: str) -> str:
         """Delegate prompt formatting to the shared workflow.utils implementation."""
@@ -397,7 +466,19 @@ class PipecatEngine:
                 )
 
         # Register the function with the LLM
-        self.llm.register_function("retrieve_from_knowledge_base", retrieve_kb_func)
+        handler = retrieve_kb_func
+        if self.trust_enforced:
+            from api.services.workflow.tool_trust import guard, resolve_family_spec
+
+            handler = guard(
+                retrieve_kb_func,
+                resolve_family_spec("knowledge_base"),
+                tool_name="retrieve_from_knowledge_base",
+                declared_params={"query"},
+                platform_values_provider=self.get_platform_bound_values,
+                event_context_provider=self.trust_event_context,
+            )
+        self.llm.register_function("retrieve_from_knowledge_base", handler)
 
     async def _perform_variable_extraction_if_needed(
         self, node: Optional[Node], run_in_background: bool = True

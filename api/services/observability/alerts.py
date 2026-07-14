@@ -22,7 +22,9 @@ IMMEDIATE_EVENTS = {
     "safetynet.terminated",
     "transfer.failed",
 }
-WINDOWED_EVENTS = {"provider.error"}
+# trust.violation is windowed, not immediate: one occurrence may be a benign
+# LLM formatting slip; repetition is the attack signal (S-L8-TRUST).
+WINDOWED_EVENTS = {"provider.error", "trust.violation"}
 
 _redis = None
 
@@ -66,6 +68,8 @@ def _format(event: str, fields: dict) -> str:
         "transfer_reason",
         "workflow_run_id",
         "elapsed_ms",
+        "tool_name",
+        "param",
     ):
         value = fields.get(key)
         if value is not None:

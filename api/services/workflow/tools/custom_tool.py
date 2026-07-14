@@ -170,18 +170,32 @@ def _resolve_preset_parameters(
     config: Dict[str, Any],
     call_context_vars: Optional[Dict[str, Any]],
     gathered_context_vars: Optional[Dict[str, Any]],
+    sanitize_untrusted: bool = False,
 ) -> Dict[str, Any]:
-    """Resolve fixed/template-backed parameters before executing the HTTP request."""
+    """Resolve fixed/template-backed parameters before executing the HTTP request.
+
+    ``sanitize_untrusted`` (LIVEKIT, S-L8-TRUST): gathered_context values are
+    caller-derived (extracted from conversation) and reach tool parameters
+    through template interpolation, bypassing the LLM-argument guard — so
+    they get the same global-cap sanitization before rendering. URL and
+    headers come from config only and are never rendered from these values.
+    """
 
     preset_parameters = config.get("preset_parameters", []) or []
     if not preset_parameters:
         return {}
 
+    gathered = dict(gathered_context_vars or {})
+    if sanitize_untrusted:
+        from api.services.workflow.tool_trust import sanitize_any
+
+        gathered = sanitize_any(gathered)
+
     initial_context = dict(call_context_vars or {})
     render_context: Dict[str, Any] = {
         **initial_context,
         "initial_context": initial_context,
-        "gathered_context": dict(gathered_context_vars or {}),
+        "gathered_context": gathered,
     }
 
     resolved: Dict[str, Any] = {}
@@ -211,6 +225,7 @@ async def execute_http_tool(
     call_context_vars: Optional[Dict[str, Any]] = None,
     gathered_context_vars: Optional[Dict[str, Any]] = None,
     organization_id: Optional[int] = None,
+    sanitize_untrusted: bool = False,
 ) -> Dict[str, Any]:
     """Execute an HTTP API tool.
 
@@ -258,7 +273,10 @@ async def execute_http_tool(
 
     try:
         preset_arguments = _resolve_preset_parameters(
-            config, call_context_vars, gathered_context_vars
+            config,
+            call_context_vars,
+            gathered_context_vars,
+            sanitize_untrusted=sanitize_untrusted,
         )
     except ValueError as e:
         logger.error(f"Custom tool '{tool.name}' preset parameter error: {e}")

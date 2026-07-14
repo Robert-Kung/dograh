@@ -30,6 +30,13 @@ from api.services.pipecat.livekit_transfer_flow import (
 from api.services.telephony.call_transfer_manager import get_call_transfer_manager
 from api.services.telephony.factory import get_telephony_provider_for_run
 from api.services.telephony.transfer_event_protocol import TransferContext
+from api.services.workflow.tool_trust import (
+    guard,
+    is_trust_enforced,
+    log_denied_tool,
+    resolve_family_spec,
+    resolve_mcp_spec,
+)
 from api.services.workflow.tools.calculator import get_calculator_tools, safe_calculator
 from api.services.workflow.tools.custom_tool import (
     execute_http_tool,
@@ -62,6 +69,19 @@ def get_function_schema(
         properties=properties or {},
         required=required or [],
     )
+
+
+def _family_for_category(category: str) -> str:
+    """Trust-registry family for a ToolCategory value (S-L8-TRUST)."""
+    if category == ToolCategory.END_CALL.value:
+        return "end_call"
+    if category == ToolCategory.TRANSFER_CALL.value:
+        return "transfer_call"
+    if category == ToolCategory.CALCULATOR.value:
+        return "calculator"
+    if category == ToolCategory.MCP.value:
+        return "mcp"  # denied/allowed per raw tool name, not per family
+    return "http"
 
 
 class CustomToolManager:
@@ -146,11 +166,18 @@ class CustomToolManager:
             logger.warning("Cannot fetch custom tools: organization_id not available")
             return []
 
+        trust = is_trust_enforced(self._engine)
+
         try:
             tools = await db_client.get_tools_by_uuids(tool_uuids, organization_id)
 
             schemas: list[FunctionSchema] = []
             for tool in tools:
+                family = _family_for_category(tool.category)
+                if trust and family != "mcp" and resolve_family_spec(family) is None:
+                    log_denied_tool(family, tool.name)
+                    continue
+
                 if tool.category == ToolCategory.CALCULATOR.value:
                     # Built-in calculator: return pre-defined schemas
                     for tool_def in get_calculator_tools():
@@ -178,7 +205,16 @@ class CustomToolManager:
                         if mcp_tool_filters is None
                         else set(mcp_tool_filters.get(tool.tool_uuid, []))
                     )
-                    schemas.extend(session.function_schemas(allowed))
+                    mcp_schemas = session.function_schemas(allowed)
+                    if trust:
+                        kept = []
+                        for fs in mcp_schemas:
+                            if resolve_mcp_spec(session.raw_name(fs.name)) is None:
+                                log_denied_tool("mcp", fs.name)
+                            else:
+                                kept.append(fs)
+                        mcp_schemas = kept
+                    schemas.extend(mcp_schemas)
                     continue
 
                 raw_schema = tool_to_function_schema(tool)
@@ -225,10 +261,17 @@ class CustomToolManager:
             )
             return
 
+        trust = is_trust_enforced(self._engine)
+
         try:
             tools = await db_client.get_tools_by_uuids(tool_uuids, organization_id)
 
             for tool in tools:
+                family = _family_for_category(tool.category)
+                if trust and family != "mcp" and resolve_family_spec(family) is None:
+                    log_denied_tool(family, tool.name)
+                    continue
+
                 if tool.category == ToolCategory.CALCULATOR.value:
                     self._register_calculator_handler()
                     logger.debug(
@@ -252,9 +295,21 @@ class CustomToolManager:
                     )
                     mcp_schemas = session.function_schemas(allowed)
                     for fs in mcp_schemas:
+                        handler = self._create_mcp_handler(session, fs.name)
+                        if trust:
+                            spec = resolve_mcp_spec(session.raw_name(fs.name))
+                            if spec is None:
+                                log_denied_tool("mcp", fs.name)
+                                continue
+                            handler = self._guarded(
+                                handler,
+                                spec,
+                                tool_name=fs.name,
+                                declared_params=set((fs.properties or {}).keys()),
+                            )
                         self._engine.llm.register_function(
                             fs.name,
-                            self._create_mcp_handler(session, fs.name),
+                            handler,
                             timeout_secs=session.call_timeout_secs,
                         )
                     logger.debug(
@@ -268,6 +323,17 @@ class CustomToolManager:
 
                 # Create and register the handler
                 handler, timeout_secs = self._create_handler(tool, function_name)
+                if trust:
+                    handler = self._guarded(
+                        handler,
+                        resolve_family_spec(family),
+                        tool_name=function_name,
+                        declared_params=set(
+                            schema["function"]["parameters"]
+                            .get("properties", {})
+                            .keys()
+                        ),
+                    )
                 self._engine.llm.register_function(
                     function_name,
                     handler,
@@ -281,6 +347,24 @@ class CustomToolManager:
 
         except Exception as e:
             logger.error(f"Failed to register custom tool handlers: {e}")
+
+    def _guarded(
+        self,
+        handler,
+        spec,
+        *,
+        tool_name: str,
+        declared_params: Optional[set] = None,
+    ):
+        """Wrap a handler with the S-L8-TRUST deterministic boundary."""
+        return guard(
+            handler,
+            spec,
+            tool_name=tool_name,
+            declared_params=declared_params,
+            platform_values_provider=self._engine.get_platform_bound_values,
+            event_context_provider=self._engine.trust_event_context,
+        )
 
     def _create_handler(self, tool: Any, function_name: str):
         """Create a handler function for a tool based on its category.
@@ -323,7 +407,15 @@ class CustomToolManager:
             except Exception as e:
                 await function_call_params.result_callback({"error": str(e)})
 
-        self._engine.llm.register_function("safe_calculator", calculate_func)
+        handler = calculate_func
+        if is_trust_enforced(self._engine):
+            handler = self._guarded(
+                handler,
+                resolve_family_spec("calculator"),
+                tool_name="safe_calculator",
+                declared_params={"expression"},
+            )
+        self._engine.llm.register_function("safe_calculator", handler)
 
     def _create_http_tool_handler(self, tool: Any, function_name: str):
         """Create a handler function for an HTTP API tool.
@@ -387,6 +479,7 @@ class CustomToolManager:
                     call_context_vars=self._engine._call_context_vars,
                     gathered_context_vars=self._engine._gathered_context,
                     organization_id=await self.get_organization_id(),
+                    sanitize_untrusted=is_trust_enforced(self._engine),
                 )
 
                 await function_call_params.result_callback(result)
