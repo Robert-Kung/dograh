@@ -63,7 +63,7 @@ GLOBAL_MAX_LEN = 2000
 # C0/C1 control chars except \n and \t (legitimate in dictated text).
 _CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
 
-E164_PATTERN = r"^\+[1-9]\d{1,14}$"
+E164_PATTERN = r"^\+[1-9]\d{1,14}\Z"
 
 # Platform-bound source keys (resolved by the caller of guard()).
 SOURCE_WORKFLOW_RUN_ID = "workflow_run_id"
@@ -82,6 +82,7 @@ class ParamRule:
     max_length: int = GLOBAL_MAX_LEN
     pattern: Optional[str] = None
     allowed_values: Optional[frozenset] = None
+    max_value: Optional[int] = None  # numeric upper bound (ints/floats)
 
 
 @dataclass(frozen=True)
@@ -150,7 +151,7 @@ MCP_TOOL_TRUST: Dict[str, ToolTrustSpec] = {
         tier=READ,
         param_rules={
             "caller_number": ParamRule(max_length=20, pattern=E164_PATTERN),
-            "limit": ParamRule(max_length=4),
+            "limit": ParamRule(max_length=4, max_value=50),
         },
         platform_bound={"caller_number": SOURCE_CALLER_E164},
     ),
@@ -200,6 +201,12 @@ def _check_rule(param: str, value: Any, rule: ParamRule) -> Any:
         if rule.allowed_values is not None and cleaned not in rule.allowed_values:
             raise TrustViolation("param_not_allowed", param)
         return cleaned
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        if rule.max_value is not None and value > rule.max_value:
+            raise TrustViolation("param_out_of_range", param)
+        return value
     if isinstance(value, (dict, list)):
         return sanitize_any(value, rule.max_length)
     return value
@@ -271,20 +278,40 @@ def guard(
     call itself is never crashed by validation.
     """
 
-    def _event_fields() -> Dict[str, Any]:
+    def _safe_emit(event: str, **kw) -> None:
+        # Telemetry must never take out the tool call (spec: event emission
+        # failure MUST NOT affect the call) — alerts.notify is already
+        # non-raising, this is belt-and-suspenders so result_callback runs.
         ctx = event_context_provider() if event_context_provider else {}
-        return {
-            "room_name": ctx.get("room_name") or "",
-            "workflow_run_id": ctx.get("workflow_run_id"),
-        }
+        try:
+            emit(
+                event,
+                room_name=ctx.get("room_name") or "",
+                workflow_run_id=ctx.get("workflow_run_id"),
+                tool_name=tool_name,
+                **kw,
+            )
+        except Exception as e:  # pragma: no cover - defensive
+            logger.warning(f"trust event emit failed for {tool_name}: {e}")
 
     async def guarded(function_call_params) -> None:
         platform_values: Dict[str, Any] = {}
-        if platform_values_provider is not None:
+        # Only pay the platform-truth lookup (a LiveKit room roundtrip) when
+        # this tool actually binds an identity param.
+        if platform_values_provider is not None and spec.platform_bound:
             try:
                 platform_values = await platform_values_provider()
             except Exception as e:
                 logger.warning(f"platform values lookup failed for {tool_name}: {e}")
+
+        # An identity param the caller supplied that we could NOT bind to a
+        # platform value (anonymous caller or lookup failure) is a fail-open
+        # window — surface it instead of letting the LLM's value pass silently.
+        for param, source in spec.platform_bound.items():
+            if (function_call_params.arguments or {}).get(
+                param
+            ) and not platform_values.get(source):
+                _safe_emit("trust.violation", reason="identity_unbound", param=param)
 
         try:
             validated, overridden, stripped = validate_arguments(
@@ -295,14 +322,7 @@ def guard(
                 platform_values=platform_values,
             )
         except TrustViolation as v:
-            fields = _event_fields()
-            emit(
-                "trust.violation",
-                reason=v.reason,
-                tool_name=tool_name,
-                param=v.param,
-                **fields,
-            )
+            _safe_emit("trust.violation", reason=v.reason, param=v.param)
             await function_call_params.result_callback(
                 {
                     "status": "error",
@@ -317,23 +337,15 @@ def guard(
             )
             return
 
-        if stripped:
-            # Call proceeds (e.g. transfer_call ignores LLM args by design),
-            # but repeated attempts are an attack signal — feed the window.
-            emit(
-                "trust.violation",
-                reason="undeclared_params_stripped",
-                tool_name=tool_name,
-                param=",".join(stripped),
-                **_event_fields(),
-            )
+        # stripped params are silently dropped: for transfer_call the handler
+        # ignores LLM args entirely (destination is config-only), so a stripped
+        # arg can never reach the REFER — no attack signal to raise, and
+        # operator-defined transfer params would otherwise flood the window.
         if overridden:
-            emit(
+            _safe_emit(
                 "trust.override",
                 reason="platform_bound_override",
-                tool_name=tool_name,
                 param=",".join(overridden),
-                **_event_fields(),
             )
 
         function_call_params.arguments = validated

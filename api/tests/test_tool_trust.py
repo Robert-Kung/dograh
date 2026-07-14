@@ -317,6 +317,63 @@ async def test_livekit_denies_undeclared_mcp_tool_both_faces(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_registered_mcp_handler_is_actually_guarded(monkeypatch):
+    """Guards the wiring itself: the registered MCP handler must reject an
+    out-of-contract arg — this fails if the _guarded(...) wrap is dropped."""
+    events = _events(monkeypatch)
+    session_calls = []
+
+    schema = FunctionSchema(
+        name="mcp__t__create_ticket",
+        description="",
+        properties={"ticket_id": {"type": "string"}},
+        required=[],
+    )
+    session = _fake_mcp_session([schema], {"mcp__t__create_ticket": "create_ticket"})
+
+    async def fake_call(name, args):
+        session_calls.append((name, args))
+        return "ok"
+
+    session.call = fake_call
+    tool = _tool(ToolCategory.MCP.value)
+    mgr, registered = _livekit_manager(
+        [tool], monkeypatch, mcp_sessions={"uuid-1": session}
+    )
+    await mgr.register_handlers(["uuid-1"])
+
+    params = FakeCallParams({"ticket_id": "T-1", "status": "resolved"})
+    await registered["mcp__t__create_ticket"](params)
+
+    assert session_calls == []  # rejected before reaching the MCP session
+    assert params.results[0]["code"] == "VALIDATION_FAILED"
+    assert events[0][0] == "trust.violation"
+
+
+@pytest.mark.asyncio
+async def test_transition_functions_are_not_gated(monkeypatch):
+    """Transition funcs register through PipecatEngine, not CustomToolManager,
+    and carry no trust spec — deny-by-default must not touch them."""
+
+    engine = _livekit_engine()
+    engine.llm = MagicMock()
+    registered = {}
+    engine.llm.register_function = lambda name, fn, **kw: registered.__setitem__(
+        name, fn
+    )
+
+    async def fake_create(name, *a, **k):
+        async def _f(p):
+            return None
+
+        return _f
+
+    monkeypatch.setattr(engine, "_create_transition_func", fake_create)
+    await engine._register_transition_function_with_llm("go_to_billing", "billing")
+    assert "go_to_billing" in registered  # registered despite no trust spec
+
+
+@pytest.mark.asyncio
 async def test_non_livekit_mode_unchanged(monkeypatch):
     undeclared = FunctionSchema(
         name="mcp__t__anything", description="", properties={}, required=[]

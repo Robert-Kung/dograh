@@ -71,17 +71,22 @@ def get_function_schema(
     )
 
 
-def _family_for_category(category: str) -> str:
-    """Trust-registry family for a ToolCategory value (S-L8-TRUST)."""
-    if category == ToolCategory.END_CALL.value:
-        return "end_call"
-    if category == ToolCategory.TRANSFER_CALL.value:
-        return "transfer_call"
-    if category == ToolCategory.CALCULATOR.value:
-        return "calculator"
-    if category == ToolCategory.MCP.value:
-        return "mcp"  # denied/allowed per raw tool name, not per family
-    return "http"
+def _family_for_category(category: str) -> Optional[str]:
+    """Trust-registry family for a ToolCategory value (S-L8-TRUST).
+
+    ``"mcp"`` routes to the per-raw-name MCP registry; ``None`` means the
+    category has no declared trust spec and is denied under deny-by-default.
+    Only categories explicitly enumerated here are allowlisted — NATIVE /
+    INTEGRATION and any future category fall through to deny, so a new tool
+    kind can't silently inherit the write-tier HTTP spec.
+    """
+    return {
+        ToolCategory.END_CALL.value: "end_call",
+        ToolCategory.TRANSFER_CALL.value: "transfer_call",
+        ToolCategory.CALCULATOR.value: "calculator",
+        ToolCategory.HTTP_API.value: "http",
+        ToolCategory.MCP.value: "mcp",
+    }.get(category)
 
 
 class CustomToolManager:
@@ -175,7 +180,7 @@ class CustomToolManager:
             for tool in tools:
                 family = _family_for_category(tool.category)
                 if trust and family != "mcp" and resolve_family_spec(family) is None:
-                    log_denied_tool(family, tool.name)
+                    log_denied_tool(family or tool.category, tool.name)
                     continue
 
                 if tool.category == ToolCategory.CALCULATOR.value:
@@ -269,7 +274,7 @@ class CustomToolManager:
             for tool in tools:
                 family = _family_for_category(tool.category)
                 if trust and family != "mcp" and resolve_family_spec(family) is None:
-                    log_denied_tool(family, tool.name)
+                    log_denied_tool(family or tool.category, tool.name)
                     continue
 
                 if tool.category == ToolCategory.CALCULATOR.value:

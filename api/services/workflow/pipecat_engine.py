@@ -179,7 +179,11 @@ class PipecatEngine:
         """Platform-side truth for identity params (C6 source binding)."""
         values: dict = {"workflow_run_id": self._workflow_run_id}
         if self._room_name:
-            if self._caller_e164_cache is None:
+            # Only a resolved E.164 is cached. An empty result (anonymous
+            # caller or a transient LiveKit lookup failure — get_caller_number
+            # collapses both to "") is left unresolved so the next tool call
+            # retries instead of caching a fail-open blank for the whole call.
+            if not self._caller_e164_cache:
                 try:
                     from api.services.pipecat.livekit_cold_transfer import livekit_api
                     from api.services.pipecat.transfer_context_handoff import (
@@ -192,8 +196,7 @@ class PipecatEngine:
                         )
                 except Exception as e:
                     logger.debug(f"caller E.164 lookup failed: {e}")
-                    self._caller_e164_cache = ""
-            values["caller_e164"] = self._caller_e164_cache
+            values["caller_e164"] = self._caller_e164_cache or ""
         return values
 
     async def _get_organization_id(self) -> Optional[int]:

@@ -64,10 +64,12 @@ async def test_coaxed_transfer_number_never_reaches_handler(events):
         FakeCallParams({"destination": "+886900123456", "urgent": "override policy"})
     )
 
-    assert seen["args"] == {}  # nothing caller-controlled reaches the handler
-    violation_events = [e for e in events if e[0] == "trust.violation"]
-    assert len(violation_events) == 1
-    assert violation_events[0][1]["reason"] == "undeclared_params_stripped"
+    # Nothing caller-controlled reaches the handler; the transfer proceeds to
+    # the config-only destination. Stripping is silent — a stripped arg can
+    # never reach the REFER, so there is no attack signal to raise (and
+    # operator-defined transfer params must not flood the alert window).
+    assert seen["args"] == {}
+    assert events == []
 
 
 # ---------------------------------------------------------------------------
