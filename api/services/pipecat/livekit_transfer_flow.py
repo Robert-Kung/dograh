@@ -40,6 +40,9 @@ _DESTINATION_RE = re.compile(r"^(tel:\+[1-9]\d{1,14}|sip:[\w\-.@:]+)$")
 DEFAULT_AFTER_HOURS_ACTION = "back_to_ai"
 _SUPPORTED_AFTER_HOURS = {"back_to_ai", "announce_and_hangup", "alternate_queue"}
 _DEFAULT_AFTER_HOURS_MESSAGE = "目前為非營運時間，將由 AI 繼續為您服務。"
+_DEFAULT_UNAVAILABLE_MESSAGE = "轉接服務暫時不可用，將由 AI 繼續為您服務。"
+_DEFAULT_UNAVAILABLE_HANGUP_MESSAGE = "轉接服務暫時不可用，請稍後再撥，感謝您的來電。"
+DEFAULT_UNAVAILABLE_ANNOUNCE_LIMIT = 2
 
 
 class TransferDecision(str, Enum):
@@ -49,6 +52,9 @@ class TransferDecision(str, Enum):
     AFTER_HOURS_BACK_TO_AI = "back_to_ai"
     AFTER_HOURS_HANGUP = "announce_and_hangup"
     AFTER_HOURS_ALTERNATE = "alternate_queue"
+    # Queue service unhealthy (S-L5-QUEUE): distinct from after-hours — the
+    # schedule says open, but REFERring would land the caller in a dead queue.
+    UNAVAILABLE = "transfer_unavailable"
 
 
 def valid_destination(destination: str | None) -> bool:
@@ -60,14 +66,17 @@ def plan_transfer(
     schedule: dict | None,
     after_hours_action: str | None,
     now: datetime,
+    queue_healthy: bool = True,
 ) -> TransferDecision:
-    """Decide the transfer branch from the schedule and configured after-hours action.
+    """Decide the transfer branch: 排程 ∧ 隊列健康 (S-L5-QUEUE).
 
-    Open hours always REFER. Otherwise the configured after-hours action is used;
-    an unset or unsupported value falls back to the default (C4 — never dead air).
+    Out of hours -> the configured after-hours action (unchanged; unknown values
+    fall back to the default, C4). In hours but queue unhealthy -> UNAVAILABLE
+    (independent handling, not after-hours). Staffing is deliberately not an
+    input — zero-agent calls REFER and hit the queue's immediate overflow.
     """
     if is_open(schedule, now):
-        return TransferDecision.REFER
+        return TransferDecision.REFER if queue_healthy else TransferDecision.UNAVAILABLE
 
     action = (
         after_hours_action
@@ -150,6 +159,35 @@ async def _do_refer(
     return result
 
 
+async def _announce_unavailable(engine, message: str | None, limit: int | None) -> dict:
+    """Queue unhealthy: explicit message back to the AI, bounded per call.
+
+    The per-call announcement counter lives on the engine (like the REFER
+    idempotency flag); once past the limit the call ends explicitly so a
+    persistent outage can't loop the caller AI ↔ gate forever (C4).
+    """
+    from pipecat.frames.frames import TTSSpeakFrame
+    from pipecat.utils.enums import EndTaskReason
+
+    cap = DEFAULT_UNAVAILABLE_ANNOUNCE_LIMIT if limit is None else int(limit)
+    count = getattr(engine, "_transfer_unavailable_announcements", 0) + 1
+    engine._transfer_unavailable_announcements = count
+
+    if count > cap:
+        await engine.task.queue_frame(
+            TTSSpeakFrame(_DEFAULT_UNAVAILABLE_HANGUP_MESSAGE, persist_to_logs=True)
+        )
+        await engine.end_call_with_reason(
+            EndTaskReason.END_CALL_TOOL_REASON.value, abort_immediately=False
+        )
+        return {"status": "unavailable", "action": "announced_hangup"}
+
+    await engine.task.queue_frame(
+        TTSSpeakFrame(message or _DEFAULT_UNAVAILABLE_MESSAGE, persist_to_logs=True)
+    )
+    return {"status": "unavailable", "action": "back_to_ai"}
+
+
 async def execute_cold_transfer(
     engine,
     *,
@@ -163,6 +201,9 @@ async def execute_cold_transfer(
     now: datetime | None = None,
     lk=None,
     transfer_reason: str = "unknown",
+    queue_health_config: dict | None = None,
+    unavailable_message: str | None = None,
+    unavailable_announce_limit: int | None = None,
 ) -> dict:
     """Run the shared cold-transfer flow and return a structured result (never raises).
 
@@ -182,6 +223,14 @@ async def execute_cold_transfer(
         lk: Optional injected LiveKitAPI (tests).
         transfer_reason: Trigger label recorded on the handoff ticket
             ("voice_tool" | "press0"); never caller-derived.
+        queue_health_config: Tool-config dict holding the queue-health keys
+            (see :mod:`queue_health`). None/unset -> no health check (behavior
+            identical to before S-L5-QUEUE). The safetynet path deliberately
+            never passes this — it REFERs regardless (documented interaction).
+        unavailable_message: Spoken when the queue is unhealthy (back-to-AI).
+        unavailable_announce_limit: Per-call cap on unavailable announcements;
+            once exceeded the call is ended explicitly instead of looping
+            AI ↔ gate forever (C4, default 2).
     """
     if not valid_destination(destination):
         # Pre-flight failure never reaches _do_refer — emit here so a config
@@ -222,9 +271,19 @@ async def execute_cold_transfer(
         }
     engine._livekit_transfer_in_progress = True
     try:
+        from api.services.pipecat.queue_health import queue_is_healthy
+
         decision = plan_transfer(
-            schedule, after_hours_action, now or datetime.now(timezone.utc)
+            schedule,
+            after_hours_action,
+            now or datetime.now(timezone.utc),
+            queue_healthy=await queue_is_healthy(queue_health_config),
         )
+
+        if decision is TransferDecision.UNAVAILABLE:
+            return await _announce_unavailable(
+                engine, unavailable_message, unavailable_announce_limit
+            )
 
         if decision is TransferDecision.AFTER_HOURS_ALTERNATE:
             if valid_destination(alternate_destination):

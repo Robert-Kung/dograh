@@ -56,6 +56,11 @@ class Press0Gate(FrameProcessor):
         self._failure_message = (
             config.get("transferFailedMessage") or _DEFAULT_FAILURE_MESSAGE
         )
+        # S-L5-QUEUE gate health dimension; the whole tool config is handed
+        # over — queue_is_healthy picks its own keys, unset means unchecked.
+        self._queue_health_config = config
+        self._unavailable_message = config.get("transferUnavailableMessage")
+        self._unavailable_limit = config.get("unavailableAnnounceLimit")
         self._debounce_seconds = debounce_seconds
         self._monotonic = monotonic  # NB: not _clock — FrameProcessor owns that
         self._last_trigger = float("-inf")
@@ -93,6 +98,9 @@ class Press0Gate(FrameProcessor):
             alternate_destination=self._alternate_destination,
             after_hours_message=self._after_hours_message,
             transfer_reason="press0",
+            queue_health_config=self._queue_health_config,
+            unavailable_message=self._unavailable_message,
+            unavailable_announce_limit=self._unavailable_limit,
         )
         logger.info(f"press-0 cold transfer result: {result}")
 
