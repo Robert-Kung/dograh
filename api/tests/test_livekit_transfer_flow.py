@@ -380,3 +380,85 @@ async def test_no_health_source_behavior_unchanged():
     )
     assert result.get("status") == "success"
     assert captured["transfer_to"] == "tel:+886277001234"
+
+
+@pytest.mark.skipif(not PIPECAT, reason="pipecat runtime not installed")
+async def test_malformed_announce_limit_degrades_to_default(monkeypatch):
+    from api.services.pipecat import queue_health as qh
+    from api.services.pipecat.livekit_transfer_flow import execute_cold_transfer
+
+    async def always_unhealthy(config, **kw):
+        return False
+
+    monkeypatch.setattr(qh, "queue_is_healthy", always_unhealthy)
+    eng = _fake_engine()
+    results = [
+        await execute_cold_transfer(
+            eng,
+            room_name="cs-room",
+            destination="tel:+886277001234",
+            schedule=SCHED,
+            now=OPEN,
+            queue_health_config={"queueHealthUrl": "http://q/h"},
+            unavailable_announce_limit="two",  # config typo: degrade, never raise (H1)
+        )
+        for _ in range(3)
+    ]
+    assert [r["action"] for r in results] == [
+        "back_to_ai",
+        "back_to_ai",
+        "announced_hangup",  # default cap (2) still enforced
+    ]
+
+
+@pytest.mark.skipif(not PIPECAT, reason="pipecat runtime not installed")
+async def test_closed_hours_skips_health_probe(monkeypatch):
+    from api.services.pipecat import queue_health as qh
+    from api.services.pipecat.livekit_transfer_flow import execute_cold_transfer
+
+    probed = []
+
+    async def recording_health(config, **kw):
+        probed.append(config)
+        return True
+
+    monkeypatch.setattr(qh, "queue_is_healthy", recording_health)
+    eng = _fake_engine()
+    await execute_cold_transfer(
+        eng,
+        room_name="cs-room",
+        destination="tel:+886277001234",
+        schedule=SCHED,
+        now=CLOSED,
+        queue_health_config={"queueHealthUrl": "http://q/h"},
+    )
+    assert probed == []  # M1: closed hours never pay the probe latency
+
+
+@pytest.mark.skipif(not PIPECAT, reason="pipecat runtime not installed")
+async def test_unavailable_emits_observability_event(monkeypatch):
+    from api.services.observability import call_events
+    from api.services.pipecat import queue_health as qh
+    from api.services.pipecat.livekit_transfer_flow import execute_cold_transfer
+
+    async def always_unhealthy(config, **kw):
+        return False
+
+    events = []
+    monkeypatch.setattr(qh, "queue_is_healthy", always_unhealthy)
+    monkeypatch.setattr(
+        call_events, "emit", lambda event, **fields: events.append((event, fields))
+    )
+    eng = _fake_engine()
+    await execute_cold_transfer(
+        eng,
+        room_name="cs-room",
+        destination="tel:+886277001234",
+        schedule=SCHED,
+        now=OPEN,
+        queue_health_config={"queueHealthUrl": "http://q/h"},
+        transfer_reason="voice_tool",
+    )
+    assert [e for e, _ in events] == ["transfer.unavailable"]  # M3: visible to ops
+    assert events[0][1]["room_name"] == "cs-room"
+    assert events[0][1]["transfer_reason"] == "voice_tool"

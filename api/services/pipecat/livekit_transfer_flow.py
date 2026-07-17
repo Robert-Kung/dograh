@@ -159,19 +159,47 @@ async def _do_refer(
     return result
 
 
-async def _announce_unavailable(engine, message: str | None, limit: int | None) -> dict:
+async def _announce_unavailable(
+    engine,
+    message: str | None,
+    limit: int | None,
+    *,
+    room_name: str,
+    transfer_reason: str,
+) -> dict:
     """Queue unhealthy: explicit message back to the AI, bounded per call.
 
     The per-call announcement counter lives on the engine (like the REFER
     idempotency flag); once past the limit the call ends explicitly so a
     persistent outage can't loop the caller AI ↔ gate forever (C4).
     """
+    from api.services.observability.call_events import emit
     from pipecat.frames.frames import TTSSpeakFrame
     from pipecat.utils.enums import EndTaskReason
+    from pipecat.utils.run_context import get_current_run_id
 
-    cap = DEFAULT_UNAVAILABLE_ANNOUNCE_LIMIT if limit is None else int(limit)
+    try:
+        cap = DEFAULT_UNAVAILABLE_ANNOUNCE_LIMIT if limit is None else int(limit)
+    except (TypeError, ValueError):
+        # free-form tool config: a junk limit must degrade, never raise (H1)
+        cap = DEFAULT_UNAVAILABLE_ANNOUNCE_LIMIT
     count = getattr(engine, "_transfer_unavailable_announcements", 0) + 1
     engine._transfer_unavailable_announcements = count
+
+    # a queue outage is an incident, not a schedule state — it must be
+    # visible to ops, not only in loguru (review M3, S-L7-OBS)
+    try:
+        run_id = get_current_run_id()
+        workflow_run_id = int(run_id) if run_id is not None else None
+    except (TypeError, ValueError):
+        workflow_run_id = None
+    emit(
+        "transfer.unavailable",
+        room_name=room_name,
+        reason="queue_unhealthy",
+        workflow_run_id=workflow_run_id,
+        transfer_reason=transfer_reason,
+    )
 
     if count > cap:
         await engine.task.queue_frame(
@@ -273,16 +301,23 @@ async def execute_cold_transfer(
     try:
         from api.services.pipecat.queue_health import queue_is_healthy
 
+        # schedule first: the closed branches never read queue_healthy, so a
+        # closed-hours call must not pay the probe latency (review M1)
         decision = plan_transfer(
-            schedule,
-            after_hours_action,
-            now or datetime.now(timezone.utc),
-            queue_healthy=await queue_is_healthy(queue_health_config),
+            schedule, after_hours_action, now or datetime.now(timezone.utc)
         )
+        if decision is TransferDecision.REFER and not await queue_is_healthy(
+            queue_health_config
+        ):
+            decision = TransferDecision.UNAVAILABLE
 
         if decision is TransferDecision.UNAVAILABLE:
             return await _announce_unavailable(
-                engine, unavailable_message, unavailable_announce_limit
+                engine,
+                unavailable_message,
+                unavailable_announce_limit,
+                room_name=room_name,
+                transfer_reason=transfer_reason,
             )
 
         if decision is TransferDecision.AFTER_HOURS_ALTERNATE:

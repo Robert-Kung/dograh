@@ -24,7 +24,9 @@ IMMEDIATE_EVENTS = {
 }
 # trust.violation is windowed, not immediate: one occurrence may be a benign
 # LLM formatting slip; repetition is the attack signal (S-L8-TRUST).
-WINDOWED_EVENTS = {"provider.error", "trust.violation"}
+# transfer.unavailable is windowed too: a queue outage emits once per call,
+# so an outage should page as one summary, not a storm (S-L5-QUEUE M3).
+WINDOWED_EVENTS = {"provider.error", "trust.violation", "transfer.unavailable"}
 
 _redis = None
 

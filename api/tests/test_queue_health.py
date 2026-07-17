@@ -6,6 +6,8 @@ unchecked, timeout/unreachable is unhealthy (fail-safe), TTL cache bounds
 repeat probing.
 """
 
+import asyncio
+
 import pytest
 
 from api.services.pipecat.queue_health import queue_is_healthy, reset_cache
@@ -107,3 +109,64 @@ async def test_probe_receives_token_and_timeout():
         "token": "svc-secret",
         "timeout": 0.3,
     }
+
+
+# --- config robustness (PR #8 review H1/F1/M2/M4) ---------------------------
+
+
+async def test_malformed_numeric_config_degrades_never_raises():
+    seen = {}
+
+    async def probe(url, token, timeout):
+        seen["timeout"] = timeout
+        return True
+
+    cfg = {
+        "queueHealthUrl": "http://q/h",
+        "queueHealthTimeoutSeconds": "0.5s",
+        "queueHealthCacheTtlSeconds": "abc",
+    }
+    assert await queue_is_healthy(cfg, probe=probe) is True  # H1: no ValueError
+    assert seen["timeout"] == 0.5  # defaults, not a crash
+
+
+async def test_non_string_url_is_unchecked():
+    async def probe(url, token, timeout):  # pragma: no cover
+        raise AssertionError("must not probe")
+
+    assert await queue_is_healthy({"queueHealthUrl": ["http://q"]}, probe=probe) is True
+
+
+async def test_timeout_clamped_to_hard_cap():
+    seen = {}
+
+    async def probe(url, token, timeout):
+        seen["timeout"] = timeout
+        return True
+
+    await queue_is_healthy(
+        {"queueHealthUrl": "http://q/h", "queueHealthTimeoutSeconds": 30}, probe=probe
+    )
+    assert seen["timeout"] == 2.0  # F1: config cannot stretch the in-call pause
+
+
+async def test_explicit_zero_ttl_disables_cache():
+    calls = []
+
+    async def probe(url, token, timeout):
+        calls.append(url)
+        return True
+
+    cfg = {"queueHealthUrl": "http://q/h", "queueHealthCacheTtlSeconds": 0}
+    await queue_is_healthy(cfg, probe=probe)
+    await queue_is_healthy(cfg, probe=probe)
+    assert len(calls) == 2  # M4: explicit 0 means "no cache", not the default
+
+
+async def test_timeout_is_a_total_budget():
+    async def stalling_probe(url, token, timeout):
+        await asyncio.sleep(0.3)  # ignores the per-call timeout it was handed
+        return True
+
+    cfg = {"queueHealthUrl": "http://q/h", "queueHealthTimeoutSeconds": 0.05}
+    assert await queue_is_healthy(cfg, probe=stalling_probe) is False  # M2: wall clock
