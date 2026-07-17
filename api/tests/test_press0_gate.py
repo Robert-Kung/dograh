@@ -214,3 +214,25 @@ async def test_already_transferring_is_silent(monkeypatch):
     await calls["drain"]()
 
     assert calls["queued"] == []  # no announcement
+
+
+@pytest.mark.skipif(not PIPECAT, reason="pipecat runtime not installed")
+async def test_transfer_crash_still_announces_fallback(monkeypatch):
+    """C4 belt: if the executor ever raises (e.g. malformed config leaking
+    through), the off-loop task must announce the failure, not die silently
+    inside the TaskManager (PR #8 review H1)."""
+    from pipecat.processors.frame_processor import FrameDirection
+
+    from api.services.pipecat import press0_gate as mod
+
+    gate, calls = _make_gate(monkeypatch, now_values=[1000.0])
+
+    async def exploding_execute(engine, **kwargs):
+        raise ValueError("malformed config leaked")
+
+    monkeypatch.setattr(mod, "execute_cold_transfer", exploding_execute)
+    await gate.process_frame(_dtmf("0"), FrameDirection.DOWNSTREAM)
+    await calls["drain"]()
+
+    texts = [getattr(f, "text", "") for f in calls["queued"]]
+    assert len(texts) == 1 and texts[0]  # spoken fallback, no dead silence

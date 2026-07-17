@@ -976,6 +976,9 @@ class CustomToolManager:
             after_hours_message=config.get("afterHoursMessage"),
             before_refer=lambda: self._play_config_message(config),
             transfer_reason="voice_tool",
+            queue_health_config=config,
+            unavailable_message=config.get("transferUnavailableMessage"),
+            unavailable_announce_limit=config.get("unavailableAnnounceLimit"),
         )
 
         status = result.get("status")
@@ -985,14 +988,19 @@ class CustomToolManager:
                 {"status": "transfer_success", "message": "Transferred to human"},
                 properties=FunctionCallResultProperties(run_llm=False),
             )
-        elif status == "after_hours":
-            # Executor already queued the announcement (and hung up if configured);
-            # AI resumes on the next user turn for back_to_ai.
+        elif status in ("after_hours", "unavailable"):
+            # Executor already queued the announcement (and hung up if configured
+            # or past the unavailable announce limit); AI resumes on the next
+            # user turn for back_to_ai.
             await function_call_params.result_callback(
                 {
-                    "status": "after_hours",
+                    "status": status,
                     "action": result.get("action"),
-                    "message": "Outside business hours",
+                    "message": (
+                        "Outside business hours"
+                        if status == "after_hours"
+                        else "Transfer temporarily unavailable"
+                    ),
                 },
                 properties=FunctionCallResultProperties(run_llm=False),
             )

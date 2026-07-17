@@ -280,3 +280,185 @@ async def test_after_hours_alternate_without_target_falls_back_to_ai():
     )
     assert res == {"status": "after_hours", "action": "back_to_ai"}
     assert eng._frames and not eng._ended
+
+
+# --- queue-health dimension (S-L5-QUEUE) -----------------------------------
+
+
+def test_open_but_unhealthy_is_unavailable():
+    assert (
+        plan_transfer(SCHED, "back_to_ai", OPEN, queue_healthy=False)
+        is TransferDecision.UNAVAILABLE
+    )
+
+
+def test_closed_and_unhealthy_stays_after_hours():
+    # schedule wins first: out-of-hours handling is unchanged by health
+    assert (
+        plan_transfer(SCHED, "announce_and_hangup", CLOSED, queue_healthy=False)
+        is TransferDecision.AFTER_HOURS_HANGUP
+    )
+
+
+def test_healthy_default_keeps_prior_behavior():
+    assert plan_transfer(SCHED, None, OPEN) is TransferDecision.REFER
+
+
+@pytest.mark.skipif(not PIPECAT, reason="pipecat runtime not installed")
+async def test_unavailable_announces_and_returns_to_ai(monkeypatch):
+    from api.services.pipecat import queue_health as qh
+    from api.services.pipecat.livekit_transfer_flow import execute_cold_transfer
+
+    async def always_unhealthy(config, **kw):
+        return False
+
+    # execute_cold_transfer imports the symbol lazily from the module, so
+    # patching the module attribute is effective.
+    monkeypatch.setattr(qh, "queue_is_healthy", always_unhealthy)
+    eng = _fake_engine()
+    result = await execute_cold_transfer(
+        eng,
+        room_name="cs-room",
+        destination="tel:+886277001234",
+        schedule=SCHED,
+        now=OPEN,
+        queue_health_config={"queueHealthUrl": "http://queue.internal/internal/health"},
+    )
+
+    assert result == {"status": "unavailable", "action": "back_to_ai"}
+    assert len(eng._frames) == 1  # explicit spoken message, no REFER attempt
+    assert eng._ended == []
+    assert eng._transfer_unavailable_announcements == 1
+
+
+@pytest.mark.skipif(not PIPECAT, reason="pipecat runtime not installed")
+async def test_unavailable_announce_limit_ends_call(monkeypatch):
+    from api.services.pipecat import queue_health as qh
+    from api.services.pipecat.livekit_transfer_flow import execute_cold_transfer
+
+    async def always_unhealthy(config, **kw):
+        return False
+
+    monkeypatch.setattr(qh, "queue_is_healthy", always_unhealthy)
+    eng = _fake_engine()
+    results = []
+    for _ in range(3):
+        results.append(
+            await execute_cold_transfer(
+                eng,
+                room_name="cs-room",
+                destination="tel:+886277001234",
+                schedule=SCHED,
+                now=OPEN,
+                queue_health_config={"queueHealthUrl": "http://q/internal/health"},
+                unavailable_announce_limit=2,
+            )
+        )
+
+    assert [r["action"] for r in results] == [
+        "back_to_ai",
+        "back_to_ai",
+        "announced_hangup",
+    ]
+    assert len(eng._ended) == 1  # third trigger ends the call explicitly (C4)
+
+
+@pytest.mark.skipif(not PIPECAT, reason="pipecat runtime not installed")
+async def test_no_health_source_behavior_unchanged():
+    from api.services.pipecat.livekit_transfer_flow import execute_cold_transfer
+
+    eng = _fake_engine()
+    lk, captured = _fake_lk()
+    result = await execute_cold_transfer(
+        eng,
+        room_name="cs-room",
+        destination="tel:+886277001234",
+        schedule=SCHED,
+        now=OPEN,
+        lk=lk,
+        # queue_health_config deliberately omitted: unchecked -> straight REFER
+    )
+    assert result.get("status") == "success"
+    assert captured["transfer_to"] == "tel:+886277001234"
+
+
+@pytest.mark.skipif(not PIPECAT, reason="pipecat runtime not installed")
+async def test_malformed_announce_limit_degrades_to_default(monkeypatch):
+    from api.services.pipecat import queue_health as qh
+    from api.services.pipecat.livekit_transfer_flow import execute_cold_transfer
+
+    async def always_unhealthy(config, **kw):
+        return False
+
+    monkeypatch.setattr(qh, "queue_is_healthy", always_unhealthy)
+    eng = _fake_engine()
+    results = [
+        await execute_cold_transfer(
+            eng,
+            room_name="cs-room",
+            destination="tel:+886277001234",
+            schedule=SCHED,
+            now=OPEN,
+            queue_health_config={"queueHealthUrl": "http://q/h"},
+            unavailable_announce_limit="two",  # config typo: degrade, never raise (H1)
+        )
+        for _ in range(3)
+    ]
+    assert [r["action"] for r in results] == [
+        "back_to_ai",
+        "back_to_ai",
+        "announced_hangup",  # default cap (2) still enforced
+    ]
+
+
+@pytest.mark.skipif(not PIPECAT, reason="pipecat runtime not installed")
+async def test_closed_hours_skips_health_probe(monkeypatch):
+    from api.services.pipecat import queue_health as qh
+    from api.services.pipecat.livekit_transfer_flow import execute_cold_transfer
+
+    probed = []
+
+    async def recording_health(config, **kw):
+        probed.append(config)
+        return True
+
+    monkeypatch.setattr(qh, "queue_is_healthy", recording_health)
+    eng = _fake_engine()
+    await execute_cold_transfer(
+        eng,
+        room_name="cs-room",
+        destination="tel:+886277001234",
+        schedule=SCHED,
+        now=CLOSED,
+        queue_health_config={"queueHealthUrl": "http://q/h"},
+    )
+    assert probed == []  # M1: closed hours never pay the probe latency
+
+
+@pytest.mark.skipif(not PIPECAT, reason="pipecat runtime not installed")
+async def test_unavailable_emits_observability_event(monkeypatch):
+    from api.services.observability import call_events
+    from api.services.pipecat import queue_health as qh
+    from api.services.pipecat.livekit_transfer_flow import execute_cold_transfer
+
+    async def always_unhealthy(config, **kw):
+        return False
+
+    events = []
+    monkeypatch.setattr(qh, "queue_is_healthy", always_unhealthy)
+    monkeypatch.setattr(
+        call_events, "emit", lambda event, **fields: events.append((event, fields))
+    )
+    eng = _fake_engine()
+    await execute_cold_transfer(
+        eng,
+        room_name="cs-room",
+        destination="tel:+886277001234",
+        schedule=SCHED,
+        now=OPEN,
+        queue_health_config={"queueHealthUrl": "http://q/h"},
+        transfer_reason="voice_tool",
+    )
+    assert [e for e, _ in events] == ["transfer.unavailable"]  # M3: visible to ops
+    assert events[0][1]["room_name"] == "cs-room"
+    assert events[0][1]["transfer_reason"] == "voice_tool"
