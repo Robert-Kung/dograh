@@ -96,12 +96,12 @@ curl -o docker-compose.yaml https://raw.githubusercontent.com/dograh-hq/dograh/m
 > 然后开启一个新会话,让它 _"set up Dograh"_(或运行 `/dograh-setup`)。Codex 同样支持——详见[插件仓库](https://github.com/dograh-hq/dograh-plugins#install)。
 
 > **提示**
-> 首次启动需要 2-3 分钟拉取所有镜像。启动完成后,打开 http://localhost:3010 即可创建你的第一个 AI 语音助手!
+> 首次启动需要 2-3 分钟拉取所有镜像。启动完成后,打开 http://localhost:3011 即可创建你的第一个 AI 语音助手!
 > 常见问题及解决方案请参见 🔧 **[故障排查](docs/troubleshooting.md)**。
 
 ### 🎙️ 你的第一个语音机器人
 
-1. 在浏览器中打开 [http://localhost:3010](http://localhost:3010)。
+1. 在浏览器中打开 [http://localhost:3011](http://localhost:3011)。
 2. 选择 **Inbound(呼入)** 或 **Outbound(外呼)**,为机器人命名(例如 _销售线索筛选_),再用 5-10 个词描述用途(例如 _筛选保险表单中的购买意向_)。
 3. 点击 **Web Call**,直接和你的机器人对话。
 

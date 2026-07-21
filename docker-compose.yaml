@@ -29,7 +29,10 @@ services:
         max-size: "10m"
         max-file: "3"
     ports:
-      - "5432:5432"
+      # Host-side 5434: loopback-only per the host security policy, and moved off
+      # 5432 because another project on this host publishes 127.0.0.1:5432.
+      # Container side stays 5432 — peers reach it as postgres:5432.
+      - "127.0.0.1:5434:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -43,7 +46,7 @@ services:
   redis:
     image: redis:7
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
     command: >
       --requirepass ${REDIS_PASSWORD:-redissecret}
     volumes:
@@ -110,8 +113,12 @@ services:
       ui:
         condition: service_started
     ports:
-      - "80:80"
-      - "443:443"
+      # Host security policy: every published port names an explicit interface and
+      # defaults to loopback. A public "remote" install is the one case that must
+      # reach the internet — it opts out deliberately with PUBLIC_BIND_HOST=0.0.0.0
+      # in .env. Never default this to 0.0.0.0.
+      - "${PUBLIC_BIND_HOST:-127.0.0.1}:80:80"
+      - "${PUBLIC_BIND_HOST:-127.0.0.1}:443:443"
     volumes:
       - nginx-generated:/etc/nginx/conf.d:ro
       - ./certs:/etc/nginx/certs:ro
@@ -127,11 +134,15 @@ services:
       dograh-init:
         condition: service_completed_successfully
     ports:
-      - "3478:3478/udp"
-      - "3478:3478/tcp"
-      - "5349:5349/udp"
-      - "5349:5349/tcp"
-      - "49152-49200:49152-49200/udp"
+      # See the nginx note above. TURN relay only does its job when reachable from
+      # the public internet, so a real remote deployment must set
+      # PUBLIC_BIND_HOST=0.0.0.0; the loopback default keeps a stray local-turn
+      # start from exposing the relay on this host.
+      - "${PUBLIC_BIND_HOST:-127.0.0.1}:3478:3478/udp"
+      - "${PUBLIC_BIND_HOST:-127.0.0.1}:3478:3478/tcp"
+      - "${PUBLIC_BIND_HOST:-127.0.0.1}:5349:5349/udp"
+      - "${PUBLIC_BIND_HOST:-127.0.0.1}:5349:5349/tcp"
+      - "${PUBLIC_BIND_HOST:-127.0.0.1}:49152-49200:49152-49200/udp"
     volumes:
       - coturn-generated:/etc/coturn:ro
     command:
@@ -213,8 +224,8 @@ services:
       # comes back as http://…, and inbound webhook signature checks fail for
       # every provider at once (telephony providers sign the public https URL, so
       # the recomputed signature won't match). "*" trusts all peers; the api port
-      # (8000) is published, so firewall/harden it at the host — or narrow this
-      # to your Docker bridge subnet — if that exposure matters to you.
+      # is published on 127.0.0.1 only, so the host itself is the trust boundary —
+      # narrow this to your Docker bridge subnet if that still matters to you.
       FORWARDED_ALLOW_IPS: "*"
 
       # Langfuse — credentials can be set here or per-organization via the UI
@@ -238,7 +249,10 @@ services:
       POSTHOG_HOST: "https://us.i.posthog.com"
 
     ports:
-      - "8000:8000"
+      # Host-side 8001: loopback-only per the host security policy, and moved off
+      # 8000 because another project on this host publishes 127.0.0.1:8000.
+      # Container side stays 8000 — the UI reaches it as api:8000.
+      - "127.0.0.1:8001:8000"
     depends_on:
       postgres:
         condition: service_healthy
@@ -276,7 +290,9 @@ services:
       POSTHOG_KEY: "phc_ItizB1dP6yv7ZYobbcqrpxTdbomDA8hJFSEmAMdYvIr"
       POSTHOG_HOST: "https://us.posthog.com"
     ports:
-      - "3010:3010"
+      # Host-side 3011: loopback-only per the host security policy, and moved off
+      # 3010 because another service on this host publishes 127.0.0.1:3010.
+      - "127.0.0.1:3011:3010"
     depends_on:
       api:
         condition: service_healthy
@@ -321,7 +337,8 @@ services:
     #     *.trycloudflare.com URL the API discovers from the metrics endpoint.
     command: ${CLOUDFLARED_COMMAND:-tunnel --url http://api:8000 --metrics 0.0.0.0:2000}
     ports:
-      - "2000:2000" # metrics endpoint (quick-tunnel URL discovery)
+      # Loopback-only: only the API (in-network) and the host read this endpoint.
+      - "127.0.0.1:2000:2000" # metrics endpoint (quick-tunnel URL discovery)
     networks:
       - app-network
 

@@ -96,12 +96,12 @@ curl -o docker-compose.yaml https://raw.githubusercontent.com/dograh-hq/dograh/m
 > Then start a new session and ask it to _"set up Dograh"_ (or run `/dograh-setup`). Codex is supported too — see the [plugin repo](https://github.com/dograh-hq/dograh-plugins#install).
 
 > **Note**
-> First startup may take 2-3 minutes to download all images. Once running, open http://localhost:3010 to create your first AI voice assistant!
+> First startup may take 2-3 minutes to download all images. Once running, open http://localhost:3011 to create your first AI voice assistant!
 > For common issues and solutions, see 🔧 **[Troubleshooting](docs/troubleshooting.md)**.
 
 ### 🎙️ Your First Voice Bot
 
-1. Open [http://localhost:3010](http://localhost:3010) in your browser.
+1. Open [http://localhost:3011](http://localhost:3011) in your browser.
 2. Pick **Inbound** or **Outbound**, name your bot (e.g. _Lead Qualification_), and describe the use case in 5–10 words (e.g. _Screen insurance form submissions for purchase intent_).
 3. Click **Web Call** — you're talking to your bot.
 
@@ -142,6 +142,40 @@ For detailed deployment instructions including remote server setup with HTTPS, s
 ### Cloud Version
 
 Visit [https://www.dograh.com](https://www.dograh.com/) for our managed cloud offering.
+
+### Host Port Bindings & Security Policy
+
+**Policy: every published host port binds to `127.0.0.1` — never `0.0.0.0`, and never an
+omitted interface.** Docker publishes ports by inserting its own iptables rules, which
+bypass host firewalls like `ufw`; an omitted interface (`"5432:5432"`) therefore silently
+exposes the service on every interface, including the public one. Always write the
+interface explicitly.
+
+This fork also moves several host ports off their upstream defaults because other projects
+on the same host already hold them. **Only the host side moved** — container ports are
+unchanged, and services still reach each other by compose service name (`postgres:5432`,
+`redis:6379`, `minio:9000`, `api:8000`), so nothing inside the network is affected.
+
+| Service | Host (this fork) | Container | Upstream default | Note |
+|---|---|---|---|---|
+| postgres | `127.0.0.1:5434` | 5432 | `5432:5432` | 5432 and 5433 taken by other projects |
+| redis | `127.0.0.1:6379` | 6379 | `6379:6379` | port kept, interface pinned |
+| minio API / console | `127.0.0.1:9000` / `9001` | 9000 / 9001 | already loopback | unchanged |
+| api | `127.0.0.1:8001` | 8000 | `8000:8000` | 8000 taken by another project |
+| ui | `127.0.0.1:3011` | 3010 | `3010:3010` | 3010 taken by another service |
+| cloudflared metrics | `127.0.0.1:2000` | 2000 | `2000:2000` | interface pinned |
+| nginx (`remote`) | `${PUBLIC_BIND_HOST:-127.0.0.1}:80/443` | 80 / 443 | `80:80` | see below |
+| coturn (`remote`, `local-turn`) | `${PUBLIC_BIND_HOST:-127.0.0.1}:3478/5349/49152-49200` | same | unbound | see below |
+
+`nginx` and `coturn` are the one deliberate exception. They exist to be reached from the
+public internet — a TURN relay bound to loopback cannot do NAT traversal at all — so their
+interface is driven by `PUBLIC_BIND_HOST`, which **defaults to loopback**. A genuine remote
+deployment opts out explicitly by setting `PUBLIC_BIND_HOST=0.0.0.0` in `.env`. Do not
+change the default.
+
+Note that `HOSTNAME: "0.0.0.0"` on the `ui` service and `--metrics 0.0.0.0:2000` on
+`cloudflared` are *container-internal* bind addresses, not host publishes. They must stay
+`0.0.0.0` for the loopback-bound publish in front of them to work.
 
 ## 📚Documentation
 

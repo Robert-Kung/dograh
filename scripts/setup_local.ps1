@@ -319,5 +319,5 @@ Write-Host 'reach your local API over a temporary public URL.' -ForegroundColor 
 Write-Host ''
 Write-Warn 'Your application will be available at:'
 Write-Host ''
-Write-Host '  http://localhost:3010' -ForegroundColor Blue
+Write-Host '  http://localhost:3011' -ForegroundColor Blue
 Write-Host ''
