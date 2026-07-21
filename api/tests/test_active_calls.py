@@ -217,4 +217,8 @@ def test_active_calls_route_returns_count_with_secret(monkeypatch):
     )
 
     assert response.status_code == 200
-    assert response.json() == {"active_calls": 1}
+    assert response.json() == {
+        "active_calls": 1,
+        "livekit_active_calls": 0,
+        "reserved_slots": 0,
+    }

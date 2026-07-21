@@ -155,6 +155,32 @@ async def test_provider_error_window_aggregates(monkeypatch, sent):
     assert len(sent) == 1
 
 
+@pytest.mark.asyncio
+async def test_capacity_rejected_window_aggregates(monkeypatch, sent):
+    """S-L9-SCALE: full-capacity rejections arrive in batches — third event in
+    the window sends one summary carrying active/limit/outcome, never a storm."""
+    monkeypatch.setenv("OBS_ALERT_WEBHOOK_URL", "https://hooks.example/x")
+    monkeypatch.setenv("OBS_ERROR_THRESHOLD", "3")
+    fake = _FakeRedis()
+    alerts._redis = fake
+    fields = {
+        "room_name": "cs-+886912",
+        "reason": "capacity",
+        "active": 6,
+        "limit": 6,
+        "outcome": "transferred",
+    }
+    for _ in range(3):
+        alerts.notify("capacity.rejected", fields)
+        await _drain()
+    assert len(sent) == 1
+    assert "3 occurrences" in sent[0]["text"]
+    assert "active=6" in sent[0]["text"]
+    assert "limit=6" in sent[0]["text"]
+    assert "outcome=transferred" in sent[0]["text"]
+    assert fake.deletes == ["obs:alert:capacity.rejected"]
+
+
 # --- safetynet log_event contract (1.1) ---
 
 

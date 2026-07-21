@@ -134,6 +134,10 @@ async def health() -> HealthResponse:
 
 class ActiveCallsResponse(BaseModel):
     active_calls: int
+    # S-L9-SCALE capacity-gate breakdown: LIVEKIT-scoped active runs and
+    # not-yet-converted admission reservations (reconciliation/autoscale signal).
+    livekit_active_calls: int
+    reserved_slots: int
 
 
 DOGRAH_DEVOPS_SECRET_HEADER = "X-Dograh-Devops-Secret"
@@ -174,7 +178,15 @@ async def active_calls(
     or per Kubernetes pod (preStop hook). See api/services/pipecat/active_calls.py.
     """
     from api.constants import DOGRAH_DEVOPS_SECRET
-    from api.services.pipecat.active_calls import active_call_count
+    from api.services.pipecat.active_calls import (
+        active_call_count,
+        livekit_active_call_count,
+        reserved_slot_count,
+    )
 
     _verify_devops_secret(DOGRAH_DEVOPS_SECRET, x_dograh_devops_secret)
-    return ActiveCallsResponse(active_calls=active_call_count())
+    return ActiveCallsResponse(
+        active_calls=active_call_count(),
+        livekit_active_calls=livekit_active_call_count(),
+        reserved_slots=reserved_slot_count(),
+    )

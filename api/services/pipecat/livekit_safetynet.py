@@ -144,7 +144,7 @@ def release(workflow_run_id: Optional[int]) -> None:
         _fired_runs.discard(workflow_run_id)
 
 
-async def _delete_room(room_name: str, lk) -> None:
+async def delete_room(room_name: str, lk) -> None:
     """Delete the room so the caller hears a hangup, never a silent room (C4)."""
     from livekit.protocol.room import DeleteRoomRequest
 
@@ -193,12 +193,25 @@ async def server_side_safetynet(
         from api.services.pipecat.livekit_cold_transfer import (
             cold_transfer_to_human,
             livekit_api,
+            wait_for_sip_participant,
         )
 
         async with livekit_api(lk) as client:
             destination = fallback_queue()
             if destination is not None:
-                result = await cold_transfer_to_human(room_name, destination, lk=client)
+                # room_started-triggered failures (no_did/unmapped_did) can
+                # outrun the SIP caller joining the room — bounded wait, then
+                # REFER with the found identity (no second list, no TOCTOU).
+                identity = await wait_for_sip_participant(room_name, lk=client)
+                if identity is None:
+                    result = {"status": "failed", "reason": "no_sip_caller"}
+                else:
+                    result = await cold_transfer_to_human(
+                        room_name,
+                        destination,
+                        lk=client,
+                        participant_identity=identity,
+                    )
                 if result.get("status") == "success":
                     log_event(
                         "safetynet.transfer_ok",
@@ -226,7 +239,7 @@ async def server_side_safetynet(
                     "SAFETYNET_FALLBACK_QUEUE not configured; ending call explicitly"
                 )
 
-            await _delete_room(room_name, client)
+            await delete_room(room_name, client)
         log_event(
             "safetynet.terminated",
             room_name=room_name,

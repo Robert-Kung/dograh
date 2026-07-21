@@ -79,11 +79,41 @@ async def dispatch_livekit_call(
 
     from api.db import db_client
     from api.enums import CallType, WorkflowRunMode
+    from api.services.pipecat.active_calls import (
+        livekit_active_call_count,
+        release_slot,
+        reserved_slot_count,
+        try_acquire_slot,
+    )
+    from api.services.pipecat.capacity_gate import (
+        capacity_overflow,
+        max_concurrent_calls,
+    )
     from api.services.pipecat.livekit_safetynet import spawn
     from api.services.pipecat.run_pipeline import run_pipeline_livekit
 
     workflow_id, user_id = resolved
+
+    # S-L9-SCALE admission — before any run/token/pipeline resource exists.
+    # The decision is synchronous (check-and-reserve, no await gap); the
+    # overflow action chain runs in the background so the webhook acks fast
+    # (a slow response makes LiveKit redeliver room_started).
+    limit = max_concurrent_calls()
+    gate_enabled = limit > 0
+    if gate_enabled and not try_acquire_slot(limit):
+        spawn(
+            capacity_overflow(
+                room_name,
+                active=livekit_active_call_count() + reserved_slot_count(),
+                limit=limit,
+                workflow_id=workflow_id,
+                user_id=user_id,
+            )
+        )
+        return
+
     workflow_run_id: Optional[int] = None
+    slot_reserved = gate_enabled
     try:
         workflow_run = await db_client.create_workflow_run(
             name=f"livekit-{room_name}",
@@ -121,9 +151,16 @@ async def dispatch_livekit_call(
                 workflow_id=workflow_id,
                 workflow_run_id=workflow_run_id,
                 user_id=user_id,
+                reserved=gate_enabled,
             )
         )
         task.add_done_callback(_on_pipeline_done)
+        # The pipeline task now owns the slot: its first line converts the
+        # reservation to an active call, and its finally releases it.
+        slot_reserved = False
     except Exception as e:
         logger.exception(f"LiveKit pipeline launch failed for {room_name}: {e}")
         await fallback(room_name, "launch_failed", workflow_run_id)
+    finally:
+        if slot_reserved:
+            release_slot()

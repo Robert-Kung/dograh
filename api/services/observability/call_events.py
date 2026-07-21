@@ -2,8 +2,10 @@
 
 One emit path for every call-lifecycle event — ``safetynet.*`` (published
 contract, names and fields unchanged), ``transfer.ok`` / ``transfer.failed``,
-``provider.error``, and future ``consent.*`` / ``retention.*``. Writes the
-structured log line and hands the event to the alert dispatcher.
+``provider.error``, ``capacity.rejected`` (S-L9-SCALE; per-event fields
+active/limit/outcome, no run id — the call never got one), and future
+``consent.*`` / ``retention.*``. Writes the structured log line and hands the
+event to the alert dispatcher.
 """
 
 from loguru import logger
