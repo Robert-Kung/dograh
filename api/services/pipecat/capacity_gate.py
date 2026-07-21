@@ -12,6 +12,7 @@ validated at startup via :func:`validate_capacity_config`, wired into the
 overflow target must stop boot, not surface on the first full-capacity call.
 """
 
+import asyncio
 import os
 from datetime import datetime, timezone
 
@@ -20,7 +21,7 @@ from loguru import logger
 from api.services.observability import call_events
 from api.services.pipecat.livekit_transfer_flow import (
     TransferDecision,
-    plan_transfer,
+    resolve_transfer_decision,
     valid_destination,
 )
 
@@ -33,9 +34,17 @@ DEFAULT_MAX_INFLIGHT_OVERFLOW = 8
 # Premium-rate destination prefixes rejected at startup (C6). The overflow
 # target auto-REFERs every caller while the gate is full, so a poisoned or
 # fat-fingered value has toll-fraud blast radius beyond what shape validation
-# catches. A guard, not an allowlist: +1-900/+1-976 (NANP premium) and
-# +886-204 (Taiwan premium voice).
-PREMIUM_RATE_PREFIXES = ("+1900", "+1976", "+886204")
+# catches. A guard, not an allowlist: 1-900/1-976 (NANP premium) and 886-204
+# (Taiwan premium voice). Digit form, compared after stripping any leading
+# ``+``, so a sip user expressing the number without ``+`` is caught too —
+# the cost is that a bare PBX extension like ``sip:1900@pbx`` is refused at
+# boot and needs renaming, a loud and cheap failure next to silent toll fraud.
+PREMIUM_RATE_PREFIXES = ("1900", "1976", "886204")
+
+# Wall-clock bound on one overflow action chain (gate probe ≤2s + poll ≤3s +
+# REFER + delete). A hung LiveKit call must not pin its room in the guard set
+# and its flood-valve slot forever.
+OVERFLOW_ACTION_TIMEOUT_SECONDS = 15.0
 
 # Rooms with an overflow action currently in flight. An in-progress guard, NOT
 # a permanent fired-set (security F1): room names repeat across calls (the SIP
@@ -79,7 +88,7 @@ def _premium_rate(destination: str) -> bool:
         number = number[len("tel:") :]
     elif number.startswith("sip:"):
         number = number[len("sip:") :].split("@", 1)[0]
-    return number.startswith(PREMIUM_RATE_PREFIXES)
+    return number.lstrip("+").startswith(PREMIUM_RATE_PREFIXES)
 
 
 def validate_capacity_config() -> None:
@@ -141,15 +150,15 @@ def validate_capacity_config() -> None:
 
 
 async def _gate_allows(workflow_id: int, user_id: int, now: datetime) -> bool:
-    """營運中 ∧ 隊列健康 — the same gate functions ``execute_cold_transfer``
-    uses (``plan_transfer`` + ``queue_is_healthy``, single truth, security F7).
+    """營運中 ∧ 隊列健康 — the same composed verdict ``execute_cold_transfer``
+    uses (``resolve_transfer_decision``, single truth, security F7).
 
     Inputs come from the workflow's ``transfer_call`` tool config (shared
     lookup). A failed lookup degrades to "unconfigured" — open hours, health
-    unchecked — matching the in-call gate's unset semantics.
+    unchecked — matching the in-call gate's unset semantics; the warning below
+    is the ops signal that the health dimension was skipped, not passed.
     """
     from api.db import db_client
-    from api.services.pipecat.queue_health import queue_is_healthy
     from api.services.pipecat.transfer_call_config import find_transfer_call_config
 
     config: dict | None = None
@@ -158,13 +167,16 @@ async def _gate_allows(workflow_id: int, user_id: int, now: datetime) -> bool:
         if workflow is not None and workflow.organization_id:
             config = await find_transfer_call_config(workflow, workflow.organization_id)
     except Exception as e:
-        logger.warning(f"capacity gate config lookup failed: {e}")
+        logger.warning(
+            f"capacity gate config lookup failed ({e}); "
+            "degrading to unconfigured — hours open, queue health unchecked"
+        )
     config = config or {}
 
-    decision = plan_transfer(config.get("schedule"), None, now)
-    if decision is not TransferDecision.REFER:
-        return False
-    return await queue_is_healthy(config)
+    decision = await resolve_transfer_decision(
+        config.get("schedule"), None, now, config
+    )
+    return decision is TransferDecision.REFER
 
 
 async def capacity_overflow(
@@ -196,7 +208,8 @@ async def capacity_overflow(
 
     outcome = "terminated"
     reason = "unknown"
-    try:
+
+    async def _act() -> tuple[str, str]:
         from api.services.pipecat.livekit_cold_transfer import (
             cold_transfer_to_human,
             livekit_api,
@@ -206,25 +219,21 @@ async def capacity_overflow(
 
         async with livekit_api(lk) as client:
             if flood:
-                reason = "overflow_flood"
                 await delete_room(room_name, client)
-                return
+                return "terminated", "overflow_flood"
             destination = overflow_transfer_to()
             if destination is None:
-                reason = "no_target"
                 await delete_room(room_name, client)
-                return
+                return "terminated", "no_target"
             if not await _gate_allows(
                 workflow_id, user_id, now or datetime.now(timezone.utc)
             ):
-                reason = "gate_closed"
                 await delete_room(room_name, client)
-                return
+                return "terminated", "gate_closed"
             identity = await wait_for_sip_participant(room_name, lk=client)
             if identity is None:
-                reason = "no_sip_caller"
                 await delete_room(room_name, client)
-                return
+                return "terminated", "no_sip_caller"
             result = await cold_transfer_to_human(
                 room_name,
                 destination,
@@ -232,14 +241,24 @@ async def capacity_overflow(
                 participant_identity=identity,
             )
             if result.get("status") == "success":
-                outcome = "transferred"
-                reason = "capacity"
-            else:
-                reason = result.get("reason", "refer_failed")
-                await delete_room(room_name, client)
+                return "transferred", "capacity"
+            await delete_room(room_name, client)
+            return "terminated", result.get("reason", "refer_failed")
+
+    try:
+        # A hung LiveKit call must not pin this room's guard entry and its
+        # flood-valve slot forever — bound the whole chain, then take the
+        # recovery-delete leg like any other failure.
+        outcome, reason = await asyncio.wait_for(
+            _act(), timeout=OVERFLOW_ACTION_TIMEOUT_SECONDS
+        )
     except Exception as e:
         logger.exception(f"capacity overflow failed for {room_name}: {e}")
-        reason = "overflow_error"
+        reason = (
+            "overflow_timeout"
+            if isinstance(e, asyncio.TimeoutError)
+            else "overflow_error"
+        )
         try:
             from api.services.pipecat.livekit_cold_transfer import livekit_api
             from api.services.pipecat.livekit_safetynet import delete_room

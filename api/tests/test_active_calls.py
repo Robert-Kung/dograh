@@ -18,8 +18,12 @@ from api.services.pipecat import run_pipeline as run_pipeline_module
 
 
 def setup_function():
-    # Module-level state — start each test from an empty registry.
+    # Module-level state — start each test from an empty registry. The gate
+    # state too: dispatch tests elsewhere leave a reservation behind when a
+    # faked pipeline never registers.
     active_calls._active_run_ids.clear()
+    active_calls._livekit_run_ids.clear()
+    active_calls._reserved_slots = 0
 
 
 def _make_active_calls_client(

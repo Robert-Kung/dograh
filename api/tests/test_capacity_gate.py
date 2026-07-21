@@ -150,6 +150,14 @@ def test_premium_rate_sip_user_fails_fast(monkeypatch):
         validate_capacity_config()
 
 
+def test_premium_rate_sip_user_without_plus_fails_fast(monkeypatch):
+    # digit-form comparison: a premium number expressed as a sip user without
+    # '+' passes format validation and must still be refused (security #1)
+    monkeypatch.setenv("CAPACITY_OVERFLOW_TRANSFER_TO", "sip:19005550000@pbx.example")
+    with pytest.raises(RuntimeError, match="premium-rate"):
+        validate_capacity_config()
+
+
 def test_premium_rate_effective_fallback_fails_fast(monkeypatch):
     # The safetynet queue is what overflow will actually dial when the
     # dedicated var is unset — same blast radius, same guard.
@@ -413,6 +421,25 @@ async def test_inflight_cap_exceeded_skips_to_delete(monkeypatch, events, gate_o
     release.set()
     await asyncio.wait_for(first, timeout=1.0)
     assert cap["transfers"] == ["tel:+886900000000"]
+
+
+@pytest.mark.asyncio
+async def test_hung_overflow_times_out_and_releases_guard(
+    monkeypatch, events, gate_open
+):
+    # a hung LiveKit call must not pin the guard entry / flood-valve slot
+    monkeypatch.setenv("CAPACITY_OVERFLOW_TRANSFER_TO", "tel:+886900000000")
+    monkeypatch.setattr(capacity_gate, "OVERFLOW_ACTION_TIMEOUT_SECONDS", 0.05)
+
+    async def hang_forever(req):
+        await asyncio.Event().wait()
+
+    lk, cap = _fake_lk(on_list=hang_forever)
+    await asyncio.wait_for(_overflow("cs-+886912", lk), timeout=2.0)
+    assert capacity_gate._overflow_in_progress == set()
+    assert cap["deleted"] == ["cs-+886912"]  # recovery delete still ends the call
+    assert events[-1]["outcome"] == "terminated"
+    assert events[-1]["reason"] == "overflow_timeout"
 
 
 # --- dispatch admission (2.1/2.4) ---
