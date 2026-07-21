@@ -62,6 +62,29 @@ def valid_destination(destination: str | None) -> bool:
     return bool(destination and _DESTINATION_RE.match(destination.strip()))
 
 
+async def resolve_transfer_decision(
+    schedule: dict | None,
+    after_hours_action: str | None,
+    now: datetime,
+    queue_health_config: dict | None = None,
+) -> TransferDecision:
+    """The composed transfer gate: 排程 ∧ 隊列健康, in one place.
+
+    Shared by ``execute_cold_transfer`` and the capacity overflow chain
+    (S-L9-SCALE F7) so the two verdicts can never drift. Schedule first: the
+    closed branches never read queue health, so a closed-hours call must not
+    pay the probe latency (review M1).
+    """
+    from api.services.pipecat.queue_health import queue_is_healthy
+
+    decision = plan_transfer(schedule, after_hours_action, now)
+    if decision is TransferDecision.REFER and not await queue_is_healthy(
+        queue_health_config
+    ):
+        decision = TransferDecision.UNAVAILABLE
+    return decision
+
+
 def plan_transfer(
     schedule: dict | None,
     after_hours_action: str | None,
@@ -299,17 +322,12 @@ async def execute_cold_transfer(
         }
     engine._livekit_transfer_in_progress = True
     try:
-        from api.services.pipecat.queue_health import queue_is_healthy
-
-        # schedule first: the closed branches never read queue_healthy, so a
-        # closed-hours call must not pay the probe latency (review M1)
-        decision = plan_transfer(
-            schedule, after_hours_action, now or datetime.now(timezone.utc)
+        decision = await resolve_transfer_decision(
+            schedule,
+            after_hours_action,
+            now or datetime.now(timezone.utc),
+            queue_health_config,
         )
-        if decision is TransferDecision.REFER and not await queue_is_healthy(
-            queue_health_config
-        ):
-            decision = TransferDecision.UNAVAILABLE
 
         if decision is TransferDecision.UNAVAILABLE:
             return await _announce_unavailable(

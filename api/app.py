@@ -81,6 +81,12 @@ async def lifespan(app: FastAPI):
 
         validate_safetynet_config()
 
+        # S-L9-SCALE: capacity gate limits and overflow target must be sane at
+        # boot — the overflow path has no call-time validation hook either.
+        from api.services.pipecat.capacity_gate import validate_capacity_config
+
+        validate_capacity_config()
+
         # S-L7-OBS: say once whether call alerting is active.
         from api.services.observability.alerts import log_alert_startup_status
 

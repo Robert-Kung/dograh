@@ -182,7 +182,11 @@ async def test_dispatch_refer_failure_deletes_room(monkeypatch, events):
 
 @pytest.mark.asyncio
 async def test_dispatch_no_sip_caller_deletes_room(monkeypatch, events):
+    from api.services.pipecat import livekit_cold_transfer
+
     monkeypatch.setenv("SAFETYNET_FALLBACK_QUEUE", "tel:+886900000000")
+    # exhaust the SIP-participant wait without 6×500ms of real sleeping
+    monkeypatch.setattr(livekit_cold_transfer, "WAIT_SIP_INTERVAL_SECONDS", 0.0)
     web = types.SimpleNamespace(kind=0, identity="agent-1")
     lk, cap = _fake_lk([web])
     await server_side_safetynet("cs-+886912", "no_did", lk=lk)
@@ -319,7 +323,11 @@ async def test_e2e_route_fallback_refers_caller(monkeypatch, events):
         captured.update(room=room, destination=destination)
         return {"status": "success", "action": "transferred"}
 
+    async def fake_wait(room, **kwargs):
+        return "sip_abc"
+
     monkeypatch.setattr(livekit_cold_transfer, "cold_transfer_to_human", fake_transfer)
+    monkeypatch.setattr(livekit_cold_transfer, "wait_for_sip_participant", fake_wait)
     await await_fallback(livekit_route._fallback("cs-+886912345678", "unmapped_did"))
     assert captured == {
         "room": "cs-+886912345678",

@@ -393,9 +393,15 @@ async def run_pipeline_livekit(
     user_id: int,
     call_context_vars: dict = {},
     user_provider_id: str | None = None,
+    reserved: bool = False,
 ) -> None:
-    """Run pipeline for a LiveKit room (headless agent participant)."""
-    register_active_call(workflow_run_id)
+    """Run pipeline for a LiveKit room (headless agent participant).
+
+    ``reserved=True`` when the dispatcher acquired a capacity-gate slot for
+    this call (S-L9-SCALE): registering converts the reservation into the
+    LIVEKIT-scoped active count, and the finally below releases it.
+    """
+    register_active_call(workflow_run_id, reserved=reserved)
     try:
         await _run_pipeline_livekit_impl(
             url,

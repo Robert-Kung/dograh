@@ -26,7 +26,14 @@ IMMEDIATE_EVENTS = {
 # LLM formatting slip; repetition is the attack signal (S-L8-TRUST).
 # transfer.unavailable is windowed too: a queue outage emits once per call,
 # so an outage should page as one summary, not a storm (S-L5-QUEUE M3).
-WINDOWED_EVENTS = {"provider.error", "trust.violation", "transfer.unavailable"}
+# capacity.rejected: full-capacity rejections arrive in batches by nature,
+# so per-call alerts would storm (S-L9-SCALE D4).
+WINDOWED_EVENTS = {
+    "provider.error",
+    "trust.violation",
+    "transfer.unavailable",
+    "capacity.rejected",
+}
 
 _redis = None
 
@@ -72,6 +79,9 @@ def _format(event: str, fields: dict) -> str:
         "elapsed_ms",
         "tool_name",
         "param",
+        "active",
+        "limit",
+        "outcome",
     ):
         value = fields.get(key)
         if value is not None:
