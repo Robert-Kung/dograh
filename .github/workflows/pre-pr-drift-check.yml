@@ -77,6 +77,9 @@ jobs:
           ENABLE_AWS_S3: "false"
           MINIO_PUBLIC_ENDPOINT: http://localhost:9000
           DEPLOYMENT_MODE: oss
+          # nltk >= 3.10 blocks imports resolving under CWD (CWE-427 hook);
+          # the CI venv lives in the workspace root, so regex trips it.
+          NLTK_DISABLE_IMPORT_SECURITY: "1"
         run: python -u -m scripts.dump_docs_openapi
 
       - name: Check for OpenAPI drift

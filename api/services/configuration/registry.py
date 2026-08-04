@@ -1340,6 +1340,14 @@ class DeepgramSTTConfiguration(BaseSTTConfiguration):
             },
         },
     )
+    base_url: str = Field(
+        default="",
+        description=(
+            "Override only to route Deepgram through a custom endpoint "
+            "(e.g. proxy or relay). Leave blank for api.deepgram.com. "
+            "Not supported by flux models."
+        ),
+    )
 
 
 @register_stt

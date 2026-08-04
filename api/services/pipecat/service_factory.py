@@ -181,6 +181,11 @@ def create_stt_service(
         # Use language from user config, defaulting to "multi" for multilingual support
         language = getattr(user_config.stt, "language", None) or "multi"
         logger.debug(f"Using DeepGram Model - {user_config.stt.model}")
+        kwargs = {}
+        base_url = getattr(user_config.stt, "base_url", None)
+        if base_url:
+            _validate_runtime_service_url(base_url, "base_url")
+            kwargs["base_url"] = base_url
         return DeepgramSTTService(
             api_key=user_config.stt.api_key,
             settings=DeepgramSTTSettings(
@@ -192,6 +197,7 @@ def create_stt_service(
             ),
             should_interrupt=False,  # Let UserAggregator take care of sending InterruptionFrame
             sample_rate=audio_config.transport_in_sample_rate,
+            **kwargs,
         )
     elif user_config.stt.provider == ServiceProviders.OPENAI.value:
         kwargs = {}
