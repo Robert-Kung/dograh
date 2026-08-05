@@ -1,4 +1,6 @@
-api/.env
+# All env files, not just api/.env: .env.test carries real (dev/test) DATABASE_URL,
+# REDIS_URL and DOGRAH_DEVOPS_SECRET values and was being baked into the image.
+api/.env*
 .git
 .github
 .claude
