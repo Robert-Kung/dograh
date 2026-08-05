@@ -206,11 +206,65 @@ class TransferCallConfig(BaseModel):
         description="Maximum seconds to wait for the destination to answer.",
     )
 
-    @field_validator("destination")
+    # Transfer-gate keys (schedule ∧ queue health). The in-call gate reads these
+    # from the persisted tool config (press0_gate / execute_cold_transfer /
+    # queue_is_healthy); without schema fields the API write path silently drops
+    # them on model_dump() and the gate runs unconfigured.
+    schedule: Optional[dict] = Field(
+        default=None,
+        description=(
+            "Business-hours schedule for the transfer gate. Out-of-hours calls "
+            "take afterHoursAction instead of transferring."
+        ),
+    )
+    afterHoursAction: Optional[str] = Field(
+        default=None,
+        description=(
+            "What to do out of hours: back_to_ai, alternate_destination or "
+            "hangup_with_message. Unknown values fall back to the default."
+        ),
+    )
+    afterHoursMessage: Optional[str] = Field(
+        default=None, description="Message to play for the after-hours branch."
+    )
+    alternateDestination: Optional[str] = Field(
+        default=None,
+        description="Out-of-hours transfer destination (same format as destination).",
+    )
+    transferFailedMessage: Optional[str] = Field(
+        default=None, description="Message to play when the transfer fails."
+    )
+    transferUnavailableMessage: Optional[str] = Field(
+        default=None,
+        description="Message to play when the queue is unhealthy (gate: unavailable).",
+    )
+    unavailableAnnounceLimit: Optional[int] = Field(
+        default=None,
+        ge=1,
+        description="Hang up after this many unavailable announcements.",
+    )
+    queueHealthUrl: Optional[str] = Field(
+        default=None,
+        description=(
+            "Queue health endpoint for the transfer gate. Unset means the "
+            "health dimension is unchecked."
+        ),
+    )
+    queueHealthToken: Optional[str] = Field(
+        default=None, description="Bearer token for the queue health endpoint."
+    )
+    queueHealthTimeoutSeconds: Optional[float] = Field(
+        default=None, gt=0, description="Total wall-clock budget for the health probe."
+    )
+    queueHealthCacheTtlSeconds: Optional[float] = Field(
+        default=None, gt=0, description="How long a health verdict is cached."
+    )
+
+    @field_validator("destination", "alternateDestination")
     @classmethod
-    def validate_destination(cls, v: str) -> str:
+    def validate_destination(cls, v: Optional[str]) -> Optional[str]:
         """Validate that destination is a valid E.164 phone number or SIP endpoint."""
-        if not v.strip():
+        if v is None or not v.strip():
             return v
 
         e164_pattern = r"^\+[1-9]\d{1,14}$"
