@@ -220,8 +220,10 @@ class TransferCallConfig(BaseModel):
     afterHoursAction: Optional[str] = Field(
         default=None,
         description=(
-            "What to do out of hours: back_to_ai, alternate_destination or "
-            "hangup_with_message. Unknown values fall back to the default."
+            "What to do out of hours: back_to_ai, announce_and_hangup or "
+            "alternate_queue (the executor's _SUPPORTED_AFTER_HOURS — anything "
+            "else silently falls back to back_to_ai, so a plausible-looking "
+            "wrong value yields a branch that never fires)."
         ),
     )
     afterHoursMessage: Optional[str] = Field(
@@ -263,20 +265,34 @@ class TransferCallConfig(BaseModel):
     @field_validator("destination", "alternateDestination")
     @classmethod
     def validate_destination(cls, v: Optional[str]) -> Optional[str]:
-        """Validate that destination is a valid E.164 phone number or SIP endpoint."""
+        """Validate that destination is a REFER target or an ARI dialstring.
+
+        Two dialects, because two runtimes consume this one field. LiveKit's
+        REFER executor requires a URI (``tel:``/``sip:``, see
+        ``livekit_transfer_flow._DESTINATION_RE``); the ARI provider dials
+        Asterisk-shaped ``SIP/<target>``. This write path must accept the union
+        — while it accepted only the ARI dialect, every LiveKit destination was
+        a dud that passed validation and failed at REFER time, with press-0
+        silently not installing. ``test_schema_accepts_livekit_destinations``
+        pins the superset so the two regexes cannot drift apart again.
+        """
         if v is None or not v.strip():
             return v
 
+        # Verbatim _DESTINATION_RE; case-sensitive, as the executor matches it.
+        livekit_pattern = r"^(tel:\+[1-9]\d{1,14}|sip:[\w\-.@:]+)$"
         e164_pattern = r"^\+[1-9]\d{1,14}$"
-        sip_pattern = r"^(PJSIP|SIP)/[\w\-\.@]+$"
+        ari_sip_pattern = r"^(PJSIP|SIP)/[\w\-\.@]+$"
 
-        is_valid_e164 = re.match(e164_pattern, v)
-        is_valid_sip = re.match(sip_pattern, v, re.IGNORECASE)
-
-        if not (is_valid_e164 or is_valid_sip):
+        if not (
+            re.match(livekit_pattern, v)
+            or re.match(e164_pattern, v)
+            or re.match(ari_sip_pattern, v, re.IGNORECASE)
+        ):
             raise ValueError(
-                "Destination must be a valid E.164 phone number "
-                "(e.g., +1234567890) or SIP endpoint (e.g., PJSIP/1234)"
+                "Destination must be a LiveKit REFER target "
+                "(e.g., tel:+886912345678 or sip:queue@pbx.example) or an ARI "
+                "dialstring (e.g., +886912345678 or PJSIP/1234)"
             )
         return v
 

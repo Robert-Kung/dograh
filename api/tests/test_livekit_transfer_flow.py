@@ -82,6 +82,48 @@ def test_valid_destination():
     assert not valid_destination(None)
 
 
+# The two layers that must never drift apart: whatever the executor will dial,
+# the API write path has to accept. They diverged once into an empty
+# intersection — every shape the schema took, the executor refused — and the
+# only symptom was press-0 quietly not installing.
+LIVEKIT_DESTINATIONS = [
+    "tel:+886912345678",
+    "tel:+12025550123",
+    "sip:queue@pbx.example",
+    "sip:human-queue@10.0.0.1",
+    "sip:queue@pbx.example:5060",
+]
+
+
+@pytest.mark.parametrize("destination", LIVEKIT_DESTINATIONS)
+def test_schema_accepts_livekit_destinations(destination):
+    """Executor-valid ⊆ schema-valid, for both destination fields."""
+    from api.schemas.tool import TransferCallConfig
+
+    assert valid_destination(destination)
+    cfg = TransferCallConfig(destination=destination, alternateDestination=destination)
+    assert cfg.destination == destination
+    assert cfg.alternateDestination == destination
+
+
+def test_schema_still_accepts_ari_dialstrings():
+    """The ARI dialect stays writable — the fix widened the union, not swapped it."""
+    from api.schemas.tool import TransferCallConfig
+
+    for destination in ("+886223456789", "PJSIP/1234", "SIP/human-queue@10.0.0.1"):
+        assert TransferCallConfig(destination=destination).destination == destination
+
+
+def test_schema_still_rejects_caller_shaped_destinations():
+    from pydantic import ValidationError
+
+    from api.schemas.tool import TransferCallConfig
+
+    for destination in ("0912345678", "queue@pbx.example", "sip:", "tel:0912345678"):
+        with pytest.raises(ValidationError):
+            TransferCallConfig(destination=destination)
+
+
 # --- executor (needs pipecat) ---------------------------------------------
 
 

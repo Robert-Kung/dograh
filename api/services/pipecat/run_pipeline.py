@@ -997,17 +997,30 @@ async def _run_pipeline_impl(
     if workflow_run and workflow_run.mode == WorkflowRunMode.LIVEKIT.value:
         room_name = (workflow_run.initial_context or {}).get("room_name")
         transfer_config = await engine.resolve_transfer_call_config()
-        if (
-            room_name
-            and transfer_config
-            and valid_destination(transfer_config.get("destination", ""))
-        ):
+        destination = (transfer_config or {}).get("destination", "")
+        if room_name and transfer_config and valid_destination(destination):
             press0_gate = Press0Gate(
                 engine, room_name=room_name, config=transfer_config
             )
+        elif transfer_config and not valid_destination(destination):
+            # A configured-but-malformed destination is a deployment defect, not
+            # a workflow choice: press-0 silently does nothing for the whole call
+            # and no other path reports it (execute_cold_transfer only emits once
+            # the caller has already asked to be transferred). Alert like any
+            # other transfer failure (S-L7-OBS H2) — a workflow with no transfer
+            # tool at all stays on the quiet info branch below.
+            from api.services.observability.call_events import emit
+
+            emit(
+                "transfer.failed",
+                room_name=room_name or "",
+                reason="press0_gate_not_installed",
+                workflow_run_id=workflow_run.id,
+                destination=destination,
+            )
         else:
             logger.info(
-                "press-0 gate not installed (no room_name or no valid transfer_call destination)"
+                "press-0 gate not installed (no room_name or no transfer_call tool)"
             )
 
     # Build the pipeline
