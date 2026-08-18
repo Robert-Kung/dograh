@@ -145,12 +145,16 @@ class TestPipecatEngineToolCalls:
 
         This test verifies that when the LLM generates parallel tool calls for:
         1. A built-in function (safe_calculator) - registered by
-           CustomToolsMixin._register_calculator_handler, which runs only when the
-           node has a tool whose category is ToolCategory.CALCULATOR attached
+           CustomToolManager._register_calculator_handler, which runs only when
+           the node has a tool whose category is ToolCategory.CALCULATOR attached
         2. A transition function (end_call) - registered by _register_transition_function_with_llm
 
-        Both functions are properly executed through the engine's handlers and
-        the transition correctly moves to the end node.
+        the transition still completes. Note (1) is NOT registered here: the
+        simple_workflow fixture gives its nodes no tool_uuids, so the CALCULATOR
+        branch never runs and safe_calculator is never advertised. That is the
+        point of the case — an unrecognised name in a parallel batch must not
+        stop the transition — not a claim that the calculator executes. The
+        assertions below reach only the transition path.
 
         The test uses multi-step mock responses:
         - Step 1: Parallel tool calls (safe_calculator + end_call)
@@ -193,12 +197,16 @@ class TestPipecatEngineToolCalls:
 
         This test verifies that when the LLM generates parallel tool calls for:
         1. A built-in function (safe_calculator) - registered by
-           CustomToolsMixin._register_calculator_handler, which runs only when the
-           node has a tool whose category is ToolCategory.CALCULATOR attached
+           CustomToolManager._register_calculator_handler, which runs only when
+           the node has a tool whose category is ToolCategory.CALCULATOR attached
         2. A transition function (end_call) - registered by _register_transition_function_with_llm
 
-        Both functions are properly executed through the engine's handlers and
-        the transition correctly moves to the end node.
+        the transition still completes. Note (1) is NOT registered here: the
+        simple_workflow fixture gives its nodes no tool_uuids, so the CALCULATOR
+        branch never runs and safe_calculator is never advertised. That is the
+        point of the case — an unrecognised name in a parallel batch must not
+        stop the transition — not a claim that the calculator executes. The
+        assertions below reach only the transition path.
 
         The test uses multi-step mock responses:
         - Step 1: Parallel tool calls (safe_calculator + end_call)
@@ -242,12 +250,16 @@ class TestPipecatEngineToolCalls:
 
         This test verifies that when the LLM generates parallel tool calls for:
         1. A built-in function (safe_calculator) - registered by
-           CustomToolsMixin._register_calculator_handler, which runs only when the
-           node has a tool whose category is ToolCategory.CALCULATOR attached
+           CustomToolManager._register_calculator_handler, which runs only when
+           the node has a tool whose category is ToolCategory.CALCULATOR attached
         2. A transition function (end_call) - registered by _register_transition_function_with_llm
 
-        Both functions are properly executed through the engine's handlers and
-        the transition correctly moves to the end node.
+        the transition still completes. Note (1) is NOT registered here: the
+        simple_workflow fixture gives its nodes no tool_uuids, so the CALCULATOR
+        branch never runs and safe_calculator is never advertised. That is the
+        point of the case — an unrecognised name in a parallel batch must not
+        stop the transition — not a claim that the calculator executes. The
+        assertions below reach only the transition path.
 
         The test uses multi-step mock responses:
         - Step 1: Parallel tool calls (safe_calculator + end_call)
