@@ -144,7 +144,9 @@ class TestPipecatEngineToolCalls:
         """Test parallel function calls using PipecatEngine's actual handlers.
 
         This test verifies that when the LLM generates parallel tool calls for:
-        1. A built-in function (safe_calculator) - registered by _register_builtin_functions
+        1. A built-in function (safe_calculator) - registered by
+           CustomToolsMixin._register_calculator_handler, which runs only when the
+           node has a tool whose category is ToolCategory.CALCULATOR attached
         2. A transition function (end_call) - registered by _register_transition_function_with_llm
 
         Both functions are properly executed through the engine's handlers and
@@ -190,7 +192,9 @@ class TestPipecatEngineToolCalls:
         """Test parallel function calls using PipecatEngine's actual handlers.
 
         This test verifies that when the LLM generates parallel tool calls for:
-        1. A built-in function (safe_calculator) - registered by _register_builtin_functions
+        1. A built-in function (safe_calculator) - registered by
+           CustomToolsMixin._register_calculator_handler, which runs only when the
+           node has a tool whose category is ToolCategory.CALCULATOR attached
         2. A transition function (end_call) - registered by _register_transition_function_with_llm
 
         Both functions are properly executed through the engine's handlers and
@@ -237,7 +241,9 @@ class TestPipecatEngineToolCalls:
         """Test parallel function calls using PipecatEngine's actual handlers.
 
         This test verifies that when the LLM generates parallel tool calls for:
-        1. A built-in function (safe_calculator) - registered by _register_builtin_functions
+        1. A built-in function (safe_calculator) - registered by
+           CustomToolsMixin._register_calculator_handler, which runs only when the
+           node has a tool whose category is ToolCategory.CALCULATOR attached
         2. A transition function (end_call) - registered by _register_transition_function_with_llm
 
         Both functions are properly executed through the engine's handlers and
