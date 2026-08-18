@@ -186,8 +186,11 @@ class TransferCallConfig(BaseModel):
 
     destination: str = Field(
         description=(
-            "Phone number or SIP endpoint to transfer the call to, e.g. "
-            "+1234567890 or PJSIP/1234."
+            "Where to transfer the call. LiveKit REFER target — tel:+886912345678 "
+            "or sip:queue@pbx.example — or an ARI dialstring (+886912345678, "
+            "PJSIP/1234) for the Asterisk provider. A LiveKit workflow MUST use "
+            "the REFER form; the ARI shapes validate here but the LiveKit "
+            "executor will not dial them."
         )
     )
     messageType: Literal["none", "custom", "audio"] = Field(
@@ -220,8 +223,10 @@ class TransferCallConfig(BaseModel):
     afterHoursAction: Optional[str] = Field(
         default=None,
         description=(
-            "What to do out of hours: back_to_ai, alternate_destination or "
-            "hangup_with_message. Unknown values fall back to the default."
+            "What to do out of hours: back_to_ai, announce_and_hangup or "
+            "alternate_queue (the executor's _SUPPORTED_AFTER_HOURS — anything "
+            "else silently falls back to back_to_ai, so a plausible-looking "
+            "wrong value yields a branch that never fires)."
         ),
     )
     afterHoursMessage: Optional[str] = Field(
@@ -263,20 +268,55 @@ class TransferCallConfig(BaseModel):
     @field_validator("destination", "alternateDestination")
     @classmethod
     def validate_destination(cls, v: Optional[str]) -> Optional[str]:
-        """Validate that destination is a valid E.164 phone number or SIP endpoint."""
+        """Validate that destination is a REFER target or an ARI dialstring.
+
+        Two dialects, because two runtimes consume this one field. LiveKit's
+        REFER executor requires a URI (``tel:``/``sip:``, see
+        ``livekit_transfer_flow._DESTINATION_RE``); the ARI provider dials
+        Asterisk-shaped ``SIP/<target>``. This write path must accept the union
+        — while it accepted only the ARI dialect, every LiveKit destination was
+        a dud that passed validation and failed at REFER time, with press-0
+        silently not installing. ``test_schema_accepts_livekit_destinations``
+        pins the superset so the two regexes cannot drift apart again.
+        """
         if v is None or not v.strip():
             return v
 
-        e164_pattern = r"^\+[1-9]\d{1,14}$"
-        sip_pattern = r"^(PJSIP|SIP)/[\w\-\.@]+$"
+        # Same shape as the executor's _DESTINATION_RE, which in turn tracks the
+        # platform repo's canonical DESTINATION_RE. ASCII class and \Z, not \w
+        # and $ — see the executor for why each of those mattered.
+        livekit_pattern = r"^(tel:\+[1-9][0-9]{1,14}|sip:[A-Za-z0-9._@:-]+)\Z"
+        e164_pattern = r"^\+[1-9]\d{1,14}\Z"
+        ari_sip_pattern = r"^(PJSIP|SIP)/[\w\-\.@]+\Z"
 
-        is_valid_e164 = re.match(e164_pattern, v)
-        is_valid_sip = re.match(sip_pattern, v, re.IGNORECASE)
-
-        if not (is_valid_e164 or is_valid_sip):
+        if not (
+            re.match(livekit_pattern, v)
+            or re.match(e164_pattern, v)
+            or re.match(ari_sip_pattern, v, re.IGNORECASE)
+        ):
             raise ValueError(
-                "Destination must be a valid E.164 phone number "
-                "(e.g., +1234567890) or SIP endpoint (e.g., PJSIP/1234)"
+                "Destination must be a LiveKit REFER target "
+                "(e.g., tel:+886912345678 or sip:queue@pbx.example) or an ARI "
+                "dialstring (e.g., +886912345678 or PJSIP/1234)"
+            )
+
+        # Toll-fraud guard, not an allowlist. capacity_gate already refuses to
+        # boot on a premium-rate overflow/safetynet target because "a poisoned
+        # or fat-fingered value has toll-fraud blast radius beyond what shape
+        # validation catches" — and this field is the one every press-0 and
+        # every AI-initiated transfer actually dials, so that argument holds
+        # more strongly here. Function-local import keeps the module-level
+        # import graph one-way (schemas must not depend on services at import).
+        from api.services.pipecat.capacity_gate import (
+            PREMIUM_RATE_PREFIXES,
+            _premium_rate,
+        )
+
+        if _premium_rate(v):
+            raise ValueError(
+                f"Destination {v!r} matches a premium-rate prefix "
+                f"{PREMIUM_RATE_PREFIXES}; refusing to save a transfer target "
+                "that would auto-dial a premium number on every transfer"
             )
         return v
 

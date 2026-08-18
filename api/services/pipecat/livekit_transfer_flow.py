@@ -35,7 +35,15 @@ logger = logging.getLogger(__name__)
 # stays importable — and unit-testable — without the pipecat + livekit runtime.
 
 # Config-driven destination: tel:+E164 or sip:user@host. Never caller input (C6).
-_DESTINATION_RE = re.compile(r"^(tel:\+[1-9]\d{1,14}|sip:[\w\-.@:]+)$")
+# Kept identical to the canonical shape in the platform repo's
+# deploy/bin/feature_scope_check.py DESTINATION_RE (which preflight also pins).
+# ASCII character class, not ``\w``: ``\w`` is Unicode-aware in Python ``str``
+# patterns, so it accepted homoglyph and full-width hosts (``sip:queue@pbx.examplе``
+# with a Cyrillic ``е`` reads as the real host but resolves elsewhere) that the
+# canonical version rejects. ``\Z`` not ``$``: ``$`` also matches before a single
+# trailing newline, so ``"tel:+886223456789\n"`` passed and flowed unmodified
+# into the REFER.
+_DESTINATION_RE = re.compile(r"^(tel:\+[1-9][0-9]{1,14}|sip:[A-Za-z0-9._@:-]+)\Z")
 
 DEFAULT_AFTER_HOURS_ACTION = "back_to_ai"
 _SUPPORTED_AFTER_HOURS = {"back_to_ai", "announce_and_hangup", "alternate_queue"}
@@ -340,9 +348,15 @@ async def execute_cold_transfer(
 
         if decision is TransferDecision.AFTER_HOURS_ALTERNATE:
             if valid_destination(alternate_destination):
-                # A night queue is still a human pickup — same handoff.
+                # A night queue is still a human pickup — same handoff. Strip
+                # like every other dial path: valid_destination() strips only to
+                # judge, so the raw value would otherwise reach transfer_to.
                 return await _do_refer(
-                    engine, room_name, alternate_destination, lk, transfer_reason
+                    engine,
+                    room_name,
+                    alternate_destination.strip(),
+                    lk,
+                    transfer_reason,
                 )
             # Configured for alternate queue but no valid target — fall back to
             # keeping the caller with the AI rather than dropping them (C4).

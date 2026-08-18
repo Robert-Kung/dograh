@@ -82,6 +82,135 @@ def test_valid_destination():
     assert not valid_destination(None)
 
 
+# The two layers that must never drift apart: whatever the executor will dial,
+# the API write path has to accept. They diverged once into an empty
+# intersection — every shape the schema took, the executor refused — and the
+# only symptom was press-0 quietly not installing.
+LIVEKIT_DESTINATIONS = [
+    "tel:+886912345678",
+    "tel:+12025550123",
+    "sip:queue@pbx.example",
+    "sip:human-queue@10.0.0.1",
+    "sip:queue@pbx.example:5060",
+]
+
+
+@pytest.mark.parametrize("destination", LIVEKIT_DESTINATIONS)
+def test_schema_accepts_livekit_destinations(destination):
+    """Every canonically-shaped executor target is writable, for both fields.
+
+    Not the full ``executor-valid ⊆ schema-valid`` inclusion: the executor
+    ``.strip()``s before matching, so `` tel:+886912345678`` is executor-valid
+    and schema-invalid. That direction fails safe (unwritable, not undialable)
+    and is left alone.
+    """
+    from api.schemas.tool import TransferCallConfig
+
+    assert valid_destination(destination)
+    cfg = TransferCallConfig(destination=destination, alternateDestination=destination)
+    assert cfg.destination == destination
+    assert cfg.alternateDestination == destination
+
+
+def test_schema_still_accepts_ari_dialstrings():
+    """The ARI dialect stays writable — the fix widened the union, not swapped it."""
+    from api.schemas.tool import TransferCallConfig
+
+    for destination in ("+886223456789", "PJSIP/1234", "SIP/human-queue@10.0.0.1"):
+        assert TransferCallConfig(destination=destination).destination == destination
+
+
+def test_schema_still_rejects_caller_shaped_destinations():
+    from pydantic import ValidationError
+
+    from api.schemas.tool import TransferCallConfig
+
+    for destination in ("0912345678", "queue@pbx.example", "sip:", "tel:0912345678"):
+        with pytest.raises(ValidationError):
+            TransferCallConfig(destination=destination)
+
+
+# --- guards that travel with the widened dialect --------------------------
+
+
+@pytest.mark.parametrize(
+    "destination",
+    [
+        "sip:queue@pbx.exampl\u0435",  # Cyrillic е — reads as pbx.example
+        "sip:\uff51ueue@pbx.example",  # full-width q
+        "tel:+886\u0662\u0663\u0664\u0665\u0666",  # Arabic-Indic digits
+    ],
+)
+def test_both_layers_reject_homoglyph_hosts(destination):
+    """``\\w`` was Unicode-aware, so these read as the real host and resolved elsewhere.
+
+    Pinned on both layers because the schema copies the executor's shape, and
+    both now track deploy/bin/feature_scope_check.py's canonical DESTINATION_RE.
+    """
+    from pydantic import ValidationError
+
+    from api.schemas.tool import TransferCallConfig
+
+    assert not valid_destination(destination)
+    with pytest.raises(ValidationError):
+        TransferCallConfig(destination=destination)
+
+
+@pytest.mark.parametrize(
+    "destination", ["tel:+886912345678\n", "sip:queue@pbx.example\n"]
+)
+def test_schema_rejects_trailing_newline(destination):
+    """``$`` also matches before a trailing newline, so these used to be writable.
+
+    The executor is deliberately *not* pinned to reject them: valid_destination
+    normalises (``.strip()``) before matching, which is the right behaviour for
+    a dial path. The write layer is where the value gets refused; the dial paths
+    strip so nothing un-normalised reaches ``transfer_to``
+    (test_alternate_destination_is_stripped_before_refer).
+    """
+    from pydantic import ValidationError
+
+    from api.schemas.tool import TransferCallConfig
+
+    with pytest.raises(ValidationError):
+        TransferCallConfig(destination=destination)
+
+
+@pytest.mark.parametrize(
+    "destination",
+    [
+        "tel:+19005551212",
+        "tel:+19765551212",
+        "tel:+886204123456",
+        "sip:1900555@pbx.example",
+    ],
+)
+def test_schema_refuses_premium_rate_targets(destination):
+    """The field every press-0 and every AI transfer dials gets capacity_gate's guard.
+
+    capacity_gate refuses to boot on a premium-rate overflow target; this one is
+    dialled more often, not less.
+    """
+    from pydantic import ValidationError
+
+    from api.schemas.tool import TransferCallConfig
+
+    with pytest.raises(ValidationError, match="premium-rate"):
+        TransferCallConfig(destination=destination)
+
+
+def test_premium_guard_uses_capacity_gate_as_the_single_source():
+    """Same prefix list, not a second copy that can drift."""
+    from pydantic import ValidationError
+
+    from api.schemas.tool import TransferCallConfig
+    from api.services.pipecat.capacity_gate import PREMIUM_RATE_PREFIXES
+
+    for prefix in PREMIUM_RATE_PREFIXES:
+        with pytest.raises(ValidationError, match="premium-rate"):
+            TransferCallConfig(destination=f"tel:+{prefix}5551212")
+
+
 # --- executor (needs pipecat) ---------------------------------------------
 
 
@@ -262,6 +391,32 @@ async def test_after_hours_alternate_queue_refers_to_alternate():
     )
     assert res["status"] == "success"
     assert cap["transfer_to"] == "sip:night@pbx.example"  # alternate, not primary
+
+
+@pytest.mark.skipif(not PIPECAT, reason="pipecat runtime not installed")
+async def test_alternate_destination_is_stripped_before_refer():
+    """The alternate branch used to hand _do_refer the raw, unstripped value.
+
+    valid_destination() strips only to judge, so a stored value with surrounding
+    whitespace passed the check and then went to transfer_to verbatim. Every
+    other dial path strips at the call site; this one did not.
+    """
+    from api.services.pipecat.livekit_transfer_flow import execute_cold_transfer
+
+    eng = _fake_engine()
+    lk, cap = _fake_lk()
+    res = await execute_cold_transfer(
+        eng,
+        room_name="room1",
+        destination="tel:+886900000000",
+        schedule=SCHED,
+        after_hours_action="alternate_queue",
+        alternate_destination="  sip:night@pbx.example\n",
+        now=CLOSED,
+        lk=lk,
+    )
+    assert res["status"] == "success"
+    assert cap["transfer_to"] == "sip:night@pbx.example"
 
 
 @pytest.mark.skipif(not PIPECAT, reason="pipecat runtime not installed")

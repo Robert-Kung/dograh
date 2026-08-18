@@ -497,6 +497,63 @@ async def _run_pipeline_livekit_impl(
     )
 
 
+async def resolve_press0_gate(engine, workflow_run) -> Press0Gate | None:
+    """Build the press-0 gate, or report why it could not be built.
+
+    Split out of the pipeline setup so the not-installed paths are reachable in
+    a test — everything around them needs a full transport/LLM build to reach.
+    """
+    if not workflow_run or workflow_run.mode != WorkflowRunMode.LIVEKIT.value:
+        return None
+
+    room_name = (workflow_run.initial_context or {}).get("room_name")
+    transfer_config = await engine.resolve_transfer_call_config()
+    destination = (transfer_config or {}).get("destination", "")
+
+    if room_name and transfer_config and valid_destination(destination):
+        return Press0Gate(engine, room_name=room_name, config=transfer_config)
+
+    if transfer_config and not valid_destination(destination):
+        # A configured-but-malformed destination is a deployment defect, not a
+        # workflow choice: press-0 silently does nothing for the whole call and
+        # no other path reports it (execute_cold_transfer only emits once the
+        # caller has already asked to be transferred). Alert like any other
+        # transfer failure (S-L7-OBS H2) — a workflow with no transfer tool at
+        # all stays on the quiet info branch below.
+        from api.services.observability.call_events import emit
+        from api.services.observability.call_outcome import record_call_outcome
+
+        emit(
+            "transfer.failed",
+            room_name=room_name or "",
+            reason="press0_gate_not_installed",
+            workflow_run_id=workflow_run.id,
+            destination=destination,
+            transfer_reason="press0",
+        )
+        # The event alerts, but annotations are the queryable layer: without
+        # this the run falls through to the unconditional ai_completed at the
+        # end of the pipeline and a whole misconfigured deployment reads as
+        # clean AI completions. Rank 1 lets a later successful voice transfer
+        # still win — the precedence call_outcome documents for exactly this
+        # "failed press-0 followed by a successful voice transfer" sequence.
+        #
+        # Distinct suffix from execute_cold_transfer's "transfer_failed:press0"
+        # (which means the caller pressed 0 and the REFER was refused). Sharing
+        # the string would defeat the point of writing it: the queryable layer
+        # could not tell "the gate never installed" from "the transfer failed".
+        await record_call_outcome(
+            engine,
+            workflow_run.id,
+            outcome="transfer_failed:press0_not_installed",
+            transfer_reason="press0",
+        )
+        return None
+
+    logger.info("press-0 gate not installed (no room_name or no transfer_call tool)")
+    return None
+
+
 async def _run_pipeline(
     transport,
     workflow_id: int,
@@ -993,22 +1050,7 @@ async def _run_pipeline_impl(
 
     # Press-0 DTMF safety net (LiveKit only): a gate that cold-transfers on
     # caller DTMF '0', reusing the workflow's transfer_call tool config.
-    press0_gate = None
-    if workflow_run and workflow_run.mode == WorkflowRunMode.LIVEKIT.value:
-        room_name = (workflow_run.initial_context or {}).get("room_name")
-        transfer_config = await engine.resolve_transfer_call_config()
-        if (
-            room_name
-            and transfer_config
-            and valid_destination(transfer_config.get("destination", ""))
-        ):
-            press0_gate = Press0Gate(
-                engine, room_name=room_name, config=transfer_config
-            )
-        else:
-            logger.info(
-                "press-0 gate not installed (no room_name or no valid transfer_call destination)"
-            )
+    press0_gate = await resolve_press0_gate(engine, workflow_run)
 
     # Build the pipeline
     if is_realtime:
