@@ -99,6 +99,35 @@ def test_validate_config_bad_queue_fails(monkeypatch):
         validate_safetynet_config()
 
 
+def test_validate_config_premium_rate_queue_fails(monkeypatch):
+    monkeypatch.setenv("SAFETYNET_FALLBACK_QUEUE", "tel:+19005550000")
+    with pytest.raises(RuntimeError, match="premium-rate"):
+        validate_safetynet_config()
+
+
+def test_validate_config_premium_rate_sip_user_fails(monkeypatch):
+    # three-step normalisation: sip: user part before the @, leading + stripped
+    monkeypatch.setenv("SAFETYNET_FALLBACK_QUEUE", "sip:1900@pbx.example")
+    with pytest.raises(RuntimeError, match="premium-rate"):
+        validate_safetynet_config()
+
+
+def test_validate_config_premium_rate_queue_fails_with_explicit_overflow(monkeypatch):
+    # The gap this closes: with an explicit overflow target set,
+    # overflow_transfer_to() returns it verbatim, so validate_capacity_config
+    # never sees the safetynet value — it was unchecked at every enforcement
+    # point despite being what the dispatch face actually dials.
+    monkeypatch.setenv("SAFETYNET_FALLBACK_QUEUE", "tel:+19005550000")
+    monkeypatch.setenv("CAPACITY_OVERFLOW_TRANSFER_TO", "tel:+886900000000")
+    with pytest.raises(RuntimeError, match="premium-rate"):
+        validate_safetynet_config()
+
+
+def test_validate_config_non_premium_sip_queue_ok(monkeypatch):
+    monkeypatch.setenv("SAFETYNET_FALLBACK_QUEUE", "sip:queue@pbx.example")
+    validate_safetynet_config()
+
+
 def test_validate_config_bad_seconds_fails(monkeypatch):
     monkeypatch.setenv("SAFETYNET_MAX_SILENCE_SECONDS", "eight")
     with pytest.raises(RuntimeError, match="SAFETYNET_MAX_SILENCE_SECONDS"):

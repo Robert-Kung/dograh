@@ -39,6 +39,14 @@ DEFAULT_MAX_INFLIGHT_OVERFLOW = 8
 # ``+``, so a sip user expressing the number without ``+`` is caught too —
 # the cost is that a bare PBX extension like ``sip:1900@pbx`` is refused at
 # boot and needs renaming, a loud and cheap failure next to silent toll fraud.
+#
+# This list is duplicated in the platform repo's ``deploy/preflight.sh`` §7c
+# (deployment-time check on the same two env vars). There is no shared carrier
+# across the repo boundary, and the drift is asymmetric: a prefix added here
+# but not there leaves preflight green while this module refuses to boot, and
+# the entrypoint script aborts with "dograh-api not ready in time" with the
+# real reason buried in the container log. Adding a prefix there but not here
+# only over-blocks. **Add new prefixes to both, in the same change.**
 PREMIUM_RATE_PREFIXES = ("1900", "1976", "886204")
 
 # Wall-clock bound on one overflow action chain (gate probe ≤2s + poll ≤3s +

@@ -82,13 +82,36 @@ def validate_safetynet_config() -> None:
 
     The dispatch face has no engine and no call-time validation hook, so a bad
     fallback destination must stop the app from booting, not surface on the
-    first failed call.
+    first failed call. Shape *and* premium-rate are both checked here: this is
+    the only enforcement point that sees ``SAFETYNET_FALLBACK_QUEUE`` itself
+    rather than whatever ``overflow_transfer_to()`` resolves to.
     """
     queue = fallback_queue()
-    if queue is not None and not valid_destination(queue):
-        raise RuntimeError(
-            f"SAFETYNET_FALLBACK_QUEUE {queue!r} is not tel:+E164 or sip:user@host"
+    if queue is not None:
+        if not valid_destination(queue):
+            raise RuntimeError(
+                f"SAFETYNET_FALLBACK_QUEUE {queue!r} is not tel:+E164 or sip:user@host"
+            )
+        # Premium-rate guard on the fallback queue itself, not only on the
+        # capacity-overflow target. ``validate_capacity_config`` checks the
+        # *effective* overflow destination, and ``overflow_transfer_to()``
+        # returns the explicit value verbatim when it is set — so with
+        # CAPACITY_OVERFLOW_TRANSFER_TO configured, this value never reached
+        # any premium check at any enforcement point, while the dispatch-face
+        # safetynet auto-REFERs every caller to it with nobody watching.
+        # Imported from capacity_gate so the prefix list and its three-step
+        # normalisation stay single-sourced (see the note there); local import
+        # keeps the module-level import graph one-directional.
+        from api.services.pipecat.capacity_gate import (
+            PREMIUM_RATE_PREFIXES,
+            _premium_rate,
         )
+
+        if _premium_rate(queue):
+            raise RuntimeError(
+                f"SAFETYNET_FALLBACK_QUEUE {queue!r} matches a premium-rate "
+                f"prefix {PREMIUM_RATE_PREFIXES}; refusing to boot"
+            )
     try:
         seconds = max_silence_seconds()
     except ValueError as e:
