@@ -236,3 +236,94 @@ async def test_transfer_crash_still_announces_fallback(monkeypatch):
 
     texts = [getattr(f, "text", "") for f in calls["queued"]]
     assert len(texts) == 1 and texts[0]  # spoken fallback, no dead silence
+
+
+# --- install decision (S-L7-OBS: a gate that cannot install must say so) ---
+
+
+def _run(mode="LIVEKIT", room_name="cs-+886912345678", destination="tel:+886912345678"):
+    """A workflow_run/engine pair for resolve_press0_gate."""
+    run = types.SimpleNamespace(
+        id=42,
+        mode=mode,
+        initial_context={"room_name": room_name} if room_name else {},
+    )
+
+    async def resolve_transfer_call_config():
+        return {"destination": destination} if destination is not None else None
+
+    engine = types.SimpleNamespace(
+        _call_outcome=None,
+        resolve_transfer_call_config=resolve_transfer_call_config,
+    )
+    return engine, run
+
+
+@pytest.fixture
+def observability(monkeypatch):
+    """Capture both observability sinks the install decision writes to."""
+    from api.services.observability import call_events, call_outcome
+
+    events, outcomes = [], []
+    monkeypatch.setattr(
+        call_events, "emit", lambda event, **fields: events.append((event, fields))
+    )
+
+    async def fake_record(engine, workflow_run_id, *, outcome, transfer_reason=None):
+        outcomes.append((workflow_run_id, outcome, transfer_reason))
+
+    monkeypatch.setattr(call_outcome, "record_call_outcome", fake_record)
+    return events, outcomes
+
+
+@pytest.mark.asyncio
+async def test_malformed_destination_records_outcome_not_just_an_event(observability):
+    """The event alerts; the annotation is what stays queryable.
+
+    Without the outcome write the run falls through to the unconditional
+    ai_completed at the end of the pipeline, so an entire misconfigured
+    deployment reads back as clean AI completions (Codex review, PR #13).
+    """
+    from api.services.pipecat.run_pipeline import resolve_press0_gate
+
+    events, outcomes = observability
+    engine, run = _run(destination="SIP/human-queue@10.0.0.1")
+
+    assert await resolve_press0_gate(engine, run) is None
+    assert [e[0] for e in events] == ["transfer.failed"]
+    assert events[0][1]["reason"] == "press0_gate_not_installed"
+    assert outcomes == [(42, "transfer_failed:press0", "press0")]
+
+
+@pytest.mark.asyncio
+async def test_valid_destination_installs_the_gate_quietly(observability):
+    from api.services.pipecat.run_pipeline import resolve_press0_gate
+
+    events, outcomes = observability
+    engine, run = _run()
+
+    assert await resolve_press0_gate(engine, run) is not None
+    assert events == [] and outcomes == []
+
+
+@pytest.mark.asyncio
+async def test_no_transfer_tool_stays_silent(observability):
+    """No transfer_call tool is a workflow choice, not a defect — nothing to alert."""
+    from api.services.pipecat.run_pipeline import resolve_press0_gate
+
+    events, outcomes = observability
+    engine, run = _run(destination=None)
+
+    assert await resolve_press0_gate(engine, run) is None
+    assert events == [] and outcomes == []
+
+
+@pytest.mark.asyncio
+async def test_non_livekit_mode_is_untouched(observability):
+    from api.services.pipecat.run_pipeline import resolve_press0_gate
+
+    events, outcomes = observability
+    engine, run = _run(mode="SMALLWEBRTC", destination="SIP/human-queue@10.0.0.1")
+
+    assert await resolve_press0_gate(engine, run) is None
+    assert events == [] and outcomes == []
