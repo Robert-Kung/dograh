@@ -186,8 +186,11 @@ class TransferCallConfig(BaseModel):
 
     destination: str = Field(
         description=(
-            "Phone number or SIP endpoint to transfer the call to, e.g. "
-            "+1234567890 or PJSIP/1234."
+            "Where to transfer the call. LiveKit REFER target — tel:+886912345678 "
+            "or sip:queue@pbx.example — or an ARI dialstring (+886912345678, "
+            "PJSIP/1234) for the Asterisk provider. A LiveKit workflow MUST use "
+            "the REFER form; the ARI shapes validate here but the LiveKit "
+            "executor will not dial them."
         )
     )
     messageType: Literal["none", "custom", "audio"] = Field(
@@ -279,10 +282,12 @@ class TransferCallConfig(BaseModel):
         if v is None or not v.strip():
             return v
 
-        # Verbatim _DESTINATION_RE; case-sensitive, as the executor matches it.
-        livekit_pattern = r"^(tel:\+[1-9]\d{1,14}|sip:[\w\-.@:]+)$"
-        e164_pattern = r"^\+[1-9]\d{1,14}$"
-        ari_sip_pattern = r"^(PJSIP|SIP)/[\w\-\.@]+$"
+        # Same shape as the executor's _DESTINATION_RE, which in turn tracks the
+        # platform repo's canonical DESTINATION_RE. ASCII class and \Z, not \w
+        # and $ — see the executor for why each of those mattered.
+        livekit_pattern = r"^(tel:\+[1-9][0-9]{1,14}|sip:[A-Za-z0-9._@:-]+)\Z"
+        e164_pattern = r"^\+[1-9]\d{1,14}\Z"
+        ari_sip_pattern = r"^(PJSIP|SIP)/[\w\-\.@]+\Z"
 
         if not (
             re.match(livekit_pattern, v)
@@ -293,6 +298,25 @@ class TransferCallConfig(BaseModel):
                 "Destination must be a LiveKit REFER target "
                 "(e.g., tel:+886912345678 or sip:queue@pbx.example) or an ARI "
                 "dialstring (e.g., +886912345678 or PJSIP/1234)"
+            )
+
+        # Toll-fraud guard, not an allowlist. capacity_gate already refuses to
+        # boot on a premium-rate overflow/safetynet target because "a poisoned
+        # or fat-fingered value has toll-fraud blast radius beyond what shape
+        # validation catches" — and this field is the one every press-0 and
+        # every AI-initiated transfer actually dials, so that argument holds
+        # more strongly here. Function-local import keeps the module-level
+        # import graph one-way (schemas must not depend on services at import).
+        from api.services.pipecat.capacity_gate import (
+            PREMIUM_RATE_PREFIXES,
+            _premium_rate,
+        )
+
+        if _premium_rate(v):
+            raise ValueError(
+                f"Destination {v!r} matches a premium-rate prefix "
+                f"{PREMIUM_RATE_PREFIXES}; refusing to save a transfer target "
+                "that would auto-dial a premium number on every transfer"
             )
         return v
 

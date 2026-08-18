@@ -537,10 +537,15 @@ async def resolve_press0_gate(engine, workflow_run) -> Press0Gate | None:
         # clean AI completions. Rank 1 lets a later successful voice transfer
         # still win — the precedence call_outcome documents for exactly this
         # "failed press-0 followed by a successful voice transfer" sequence.
+        #
+        # Distinct suffix from execute_cold_transfer's "transfer_failed:press0"
+        # (which means the caller pressed 0 and the REFER was refused). Sharing
+        # the string would defeat the point of writing it: the queryable layer
+        # could not tell "the gate never installed" from "the transfer failed".
         await record_call_outcome(
             engine,
             workflow_run.id,
-            outcome="transfer_failed:press0",
+            outcome="transfer_failed:press0_not_installed",
             transfer_reason="press0",
         )
         return None

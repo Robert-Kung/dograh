@@ -299,7 +299,10 @@ async def test_malformed_destination_records_outcome_not_just_an_event(observabi
     assert await resolve_press0_gate(engine, run) is None
     assert [e[0] for e in events] == ["transfer.failed"]
     assert events[0][1]["reason"] == "press0_gate_not_installed"
-    assert outcomes == [(42, "transfer_failed:press0", "press0")]
+    # Deliberately NOT "transfer_failed:press0" — that is what a real refused
+    # REFER writes, and the whole argument for this write is that annotations
+    # stay distinguishable without opening a trace.
+    assert outcomes == [(42, "transfer_failed:press0_not_installed", "press0")]
 
 
 @pytest.mark.asyncio
