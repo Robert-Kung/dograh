@@ -241,11 +241,18 @@ async def test_transfer_crash_still_announces_fallback(monkeypatch):
 # --- install decision (S-L7-OBS: a gate that cannot install must say so) ---
 
 
-def _run(mode="LIVEKIT", room_name="cs-+886912345678", destination="tel:+886912345678"):
-    """A workflow_run/engine pair for resolve_press0_gate."""
+def _run(mode=None, room_name="cs-+886912345678", destination="tel:+886912345678"):
+    """A workflow_run/engine pair for resolve_press0_gate.
+
+    mode is the enum's *value*, not its name — resolve_press0_gate compares
+    against WorkflowRunMode.LIVEKIT.value, and a literal "LIVEKIT" here would
+    make every assertion pass vacuously down the not-installed path.
+    """
+    from api.enums import WorkflowRunMode
+
     run = types.SimpleNamespace(
         id=42,
-        mode=mode,
+        mode=WorkflowRunMode.LIVEKIT.value if mode is None else mode,
         initial_context={"room_name": room_name} if room_name else {},
     )
 
@@ -323,7 +330,11 @@ async def test_non_livekit_mode_is_untouched(observability):
     from api.services.pipecat.run_pipeline import resolve_press0_gate
 
     events, outcomes = observability
-    engine, run = _run(mode="SMALLWEBRTC", destination="SIP/human-queue@10.0.0.1")
+    from api.enums import WorkflowRunMode
+
+    engine, run = _run(
+        mode=WorkflowRunMode.WEBRTC.value, destination="SIP/human-queue@10.0.0.1"
+    )
 
     assert await resolve_press0_gate(engine, run) is None
     assert events == [] and outcomes == []
