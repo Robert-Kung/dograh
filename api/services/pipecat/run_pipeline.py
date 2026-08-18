@@ -497,7 +497,6 @@ async def _run_pipeline_livekit_impl(
     )
 
 
-
 async def resolve_press0_gate(engine, workflow_run) -> Press0Gate | None:
     """Build the press-0 gate, or report why it could not be built.
 
