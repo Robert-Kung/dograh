@@ -26,6 +26,7 @@ from api.services.workflow.dto import (
     VariableType,
 )
 from api.services.workflow.workflow_graph import WorkflowGraph
+from api.tests.support.platform_artifacts import PERMISSIVE_SCOPE
 
 START_CALL_SYSTEM_PROMPT = "Start Call System Prompt"
 AGENT_SYSTEM_PROMPT = "Agent Node System Prompt"
@@ -570,3 +571,24 @@ def three_node_workflow_no_variable_extraction() -> WorkflowGraph:
         ],
     )
     return WorkflowGraph(dto)
+
+
+@pytest.fixture(autouse=True)
+def _platform_enabled_set(monkeypatch):
+    """Every test declares which enabled-set policy it runs under (W2a).
+
+    Default = permissive, i.e. upstream behaviour with no platform governance:
+    the call-time filter is present but allows every category, so the
+    pre-existing suite keeps covering http_api / mcp / calculator tools.
+
+    Tests for the filter itself override ``PLATFORM_FEATURE_SCOPE`` (with
+    ``feature_scope_delivered_shape.json``, the real canon, or a path that does
+    not exist for the fail-closed case). ``platform_scope`` memoizes, so the
+    cache is dropped on both sides of every test.
+    """
+    from api.services import platform_scope
+
+    platform_scope.reset_cache()
+    monkeypatch.setenv("PLATFORM_FEATURE_SCOPE", str(PERMISSIVE_SCOPE))
+    yield
+    platform_scope.reset_cache()

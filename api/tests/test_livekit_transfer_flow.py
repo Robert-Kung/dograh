@@ -112,12 +112,23 @@ def test_schema_accepts_livekit_destinations(destination):
     assert cfg.alternateDestination == destination
 
 
-def test_schema_still_accepts_ari_dialstrings():
-    """The ARI dialect stays writable — the fix widened the union, not swapped it."""
+def test_schema_no_longer_accepts_ari_dialstrings():
+    """The ARI dialect retires (W2a D-A6) — the union collapses to the REFER form.
+
+    PR #13 widened the write path to the union of both dialects because the
+    LiveKit half was missing and every LiveKit destination was a dud. That is
+    now the wrong shape for the opposite reason: the widest of three rules
+    governed the one field every press-0 and every AI-initiated transfer
+    dials, and this deployment has no ARI provider. Rows already holding these
+    shapes are inventoried by W2a rather than discovered as 422s.
+    """
+    from pydantic import ValidationError
+
     from api.schemas.tool import TransferCallConfig
 
     for destination in ("+886223456789", "PJSIP/1234", "SIP/human-queue@10.0.0.1"):
-        assert TransferCallConfig(destination=destination).destination == destination
+        with pytest.raises(ValidationError):
+            TransferCallConfig(destination=destination)
 
 
 def test_schema_still_rejects_caller_shaped_destinations():

@@ -71,6 +71,50 @@ def get_function_schema(
     )
 
 
+def _log_scope_denied_tool(category: str, name: str) -> None:
+    """Enabled-set deny at call time. Same shape as ``log_denied_tool``.
+
+    A distinct ``call_event`` because the cause is different: the trust registry
+    asks "does this family declare a spec?", the enabled set asks "is this
+    dispatch key on the platform's canonical allowlist?". Answering the second
+    with the first's event name would make the two indistinguishable in a log
+    search, and they need different fixes.
+    """
+    logger.bind(
+        call_event="scope.tool_denied", tool_category=category, tool_name=name
+    ).warning(
+        f"scope.tool_denied category={category} tool={name}: not in the platform "
+        f"enabled set (deploy/feature-scope.json allowed_tool_types); tool not "
+        f"registered for this call (W2a)"
+    )
+
+
+def _allowed_tool_categories_or_none() -> Optional[frozenset]:
+    """The enabled set, or ``None`` when the canon is unreadable (fail-closed).
+
+    ``None`` means callers register **no governed tool at all** — the canon
+    being absent is exactly the state in which we know least about what is safe
+    to expose to the LLM. The call itself continues; only the tools go away.
+    That is a deliberate degradation and not the same choice
+    ``capacity_gate._premium_rate`` makes, for reasons documented there.
+    """
+    from api.services.platform_scope import (
+        PlatformArtifactMissing,
+        allowed_tool_categories,
+        log_artifact_missing,
+    )
+
+    try:
+        return allowed_tool_categories()
+    except PlatformArtifactMissing as exc:
+        log_artifact_missing("pipecat_engine_custom_tools", exc)
+        logger.bind(call_event="scope.canon_unavailable").error(
+            "scope.canon_unavailable: enabled-set canon unreadable; registering "
+            "no governed tools for this call (fail-closed, W2a)"
+        )
+        return None
+
+
 def _family_for_category(category: str) -> Optional[str]:
     """Trust-registry family for a ToolCategory value (S-L8-TRUST).
 
@@ -176,8 +220,30 @@ class CustomToolManager:
         try:
             tools = await db_client.get_tools_by_uuids(tool_uuids, organization_id)
 
+            # Enabled-set filter (W2a D-A3). **Unconditional** — deliberately
+            # outside `if trust:`. ``is_trust_enforced`` is True only in LIVEKIT
+            # mode, and text-chat is the one path a customer identity can drive
+            # itself, so gating this on trust would leave the enabled set with
+            # no enforcement exactly where a customer can reach it.
+            #
+            # Layered on top of the trust registry, not replacing it: the
+            # registry allows five families, the canon allows two. The narrower
+            # one has to be applied for the canon to mean anything at call time
+            # — before W2a its only enforcement point was the bootstrap
+            # read-back, and W2c opening the gateway write plane removes the
+            # "bootstrap is the only writer" argument that made that enough.
+            allowed_categories = _allowed_tool_categories_or_none()
+
             schemas: list[FunctionSchema] = []
             for tool in tools:
+                if (
+                    allowed_categories is None
+                    or tool.category not in allowed_categories
+                ):
+                    if allowed_categories is not None:
+                        _log_scope_denied_tool(tool.category, tool.name)
+                    continue
+
                 family = _family_for_category(tool.category)
                 if trust and family != "mcp" and resolve_family_spec(family) is None:
                     log_denied_tool(family or tool.category, tool.name)
@@ -271,7 +337,21 @@ class CustomToolManager:
         try:
             tools = await db_client.get_tools_by_uuids(tool_uuids, organization_id)
 
+            # Same unconditional enabled-set filter as the advertisement path
+            # above. Both are needed: advertising without registering leaves the
+            # LLM calling a function that does not exist, and registering
+            # without advertising leaves a reachable handler off the schema.
+            allowed_categories = _allowed_tool_categories_or_none()
+
             for tool in tools:
+                if (
+                    allowed_categories is None
+                    or tool.category not in allowed_categories
+                ):
+                    if allowed_categories is not None:
+                        _log_scope_denied_tool(tool.category, tool.name)
+                    continue
+
                 family = _family_for_category(tool.category)
                 if trust and family != "mcp" and resolve_family_spec(family) is None:
                     log_denied_tool(family or tool.category, tool.name)

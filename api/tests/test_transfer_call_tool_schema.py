@@ -14,14 +14,17 @@ from pydantic import ValidationError
 from api.schemas.tool import CreateToolRequest, TransferCallConfig
 
 GATE_CONFIG = {
-    "destination": "sip/queue@example.internal",
+    # W2a D-A6: the ARI dialect ("sip/queue@…", "PJSIP/1234", bare E.164)
+    # no longer validates. It never dialled on LiveKit; accepting it only
+    # produced destinations that failed at REFER time.
+    "destination": "sip:queue@example.internal",
     "schedule": {
         "timezone": "Asia/Taipei",
         "weekly": {"mon": [["09:00", "18:00"]]},
     },
     "afterHoursAction": "back_to_ai",
     "afterHoursMessage": "目前非營業時間",
-    "alternateDestination": "+886223456789",
+    "alternateDestination": "tel:+886223456789",
     "transferFailedMessage": "轉接失敗",
     "transferUnavailableMessage": "目前無法轉接",
     "unavailableAnnounceLimit": 2,
@@ -55,9 +58,9 @@ def test_gate_keys_survive_the_persistence_dump():
 
 def test_config_without_gate_keys_still_validates():
     """Pre-existing tools (destination-only) keep working unchanged."""
-    request = _create_request({"destination": "+886223456789"})
+    request = _create_request({"destination": "tel:+886223456789"})
     dumped = request.definition.model_dump()["config"]
-    assert dumped["destination"] == "+886223456789"
+    assert dumped["destination"] == "tel:+886223456789"
     # unset gate keys dump as None, which every reader treats as unconfigured
     assert dumped["queueHealthUrl"] is None
     assert dumped["schedule"] is None
@@ -72,13 +75,16 @@ def test_alternate_destination_validated_like_destination():
 def test_alternate_destination_accepts_sip_and_none():
     assert (
         TransferCallConfig.model_validate(
-            {"destination": "+886223456789", "alternateDestination": "SIP/human@pbx"}
+            {
+                "destination": "tel:+886223456789",
+                "alternateDestination": "sip:human@pbx.example",
+            }
         ).alternateDestination
-        == "SIP/human@pbx"
+        == "sip:human@pbx.example"
     )
     assert (
         TransferCallConfig.model_validate(
-            {"destination": "+886223456789"}
+            {"destination": "tel:+886223456789"}
         ).alternateDestination
         is None
     )

@@ -90,13 +90,63 @@ def overflow_transfer_to() -> str | None:
     return fallback_queue()
 
 
-def _premium_rate(destination: str) -> bool:
+def _legacy_premium_candidates(destination: str) -> tuple[str, ...]:
+    """The pre-W2a string logic: ``tel:`` number, or the ``sip:`` **user part**.
+
+    Kept as the fallback for when the shared parser is not mounted — see
+    ``_premium_rate``. It is knowingly incomplete: it never looks at the host,
+    which is issue #4.
+    """
     number = destination.strip()
     if number.startswith("tel:"):
         number = number[len("tel:") :]
     elif number.startswith("sip:"):
         number = number[len("sip:") :].split("@", 1)[0]
-    return number.lstrip("+").startswith(PREMIUM_RATE_PREFIXES)
+    return (number.lstrip("+"),)
+
+
+def _premium_rate(destination: str) -> bool:
+    """True if ``destination`` matches a premium-rate prefix (toll-fraud guard).
+
+    The candidates come from the shared parser (W2a): for ``sip:`` that is the
+    user part **and the host**. The old logic only looked at the user part, so
+    ``sip:queue@886204.example`` was unguarded — and the host is what actually
+    gets dialled (issue #4).
+
+    **Falls back to the old logic when the parser is not mounted**, with a
+    high-signal log. This is a guard, and the fallback is exactly what shipped
+    before W2a — strictly not worse. Raising instead would take
+    ``validate_capacity_config`` down at startup, i.e. a missing ``-v`` would
+    stop the platform answering the phone at all. The narrower failure is the
+    right one here; the write path (``TransferCallConfig.validate_destination``)
+    makes the opposite choice for the opposite reason. Both are registered as
+    residual R-O.
+    """
+    from api.services.platform_scope import (
+        PlatformArtifactMissing,
+        log_artifact_missing,
+        parse_refer_uri,
+    )
+
+    try:
+        parsed = parse_refer_uri(destination)
+    except PlatformArtifactMissing as exc:
+        log_artifact_missing("capacity_gate._premium_rate", exc)
+        logger.error(
+            "premium-rate guard degraded to the pre-W2a user-part-only check; "
+            "sip: hosts are NOT guarded until the mount is restored"
+        )
+        candidates = _legacy_premium_candidates(destination)
+    else:
+        # Unparseable values still get the old treatment rather than a free
+        # pass: shape rejection happens elsewhere, and this guard must not be
+        # the layer that under-blocks.
+        candidates = (
+            parsed.premium_candidates()
+            if parsed.ok
+            else _legacy_premium_candidates(destination)
+        )
+    return any(c.startswith(PREMIUM_RATE_PREFIXES) for c in candidates)
 
 
 def validate_capacity_config() -> None:
