@@ -38,8 +38,19 @@ def _health_url_problem(value: str) -> str | None:
     return None
 
 
-def _revalidate(config: dict) -> dict | None:
+def revalidate_transfer_config(config: dict) -> dict | None:
     """Re-check the shapes this config carries, at read time (issue #3).
+
+    **Public because this lookup is not the only reader.** The AI-initiated
+    transfer tool handler (``pipecat_engine_custom_tools`` /
+    ``transfer_call_handler``) reads ``tool.definition["config"]`` straight off
+    the ORM row — it wants *that* tool's config, not "the workflow's first
+    transfer_call tool", so it cannot go through
+    :func:`find_transfer_call_config` without changing behaviour on a workflow
+    carrying two transfer tools. It calls this directly instead. Before W2a's
+    security review found it (M-8), that path — the highest-volume trigger,
+    the caller simply asking for a human — was the one reader with no
+    re-validation at all.
 
     The write path validates these fields, but nothing re-checks them on the
     way *out*: a ``PUT /tools`` takes effect on the next call with no role
@@ -50,11 +61,27 @@ def _revalidate(config: dict) -> dict | None:
 
     Field by field, because the blast radius differs:
 
-    - **``destination`` bad → the whole config is unusable** (return None).
-      Callers then take their existing no-transfer-config path, which since W0
-      emits ``transfer.failed`` rather than silently not installing the gate.
-      Dialling an unvalidated destination is the outcome this must not have:
-      it is the vishing/call-interception surface (R-E).
+    - **``destination`` bad → the destination is blanked, the config survives.**
+
+      It used to return ``None``, and that was wrong in two ways at once
+      (2026-08-19 review B-1 / M-5). ``None`` is indistinguishable from "this
+      workflow has no transfer_call tool", and callers branch on exactly that:
+
+        * ``resolve_press0_gate`` guards its alert on
+          ``if transfer_config and not valid_destination(...)`` — with ``None``
+          it fell through to a bare ``logger.info``, so a misconfigured
+          deployment lost both the ``transfer.failed`` **alert dispatch** and the
+          ``record_call_outcome`` annotation, and read as clean AI completions
+          in the queryable layer. That alert branch exists *precisely* for this
+          case; W0 added it.
+        * ``capacity_gate._gate_allows`` does ``config = config or {}`` — with
+          ``None``, an empty dict means "no schedule" (= always open) and
+          ``queue_is_healthy({})`` returns True. One bad destination silently
+          switched off **both** the business-hours gate and the queue-health gate.
+
+      Blanking keeps the config truthy, so every existing "configured but
+      malformed" path fires as designed, and ``valid_destination("")`` is False
+      so nothing gets dialled.
     - **``alternateDestination`` bad → drop that key only.** It is the
       after-hours branch; killing the main transfer path over it would trade a
       degraded branch for a dead one.
@@ -79,26 +106,47 @@ def _revalidate(config: dict) -> dict | None:
         # we cannot tell a queue from an attacker's SIP host, and the two
         # artifacts are mounted together, so the tool itself is about to be
         # dropped by the enabled-set filter anyway.
-        log_artifact_missing("find_transfer_call_config", exc)
+        log_artifact_missing("revalidate_transfer_config", exc)
         logger.bind(call_event="transfer.config_unvalidatable").error(
             "transfer.config_unvalidatable: shared REFER URI parser unavailable; "
-            "treating the transfer_call config as absent (fail-closed, W2a)"
+            "blanking the destination (fail-closed, W2a)"
         )
-        return None
+        return dict(config, destination="")
 
     if not parsed.ok:
         logger.bind(call_event="transfer.config_rejected").error(
             f"transfer.config_rejected field=destination: {parsed.reason}; "
-            f"transfer_call config treated as absent (W2a issue #3)"
+            f"destination blanked — the configured-but-malformed path takes over "
+            f"(W2a issue #3)"
         )
-        return None
+        return dict(config, destination="")
+
+    # Premium-rate guard (2026-08-19 review M-1). The write path runs shape
+    # **and** premium-rate; the read path ran only shape — so a `tel:+1900…`
+    # sitting in the database was shape-perfect and dialled every time. The
+    # read path exists precisely because the database's contents never went
+    # through the write path.
+    from api.services.pipecat.capacity_gate import PREMIUM_RATE_PREFIXES, _premium_rate
+
+    if _premium_rate(destination):
+        logger.bind(call_event="transfer.config_rejected").error(
+            f"transfer.config_rejected field=destination: matches a premium-rate "
+            f"prefix {PREMIUM_RATE_PREFIXES}; destination blanked (review M-1)"
+        )
+        return dict(config, destination="")
 
     checked = dict(config)
 
     alternate = checked.get("alternateDestination")
     if alternate is not None and str(alternate).strip():
         alt_parsed = parse_refer_uri(alternate)
-        if not alt_parsed.ok:
+        if alt_parsed.ok and _premium_rate(alternate):
+            logger.bind(call_event="transfer.config_rejected").error(
+                "transfer.config_rejected field=alternateDestination: premium-rate "
+                "prefix; after-hours alternate branch disabled (review M-1)"
+            )
+            checked.pop("alternateDestination", None)
+        elif not alt_parsed.ok:
             logger.bind(call_event="transfer.config_rejected").error(
                 f"transfer.config_rejected field=alternateDestination: "
                 f"{alt_parsed.reason}; after-hours alternate branch disabled for "
@@ -125,7 +173,7 @@ async def find_transfer_call_config(workflow, organization_id: int) -> dict | No
 
     Scans every node's tools (a press-0 safety net is global, so the target is
     workflow-wide, not per-node) and returns the first ``transfer_call`` tool's
-    ``config`` — **re-validated**, see :func:`_revalidate`.
+    ``config`` — **re-validated**, see :func:`revalidate_transfer_config`.
     """
     tool_uuids: set[str] = set()
     for node in workflow.nodes.values():
@@ -137,5 +185,7 @@ async def find_transfer_call_config(workflow, organization_id: int) -> dict | No
     tools = await db_client.get_tools_by_uuids(list(tool_uuids), organization_id)
     for tool in tools:
         if tool.category == ToolCategory.TRANSFER_CALL.value:
-            return _revalidate((tool.definition or {}).get("config", {}) or {})
+            return revalidate_transfer_config(
+                (tool.definition or {}).get("config", {}) or {}
+            )
     return None

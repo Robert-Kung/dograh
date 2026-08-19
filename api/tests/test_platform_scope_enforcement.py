@@ -279,13 +279,13 @@ async def _resolve(config, monkeypatch):
 async def test_read_path_rejects_a_destination_the_write_path_would_have(monkeypatch):
     """The row can predate the rule, or be written by a path that bypassed it.
 
-    Returning None routes callers into their existing no-config path, which
-    since W0 emits ``transfer.failed`` rather than silently not installing.
+    The destination comes back **blanked, not None** (review B-1 / M-5): callers
+    must be able to tell "no transfer tool" from "tool with a rejected
+    destination" — only the latter reaches the alert branch W0 added.
     """
-    assert await _resolve({"destination": "sip:a@b@evil.com"}, monkeypatch) is None
-    assert (
-        await _resolve({"destination": "SIP/human-queue@10.0.0.1"}, monkeypatch) is None
-    )
+    for bad in ("sip:a@b@evil.com", "SIP/human-queue@10.0.0.1"):
+        config = await _resolve({"destination": bad}, monkeypatch)
+        assert config is not None and config["destination"] == ""
 
 
 @requires_sip_uri
@@ -342,4 +342,69 @@ async def test_good_health_url_survives(monkeypatch):
 async def test_read_path_fails_closed_when_the_parser_is_unmounted(monkeypatch):
     monkeypatch.setenv("PLATFORM_SIP_URI", "/nonexistent/sip_uri.py")
     platform_scope.reset_cache()
-    assert await _resolve({"destination": "tel:+886223456789"}, monkeypatch) is None
+    config = await _resolve({"destination": "tel:+886223456789"}, monkeypatch)
+    assert config is not None and config["destination"] == "", (
+        "fail-closed 是「撥不出去」，不是「這個工作流沒有轉接工具」——後者會連"
+        "營運時段閘與隊列健康閘一起靜默關掉（B-1／M-5）"
+    )
+
+
+# ── 5. 不變量：解析器接受集合 ⊆ 執行層接受集合（H-1）────────────────────
+
+
+@requires_sip_uri
+@pytest.mark.parametrize("vector", ACCEPTED, ids=lambda v: v["value"][:40])
+def test_parser_is_a_subset_of_the_executor(vector):
+    """本檔是唯一同時看得到兩者的地方，所以釘子只能放在這裡。
+
+    `deploy/bin/sip_uri.py` 可以比執行層更嚴（那只是拒絕一個撥得出去的形狀，會被
+    使用者當場發現），**不可以更寬**——更寬的每一格都是啞彈：通過部署期形狀閘、
+    通過寫入期驗證，REFER 時才失敗，而失敗的是「轉真人」。
+
+    2026-08-19 的 security review（H-1）抓到它一開始正是更寬的：user part 多收十個
+    RFC 3261 標點（`! $ & ' ( ) * + = ~`），並額外收 `sips:`。
+    """
+    from api.services.pipecat.livekit_transfer_flow import valid_destination
+
+    value = vector["value"]
+    assert valid_destination(value), (
+        f"解析器接受 {value!r} 但執行層 _DESTINATION_RE 不接受——這是一顆啞彈。"
+        f"要放寬先放寬執行層，再改 sip_uri.py 與 vectors.json。"
+    )
+
+
+@requires_sip_uri
+def test_ai_initiated_transfer_revalidates_its_own_config():
+    """M-8：AI 主動觸發的轉接讀的是**這一支工具**的 config，不走 find_transfer_call_config。
+
+    它因此需要自己呼叫 `revalidate_transfer_config`。這條釘的是那個函式對該路徑
+    的輸入形狀真的擋得住——handler 本體的接線由下一條測試涵蓋。
+    """
+    from api.services.pipecat.transfer_call_config import revalidate_transfer_config
+
+    # 被拒的目的地回來是**空字串**不是 None（review B-1／M-5）：None 與「這個工作流
+    # 沒有轉接工具」無法區分，而 press-0 的告警分支與容量閘的排程／隊列健康閘都以
+    # `if config` 為條件——回 None 會把它們一起靜默關掉，而那正是 W0 修過的失效。
+    for bad in ("sip:a@b@evil.com", "SIP/human-queue@10.0.0.1", "tel:+19005551212"):
+        out = revalidate_transfer_config({"destination": bad, "schedule": {"tz": "X"}})
+        assert out is not None, "回 None 會讓呼叫端誤判成「這個工作流沒有轉接工具」"
+        assert out["destination"] == ""
+        assert out["schedule"] == {"tz": "X"}, "其餘設定必須留著，閘才不會被一併關掉"
+    ok = revalidate_transfer_config({"destination": "tel:+886223456789"})
+    assert ok and ok["destination"] == "tel:+886223456789"
+
+
+@requires_sip_uri
+def test_transfer_handler_wiring_calls_the_revalidator():
+    """接線本身：handler 必須真的呼叫再驗，而不是只有 find_transfer_call_config 有。
+
+    以原始碼確認呼叫點存在——handler 是深層巢狀閉包，完整驅動它需要 workflow_run、
+    transport、LLM 一整套 mock，而那組 mock 本身比被測的一行還脆。這條的價值在於
+    「有人把那行刪掉時會紅」。
+    """
+    import inspect
+
+    from api.services.workflow import pipecat_engine_custom_tools as mod
+
+    src = inspect.getsource(mod)
+    assert "revalidate_transfer_config(config or {})" in src

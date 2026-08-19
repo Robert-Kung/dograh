@@ -722,6 +722,31 @@ class CustomToolManager:
                     )
                     return
 
+                # **Re-validate the config on read** (W2a issue #3 / security
+                # review M-8). A ``PUT /tools`` takes effect on the next call
+                # with no role check, and the row may predate the current shape
+                # rules — so the value is re-parsed here rather than trusted
+                # because the write path once saw it. This is the AI-initiated
+                # path (the caller simply asks for a human): the highest-volume
+                # trigger, and until M-8 the one reader of this config with no
+                # re-validation at all.
+                #
+                # It sits *after* the mode checks on purpose: "transfers are not
+                # available in text chat" is a more useful thing to say than
+                # "the destination is unusable" when both are true.
+                from api.services.pipecat.transfer_call_config import (
+                    revalidate_transfer_config,
+                )
+
+                # A rejected destination comes back **blanked** (not None — see
+                # revalidate_transfer_config for why), so the existing
+                # no_destination branch immediately below is what reports it.
+                # Downstream readers (queue health, after-hours alternate) get
+                # the checked copy, so a bad health URL or alternate is dropped
+                # here too rather than used.
+                config = revalidate_transfer_config(config or {})
+                destination = config.get("destination", "")
+
                 # Validate destination phone number
                 if not destination or not destination.strip():
                     validation_error_result = {
