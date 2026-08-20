@@ -52,7 +52,9 @@ path", which is indistinguishable from the R-O state this module exists to fail
 closed on; buying convenience for a banned path by weakening the one that ships
 is the wrong trade. Contributors doing local dev per ``AGENTS.md`` hit the
 ``scope.canon_unavailable`` log line, which names the path and the missing
-``-v``. Registered as residual R-T in the platform repo.
+``-v``. Registered as residual R-AA in the platform repo (not R-T — R-T…R-Z were
+pre-allocated to W2c/W2d and the point of pre-allocation is that a late arrival
+must not shift them).
 """
 
 from __future__ import annotations
