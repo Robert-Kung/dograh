@@ -193,11 +193,6 @@ def allowed_tool_categories() -> frozenset[str]:
     return frozenset(str(item) for item in allowed)
 
 
-def tool_category_allowed(category: str | None) -> bool:
-    """Whether a tool's dispatch key is in the enabled set. Raises if unreadable."""
-    return str(category) in allowed_tool_categories()
-
-
 def log_artifact_missing(where: str, exc: PlatformArtifactMissing) -> None:
     """One high-signal line, shaped like ``tool_trust.log_denied_tool``.
 

@@ -690,3 +690,79 @@ async def test_a_node_with_out_edges_never_composes_to_empty():
     finally:
         os.environ.pop("PLATFORM_FEATURE_SCOPE", None)
         platform_scope.reset_cache()
+
+
+# ── 9. LOW 批次（2026-08-20）────────────────────────────────────────────────
+
+
+def test_scope_deny_log_cannot_be_forged_with_a_newline():
+    """L-1：工具名在 W2c 開寫入面後是受攻擊者影響的，而 R-P 的緩解就是 grep 這行。
+
+    換行不加引號就能偽造第二行 `scope.tool_denied`，把一支被擋的工具混成兩支、
+    或反過來讓真正被擋的那支看起來像雜訊。
+    """
+    from api.services.workflow.pipecat_engine_custom_tools import (
+        log_scope_denied_tool,
+    )
+
+    messages: list[str] = []
+
+    class _Sink:
+        def bind(self, **_kw):
+            return self
+
+        def warning(self, message):
+            messages.append(message)
+
+    import api.services.workflow.pipecat_engine_custom_tools as mod
+
+    original = mod.logger
+    mod.logger = _Sink()
+    try:
+        log_scope_denied_tool(
+            "calculator", "innocent\nscope.tool_denied category=end_call tool=fake"
+        )
+    finally:
+        mod.logger = original
+
+    assert len(messages) == 1
+    assert "\n" not in messages[0], "工具名的換行必須被引號逃逸掉，否則可偽造日誌行"
+
+
+@requires_sip_uri
+def test_premium_rate_rejection_adds_no_second_copy_of_the_destination():
+    """R-6，**但只能修到一半，而另一半修不掉**。
+
+    finding 說的是：同一個函式上方十行才立下「理由不含原值」的紀律，這裡卻把
+    原值印回去。訊息已經改掉了——但 `str(ValidationError)` 仍含該值，因為
+    **pydantic 自己會附上 `input_value=...`**，那不在我們的控制範圍內。
+
+    所以這條釘的是能釘的：驗證器自己的訊息不再貢獻**第二份**。順帶記錄那條紀律
+    在寫入層本來就比在解析器弱——這裡的值是寫的人剛送進來的，422 也是回給他，
+    不構成揭露；`parse_refer_uri` 的 reason 不同，它會進部署 log 而值可能是
+    `${ENV:…}` 代換後的真值。詳見 low-findings-register.md。
+    """
+    from pydantic import ValidationError
+
+    from api.schemas.tool import TransferCallConfig
+
+    secret = "sip:1900555@internal-pbx.corp.example"
+    with pytest.raises(ValidationError) as excinfo:
+        TransferCallConfig(destination=secret)
+    message = str(excinfo.value)
+    assert "premium-rate" in message, "拒絕理由本身要留著"
+    assert message.count(secret) <= 1, (
+        "驗證器的訊息不得再貢獻一份原值——僅剩的那一份是 pydantic 的 input_value="
+    )
+    assert "Destination 'sip:" not in message, "舊的回顯格式不得復活"
+
+
+def test_no_second_enabled_set_predicate_survives():
+    """L-7／R-5：`tool_category_allowed` 是死碼，而它剛好是 B-3 缺的那個判定。
+
+    兩份判定並存正是本 change 要消滅的形狀——留著它，下次有人改其中一份就漂移。
+    """
+    assert not hasattr(platform_scope, "tool_category_allowed"), (
+        "死碼已於 2026-08-20 移除；要復活它就要讓三個呼叫點都改用它，"
+        "不能與 `category not in allowed_categories` 並存"
+    )

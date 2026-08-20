@@ -84,12 +84,17 @@ def log_scope_denied_tool(category: str, name: str) -> None:
     with the first's event name would make the two indistinguishable in a log
     search, and they need different fixes.
     """
+    # ``!r`` on both, deliberately (review L-1). The tool name is attacker-
+    # influenced once W2c opens the write plane, and a newline in it would
+    # forge a second ``scope.tool_denied`` line — while R-P's mitigation *is*
+    # grepping for those lines. The structured fields below already carry the
+    # raw values for anything that consumes the log as data.
     logger.bind(
         call_event="scope.tool_denied", tool_category=category, tool_name=name
     ).warning(
-        f"scope.tool_denied category={category} tool={name}: not in the platform "
-        f"enabled set (deploy/feature-scope.json allowed_tool_types); tool not "
-        f"registered for this call (W2a)"
+        f"scope.tool_denied category={category!r} tool={name!r}: not in the "
+        f"platform enabled set (deploy/feature-scope.json allowed_tool_types); "
+        f"tool not registered for this call (W2a)"
     )
 
 
