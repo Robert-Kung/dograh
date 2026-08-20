@@ -41,7 +41,16 @@ def _health_url_problem(value: str) -> str | None:
         return "contains whitespace"
     try:
         parts = urlsplit(value)
+        # ``.port`` is read here on purpose: ``urlsplit`` itself does not raise
+        # on ``http://queue:99999/health`` or ``:abc`` — the *property* does,
+        # lazily. Leaving it out split one family of config typo into two
+        # opposite behaviours (review M-1): ``[bad]`` dropped the two probe
+        # keys and let the transfer proceed, while a bad port was declared
+        # usable and then failed inside ``queue_is_healthy``, which swallows it
+        # and caches ``healthy=False`` → **every in-hours transfer refused**
+        # for the TTL. That is the louder failure, and it was the unhandled one.
         scheme, netloc, hostname = parts.scheme, parts.netloc, parts.hostname
+        parts.port
     except ValueError:
         # Deliberately no detail and no value: this string reaches a call log,
         # and the parser's own message quotes the input.

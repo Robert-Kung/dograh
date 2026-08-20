@@ -87,8 +87,17 @@ def log_scope_denied_tool(category: str, name: str) -> None:
     # ``!r`` on both, deliberately (review L-1). The tool name is attacker-
     # influenced once W2c opens the write plane, and a newline in it would
     # forge a second ``scope.tool_denied`` line — while R-P's mitigation *is*
-    # grepping for those lines. The structured fields below already carry the
-    # raw values for anything that consumes the log as data.
+    # grepping for those lines. Verified: ``repr`` escapes every
+    # ``isprintable() == False`` char, U+2028/U+2029/U+0085 included.
+    #
+    # An earlier version of this comment said the bound fields below "already
+    # carry the raw values for anything that consumes the log as data". **That
+    # was false** (review L-2): ``SERIALIZE_LOG_OUTPUT`` defaults to false and
+    # ``LOG_FILE_PATH`` to None, neither is set anywhere under ``deploy/``, so
+    # the console sink renders ``{message}`` only and the extras are never
+    # emitted. They are there for a JSON sink nobody has turned on — and if one
+    # is, a raw U+2028 in ``tool_name`` rides through ``ensure_ascii=False``
+    # into the JSONL line (harmless to grep, not to a JS-based ingester).
     logger.bind(
         call_event="scope.tool_denied", tool_category=category, tool_name=name
     ).warning(

@@ -610,11 +610,18 @@ def test_unparseable_health_url_reason_does_not_quote_the_input():
 
 
 @pytest.mark.asyncio
-async def test_empty_function_list_clears_the_previous_node_s_tools():
-    """終端節點的工具被全數拒絕時，不得沿用上一個節點的 ToolsSchema。
+async def test_only_a_denied_node_clears_the_schema_not_an_end_node():
+    """**H-1 的釘子**：三態各釘一格，而中間那格是這次差點出事的地方。
 
-    `set_tools` 原本被 `if functions:` 包著。潛伏在上游（需要一個完全沒有工具
-    的節點），而啟用集合過濾讓它多一條路徑：宣告的工具全被拒 → 同樣是空清單。
+    第一版的修正把「空清單」一律當成「工具被拒」，並在 docstring 宣稱那只會發生在
+    「工具全被拒的終端節點」。實際上 `EndCallNodeData` **連 `tool_uuids` 欄位都沒有**，
+    `Node.__init__` 的 `getattr` 因此回 `None`——於是**每個工作流的每個 end node**
+    都走那條分支，也就是每一通電話的正常結束路徑。
+
+    那條路徑上 context 還留著轉場函式的 `tool_use`／`tool_result`，而清掉 tools 之後
+    仍會發一次 completion。Bedrock 對這個形狀有明文守衛（`has_tool_content and not
+    tools` → 塞一個 no-op tool），Anthropic 直接拒。所以「end node 不清」不是潔癖，
+    是那條路徑不能碰。
     """
     from unittest.mock import AsyncMock as _AsyncMock
 
@@ -622,74 +629,88 @@ async def test_empty_function_list_clears_the_previous_node_s_tools():
 
     from api.services.workflow.pipecat_engine import PipecatEngine
 
-    engine = MagicMock()
-    engine.trust_enforced = False
-    engine.llm._update_settings = _AsyncMock()
-    engine.llm._context = object()  # 讓 Gemini 分支不動 context
+    def _engine():
+        e = MagicMock()
+        e.trust_enforced = False
+        e.llm._update_settings = _AsyncMock()
+        e.llm._context = object()
+        return e
 
-    await PipecatEngine._update_llm_context(engine, "prompt", [])
-    engine.context.set_tools.assert_called_once_with(NOT_GIVEN)
-
-
-@pytest.mark.asyncio
-async def test_non_empty_function_list_still_sets_the_schema():
-    """負面對照：上一條要是把 set_tools 整個關掉也會綠。"""
-    from unittest.mock import AsyncMock as _AsyncMock
-
-    from api.services.workflow.pipecat_engine import PipecatEngine
-
-    engine = MagicMock()
-    engine.trust_enforced = False
-    engine.llm._update_settings = _AsyncMock()
-    engine.llm._context = object()
-
-    # 真的 FunctionSchema，不是 MagicMock——ToolsSchema 會驗型別，mock 會被當成
-    # direct function 而在建構時就炸掉（也就是這條對照組原本根本沒跑到斷言）。
+    # ① 有工具 → 設 schema
     from pipecat.adapters.schemas.function_schema import FunctionSchema
 
     schema = FunctionSchema(
         name="end_call", description="掛斷", properties={}, required=[]
     )
-    await PipecatEngine._update_llm_context(engine, "prompt", [schema])
-    args, _ = engine.context.set_tools.call_args
-    assert args[0].standard_tools == [schema]
+    e1 = _engine()
+    await PipecatEngine._update_llm_context(e1, "p", [schema], tools_were_denied=False)
+    assert e1.context.set_tools.call_args[0][0].standard_tools == [schema]
+
+    # ② 宣告了工具但全被拒 → 清掉（這是修正存在的理由）
+    e2 = _engine()
+    await PipecatEngine._update_llm_context(e2, "p", [], tools_were_denied=True)
+    e2.context.set_tools.assert_called_once_with(NOT_GIVEN)
+
+    # ③ 本來就沒宣告工具（end node）→ 完全不碰，維持上游行為
+    e3 = _engine()
+    await PipecatEngine._update_llm_context(e3, "p", [], tools_were_denied=False)
+    e3.context.set_tools.assert_not_called()
+
+
+def test_an_end_node_declares_no_tools_at_all():
+    """H-1 的事實基礎，直接對型別釘住而不是對行為推論。
+
+    `tools_were_denied = bool(node.tool_uuids) and not functions` 這條式子的正確性
+    完全建立在「end node 的 `tool_uuids` 是 falsy」上。用真的 `EndCallNodeData`
+    建一個 `Node` 來釘——上游哪天給 end node 加上 `tool_uuids`，這條會紅，而那時
+    `_update_llm_context` 的三態分類要重想。
+    """
+    from api.services.workflow.dto import EndCallNodeData
+    from api.services.workflow.workflow_graph import Node
+
+    node = Node(
+        id="end1", node_type="endCall", data=EndCallNodeData(name="bye", prompt="掰掰")
+    )
+    assert node.is_end is True
+    assert not node.tool_uuids, "end node 若開始宣告工具，H-1 的分類就不成立"
+    assert not getattr(node, "document_uuids", None)
+    assert node.out_edges == []
 
 
 @pytest.mark.asyncio
-async def test_a_node_with_out_edges_never_composes_to_empty():
-    """釘住觸發條件比 Codex 敘述的窄：轉場 schema 會把清單撐起來。
+async def test_an_end_node_composes_to_empty_and_a_node_with_out_edges_does_not():
+    """兩個方向都釘。第一版只釘了後者，所以 H-1 沒被抓到。
 
-    `compose_functions_for_node` 對每條 out edge 各加一個 schema，所以「工具全
-    被拒」單獨不足以清空——還要沒有 KB 文件、且**沒有出邊**（終端節點）。
-    把這件事寫成測試而不是註解，因為上面那條修正的價值完全取決於它。
+    後者（有出邊 → 不可能為空）本來就成立，因為 `compose_functions_for_node` 對每條
+    out edge 各加一個轉場 schema。前者才是關鍵：終端節點真的會組出空清單，而它
+    **不需要任何工具被拒**就會發生。
     """
-    monkeypatch_scope = DELIVERED_SCOPE
-    os.environ["PLATFORM_FEATURE_SCOPE"] = str(monkeypatch_scope)
-    platform_scope.reset_cache()
-    try:
-        from api.services.workflow.pipecat_engine_context_composer import (
-            compose_functions_for_node,
-        )
+    from api.services.workflow.dto import EndCallNodeData
+    from api.services.workflow.pipecat_engine_context_composer import (
+        compose_functions_for_node,
+    )
+    from api.services.workflow.workflow_graph import Node
 
-        edge = MagicMock()
-        edge.get_function_name.return_value = "go_to_next"
-        edge.condition = "客戶說完問題"
-        node = MagicMock()
-        node.document_uuids = []
-        node.tool_uuids = ["uuid-calc"]
-        node.out_edges = [edge]
-        node.mcp_tool_filters = None
+    end_node = Node(
+        id="end1", node_type="endCall", data=EndCallNodeData(name="bye", prompt="掰掰")
+    )
+    assert (
+        await compose_functions_for_node(node=end_node, custom_tool_manager=None) == []
+    ), "end node 組出空清單——這正是不能一律清 schema 的原因"
 
-        manager = MagicMock()
-        manager.get_tool_schemas = AsyncMock(return_value=[])  # 工具全被拒
+    edge = MagicMock()
+    edge.get_function_name.return_value = "go_to_next"
+    edge.condition = "客戶說完問題"
+    node = MagicMock()
+    node.document_uuids = []
+    node.tool_uuids = ["uuid-calc"]
+    node.out_edges = [edge]
+    node.mcp_tool_filters = None
+    manager = MagicMock()
+    manager.get_tool_schemas = AsyncMock(return_value=[])  # 工具全被拒
 
-        functions = await compose_functions_for_node(
-            node=node, custom_tool_manager=manager
-        )
-        assert len(functions) == 1, "有出邊就不會是空清單——觸發條件限終端節點"
-    finally:
-        os.environ.pop("PLATFORM_FEATURE_SCOPE", None)
-        platform_scope.reset_cache()
+    functions = await compose_functions_for_node(node=node, custom_tool_manager=manager)
+    assert len(functions) == 1, "有出邊就不會是空清單——所以清 schema 只發生在終端節點"
 
 
 # ── 9. LOW 批次（2026-08-20）────────────────────────────────────────────────
