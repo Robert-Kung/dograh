@@ -35,15 +35,36 @@ logger = logging.getLogger(__name__)
 # stays importable — and unit-testable — without the pipecat + livekit runtime.
 
 # Config-driven destination: tel:+E164 or sip:user@host. Never caller input (C6).
-# Kept identical to the canonical shape in the platform repo's
-# deploy/bin/feature_scope_check.py DESTINATION_RE (which preflight also pins).
 # ASCII character class, not ``\w``: ``\w`` is Unicode-aware in Python ``str``
 # patterns, so it accepted homoglyph and full-width hosts (``sip:queue@pbx.examplе``
-# with a Cyrillic ``е`` reads as the real host but resolves elsewhere) that the
-# canonical version rejects. ``\Z`` not ``$``: ``$`` also matches before a single
-# trailing newline, so ``"tel:+886223456789\n"`` passed and flowed unmodified
-# into the REFER.
-_DESTINATION_RE = re.compile(r"^(tel:\+[1-9][0-9]{1,14}|sip:[A-Za-z0-9._@:-]+)\Z")
+# with a Cyrillic ``е`` reads as the real host but resolves elsewhere). ``\Z`` not
+# ``$``: ``$`` also matches before a single trailing newline, so
+# ``"tel:+886223456789\n"`` passed and flowed unmodified into the REFER.
+#
+# **Exactly one ``@``** (review B-5). This is the *fourth* place a REFER
+# destination gets shape-checked, and W2a only converged the other three onto
+# ``deploy/bin/sip_uri.py``: the deployment-time gate, the write-path validator
+# and the call-time re-read. Those three cover destinations that live in a
+# workflow row. They do not cover the ones that arrive as **env**
+# (``SAFETYNET_FALLBACK_QUEUE``, ``CAPACITY_OVERFLOW_TRANSFER_TO``), and for
+# those this regex is the only runtime gate there is — ``validate_capacity_config``
+# and ``validate_safetynet_config`` both shape-check through here. While the
+# class contained ``@``, ``sip:a@b@evil.com`` passed all of them: the operator
+# reads ``b``, the SIP stack dials ``evil.com``, and R-E's "multiple ``@`` is
+# gone, so ``allowed_hosts`` can now be filled safely" was true of three places
+# out of four.
+#
+# Tightening is safe in the direction the subset invariant runs
+# (``deploy/bin/sip_uri.py`` SHALL accept a subset of what this accepts): the
+# parser already refuses a second ``@``, and every accepted vector in
+# ``deploy/bin/testdata/uri/vectors.json`` still matches. It is deliberately
+# *not* narrowed to the parser's exact rule — ``sip:user:password@host`` and
+# a trailing-dot host still match here and are refused by the parser, which is
+# the invariant working as intended, and a dial path is the wrong layer to
+# start rejecting values a write path already vetted.
+_DESTINATION_RE = re.compile(
+    r"^(tel:\+[1-9][0-9]{1,14}|sip:[A-Za-z0-9._:-]+@[A-Za-z0-9._:-]+)\Z"
+)
 
 DEFAULT_AFTER_HOURS_ACTION = "back_to_ai"
 _SUPPORTED_AFTER_HOURS = {"back_to_ai", "announce_and_hangup", "alternate_queue"}

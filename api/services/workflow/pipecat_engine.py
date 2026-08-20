@@ -46,6 +46,8 @@ from api.services.workflow.pipecat_engine_context_summarizer import (
 )
 from api.services.workflow.pipecat_engine_custom_tools import (
     CustomToolManager,
+    allowed_tool_categories_or_none,
+    log_scope_denied_tool,
 )
 from api.services.workflow.pipecat_engine_variable_extractor import (
     VariableExtractionManager,
@@ -970,8 +972,22 @@ class PipecatEngine:
         return self._gathered_context.copy()
 
     async def _open_mcp_sessions(self) -> None:
-        """Connect every MCP-category tool referenced by any workflow node.
-        Failures degrade (session marked unavailable); never raises."""
+        """Connect every *enabled* MCP-category tool referenced by a node.
+
+        Failures degrade (session marked unavailable); never raises.
+
+        The enabled-set filter here is not redundant with the one in
+        ``CustomToolManager`` (review B-3). This is a **third**
+        ``get_tools_by_uuids`` path and it runs first: it dials the ``url``
+        out of ``tool.definition`` with the tool's credential attached, at
+        call start, before any node advertises anything. Filtering only at
+        advertisement/registration would leave the connection — and the
+        credential — already made to a host the canon never allowed. With
+        ``mcp`` off the enabled set (the delivered canon allows ``end_call``
+        and ``transfer_call``) nothing here should open at all, and C5's
+        "MCP is blocked at call time" claim rests on this check, not on the
+        two downstream ones.
+        """
         from api.services.workflow.tools.mcp_tool import (
             McpDefinitionError,
             validate_mcp_definition,
@@ -993,8 +1009,21 @@ class PipecatEngine:
             tools = await db_client.get_tools_by_uuids(
                 list(tool_uuids), organization_id
             )
+            allowed_categories = allowed_tool_categories_or_none()
             for tool in tools:
                 if tool.category != ToolCategory.MCP.value:
+                    continue
+                # ``None`` = canon unreadable = open nothing, same fail-closed
+                # direction the registration paths take. The per-tool deny line
+                # is only for the "canon says no" case; the unreadable case has
+                # already logged ``scope.canon_unavailable`` once, and emitting
+                # both would make a mount failure look like a policy decision.
+                if (
+                    allowed_categories is None
+                    or tool.category not in allowed_categories
+                ):
+                    if allowed_categories is not None:
+                        log_scope_denied_tool(tool.category, tool.name)
                     continue
                 try:
                     cfg = validate_mcp_definition(tool.definition)

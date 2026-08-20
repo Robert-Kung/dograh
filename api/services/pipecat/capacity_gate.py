@@ -90,13 +90,82 @@ def overflow_transfer_to() -> str | None:
     return fallback_queue()
 
 
+def _legacy_premium_candidates(destination: str) -> tuple[str, ...]:
+    """Parser-free candidates: **every** ``@``-separated part, scheme stripped.
+
+    The fallback for both cases where ``parse_refer_uri`` gives us nothing —
+    parser unmounted, or parser mounted and the value unparseable. See
+    ``_premium_rate``.
+
+    The pre-W2a version of this took the ``sip:`` **user part only**
+    (``split("@", 1)[0]``), which is issue #4. Review M-4 caught that keeping
+    it verbatim opened two holes at once on the same input: a value with a
+    second ``@`` is exactly what the shared parser refuses, so
+    ``sip:queue@x@886204.example`` fell through to a check that then looked at
+    ``queue`` and shrugged at the premium host behind it.
+
+    Splitting on every ``@`` needs no parser and is strictly more blocking
+    than what it replaces, which is the only safe direction for a guard: the
+    cost of a false positive is a loud boot refusal on a renameable value,
+    the cost of a false negative is toll fraud on every overflowed call. Ports
+    and URI cruft do not interfere — the comparison is ``startswith`` against
+    digit prefixes.
+    """
+    value = destination.strip()
+    for scheme in ("tel:", "sip:", "sips:"):
+        if value.lower().startswith(scheme):
+            value = value[len(scheme) :]
+            break
+    return tuple(part.lstrip("+") for part in value.split("@") if part) or ("",)
+
+
 def _premium_rate(destination: str) -> bool:
-    number = destination.strip()
-    if number.startswith("tel:"):
-        number = number[len("tel:") :]
-    elif number.startswith("sip:"):
-        number = number[len("sip:") :].split("@", 1)[0]
-    return number.lstrip("+").startswith(PREMIUM_RATE_PREFIXES)
+    """True if ``destination`` matches a premium-rate prefix (toll-fraud guard).
+
+    The candidates come from the shared parser (W2a): for ``sip:`` that is the
+    user part **and the host**. The old logic only looked at the user part, so
+    ``sip:queue@886204.example`` was unguarded — and the host is what actually
+    gets dialled (issue #4).
+
+    **Falls back to a parser-free scan when the parser is not mounted**, with a
+    high-signal log. That fallback checks every ``@``-separated part rather
+    than the pre-W2a user part alone, so it is strictly *more* blocking than
+    what shipped before W2a — never less. Raising instead would take
+    ``validate_capacity_config`` down at startup, i.e. a missing ``-v`` would
+    stop the platform answering the phone at all. The narrower failure is the
+    right one here; the write path (``TransferCallConfig.validate_destination``)
+    makes the opposite choice for the opposite reason. Both are registered as
+    residual R-O.
+    """
+    from api.services.platform_scope import (
+        PlatformArtifactMissing,
+        log_artifact_missing,
+        parse_refer_uri,
+    )
+
+    try:
+        parsed = parse_refer_uri(destination)
+    except PlatformArtifactMissing as exc:
+        log_artifact_missing("capacity_gate._premium_rate", exc)
+        logger.error(
+            "premium-rate guard degraded to a parser-free scan of every "
+            "@-separated part; host normalisation and the shape rule are NOT "
+            "applied until the mount is restored"
+        )
+        candidates = _legacy_premium_candidates(destination)
+    else:
+        # Unparseable values still get scanned rather than given a free pass:
+        # shape rejection happens elsewhere, and this guard must not be the
+        # layer that under-blocks. Review M-4: the unparseable set is not
+        # random, it is precisely the shapes the parser refuses — multiple
+        # ``@`` among them — so a fallback that stopped at the first ``@``
+        # here was under-blocking exactly where the shape was most suspect.
+        candidates = (
+            parsed.premium_candidates()
+            if parsed.ok
+            else _legacy_premium_candidates(destination)
+        )
+    return any(c.startswith(PREMIUM_RATE_PREFIXES) for c in candidates)
 
 
 def validate_capacity_config() -> None:

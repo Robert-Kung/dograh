@@ -1,0 +1,26 @@
+{
+  "_readme": [
+    "TEST FIXTURE ONLY — NOT the delivered canon.",
+    "",
+    "Allows every ToolCategory, i.e. upstream dograh behaviour with no platform",
+    "governance applied. The pre-existing suite runs under this so that tests for",
+    "http_api / mcp / calculator tools keep testing those features; the delivered",
+    "canon (deploy/feature-scope.json in the platform repo) allows two categories",
+    "and would make those tests assert the absence of the thing they cover.",
+    "",
+    "Tests that exercise the enabled-set filter MUST point PLATFORM_FEATURE_SCOPE",
+    "at feature_scope_delivered_shape.json (or their own) instead of relying on",
+    "this one."
+  ],
+  "version": 0,
+  "allowed_tool_types": [
+    "transfer_call",
+    "end_call",
+    "calculator",
+    "http_api",
+    "mcp",
+    "native",
+    "integration"
+  ],
+  "blocked_tool_types": []
+}

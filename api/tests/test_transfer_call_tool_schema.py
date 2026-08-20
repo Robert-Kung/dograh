@@ -12,16 +12,20 @@ import pytest
 from pydantic import ValidationError
 
 from api.schemas.tool import CreateToolRequest, TransferCallConfig
+from api.tests.support.platform_artifacts import requires_sip_uri
 
 GATE_CONFIG = {
-    "destination": "sip/queue@example.internal",
+    # W2a D-A6: the ARI dialect ("sip/queue@…", "PJSIP/1234", bare E.164)
+    # no longer validates. It never dialled on LiveKit; accepting it only
+    # produced destinations that failed at REFER time.
+    "destination": "sip:queue@example.internal",
     "schedule": {
         "timezone": "Asia/Taipei",
         "weekly": {"mon": [["09:00", "18:00"]]},
     },
     "afterHoursAction": "back_to_ai",
     "afterHoursMessage": "目前非營業時間",
-    "alternateDestination": "+886223456789",
+    "alternateDestination": "tel:+886223456789",
     "transferFailedMessage": "轉接失敗",
     "transferUnavailableMessage": "目前無法轉接",
     "unavailableAnnounceLimit": 2,
@@ -45,6 +49,7 @@ def _create_request(config: dict) -> CreateToolRequest:
     )
 
 
+@requires_sip_uri
 def test_gate_keys_survive_the_persistence_dump():
     """The exact failure shape this PR fixes: write-path silently dropping keys."""
     request = _create_request(GATE_CONFIG)
@@ -53,37 +58,49 @@ def test_gate_keys_survive_the_persistence_dump():
         assert dumped[key] == want, f"gate key dropped on model_dump: {key}"
 
 
+@requires_sip_uri
 def test_config_without_gate_keys_still_validates():
     """Pre-existing tools (destination-only) keep working unchanged."""
-    request = _create_request({"destination": "+886223456789"})
+    request = _create_request({"destination": "tel:+886223456789"})
     dumped = request.definition.model_dump()["config"]
-    assert dumped["destination"] == "+886223456789"
+    assert dumped["destination"] == "tel:+886223456789"
     # unset gate keys dump as None, which every reader treats as unconfigured
     assert dumped["queueHealthUrl"] is None
     assert dumped["schedule"] is None
 
 
+@requires_sip_uri
 def test_alternate_destination_validated_like_destination():
     bad = dict(GATE_CONFIG, alternateDestination="not-a-destination")
-    with pytest.raises(ValidationError):
+    # ``match`` pins the *reason* (review M-7). Without the shared parser the
+    # write path refuses every destination, so a bare ``raises`` would pass
+    # while proving nothing about ``alternateDestination`` at all.
+    with pytest.raises(ValidationError, match="Invalid transfer destination"):
         _create_request(bad)
 
 
+@requires_sip_uri
 def test_alternate_destination_accepts_sip_and_none():
     assert (
         TransferCallConfig.model_validate(
-            {"destination": "+886223456789", "alternateDestination": "SIP/human@pbx"}
+            {
+                "destination": "tel:+886223456789",
+                "alternateDestination": "sip:human@pbx.example",
+            }
         ).alternateDestination
-        == "SIP/human@pbx"
+        == "sip:human@pbx.example"
     )
     assert (
         TransferCallConfig.model_validate(
-            {"destination": "+886223456789"}
+            {"destination": "tel:+886223456789"}
         ).alternateDestination
         is None
     )
 
 
+@requires_sip_uri
 def test_unavailable_announce_limit_must_be_positive():
-    with pytest.raises(ValidationError):
+    # Same reason-pinning as above: ``GATE_CONFIG`` carries a destination, so
+    # an unmounted parser fails this request before the limit is ever looked at.
+    with pytest.raises(ValidationError, match="unavailableAnnounceLimit"):
         _create_request(dict(GATE_CONFIG, unavailableAnnounceLimit=0))

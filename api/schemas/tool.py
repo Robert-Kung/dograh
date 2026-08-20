@@ -8,11 +8,11 @@ when the same schema is surfaced through MCP or SDK authoring flows.
 
 from __future__ import annotations
 
-import re
 from datetime import datetime
 from typing import Annotated, Any, Dict, List, Literal, Optional, Union
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic_core.core_schema import ValidationInfo
 
 from api.enums import ToolCategory
 
@@ -186,11 +186,11 @@ class TransferCallConfig(BaseModel):
 
     destination: str = Field(
         description=(
-            "Where to transfer the call. LiveKit REFER target — tel:+886912345678 "
-            "or sip:queue@pbx.example — or an ARI dialstring (+886912345678, "
-            "PJSIP/1234) for the Asterisk provider. A LiveKit workflow MUST use "
-            "the REFER form; the ARI shapes validate here but the LiveKit "
-            "executor will not dial them."
+            "Where to transfer the call. A LiveKit REFER target: "
+            "tel:+886912345678 or sip:queue@pbx.example. Asterisk dialstrings "
+            "(PJSIP/1234, SIP/1001) and bare E.164 are no longer accepted — the "
+            "LiveKit executor never dialled them, so accepting them here only "
+            "produced destinations that failed at REFER time."
         )
     )
     messageType: Literal["none", "custom", "audio"] = Field(
@@ -267,38 +267,69 @@ class TransferCallConfig(BaseModel):
 
     @field_validator("destination", "alternateDestination")
     @classmethod
-    def validate_destination(cls, v: Optional[str]) -> Optional[str]:
-        """Validate that destination is a REFER target or an ARI dialstring.
+    def validate_destination(
+        cls, v: Optional[str], info: ValidationInfo
+    ) -> Optional[str]:
+        """Validate that destination is a well-formed REFER target.
 
-        Two dialects, because two runtimes consume this one field. LiveKit's
-        REFER executor requires a URI (``tel:``/``sip:``, see
-        ``livekit_transfer_flow._DESTINATION_RE``); the ARI provider dials
-        Asterisk-shaped ``SIP/<target>``. This write path must accept the union
-        — while it accepted only the ARI dialect, every LiveKit destination was
-        a dud that passed validation and failed at REFER time, with press-0
-        silently not installing. ``test_schema_accepts_livekit_destinations``
-        pins the superset so the two regexes cannot drift apart again.
+        **The shape rule is not here.** It is
+        ``deploy/bin/sip_uri.parse_refer_uri`` in the platform repo, bind-mounted
+        into this container and shared with ``feature_scope_check`` (the
+        deployment-time gate) and ``capacity_gate._premium_rate`` (W2a D-A1).
+        Three hand-maintained copies pinned to each other by comments is what
+        let ``sip:a@b@evil.com`` through every one of them: the character class
+        allowed ``@``, so the host the SIP stack resolves (``evil.com``) was not
+        the host the author saw (issue #8).
+
+        **The ARI dialect retires here** (W2a D-A6). ``SIP/<target>``,
+        ``PJSIP/<target>`` and bare E.164 were accepted because the Asterisk
+        provider dials them; this deployment REFERs via LiveKit, and the union
+        meant the widest of the three rules governed the one field that every
+        press-0 and every AI-initiated transfer dials. Existing rows in the
+        database holding those shapes become read-modify-write-unsavable — that
+        is why W2a inventories them (D-A6) instead of discovering them as 422s.
+
+        **Lazy import, and rejection on a missing mount** (D-A5). This module is
+        core dograh schema: an import-time dependency would turn one absent
+        ``-v`` into "the API does not start", i.e. the platform stops answering
+        the phone. Function-local import degrades that to "this field fails
+        validation". Refusing the write is the safe direction — the opposite
+        choice, and the reason for it, is documented in
+        ``capacity_gate._premium_rate``.
         """
         if v is None or not v.strip():
+            # Blank means "unset" — legitimate for the optional after-hours
+            # alternate, never for the required target. A stored blank
+            # ``destination`` installs a press-0 gate that dials nothing, which
+            # is the W0 failure shape; reject it at the write instead.
+            if info.field_name == "destination":
+                raise ValueError(
+                    "Transfer destination must not be empty: a blank target "
+                    "installs a transfer that cannot dial."
+                )
             return v
 
-        # Same shape as the executor's _DESTINATION_RE, which in turn tracks the
-        # platform repo's canonical DESTINATION_RE. ASCII class and \Z, not \w
-        # and $ — see the executor for why each of those mattered.
-        livekit_pattern = r"^(tel:\+[1-9][0-9]{1,14}|sip:[A-Za-z0-9._@:-]+)\Z"
-        e164_pattern = r"^\+[1-9]\d{1,14}\Z"
-        ari_sip_pattern = r"^(PJSIP|SIP)/[\w\-\.@]+\Z"
+        from api.services.platform_scope import (
+            PlatformArtifactMissing,
+            log_artifact_missing,
+            parse_refer_uri,
+        )
 
-        if not (
-            re.match(livekit_pattern, v)
-            or re.match(e164_pattern, v)
-            or re.match(ari_sip_pattern, v, re.IGNORECASE)
-        ):
+        try:
+            parsed = parse_refer_uri(v)
+        except PlatformArtifactMissing as exc:
+            log_artifact_missing("TransferCallConfig.validate_destination", exc)
             raise ValueError(
-                "Destination must be a LiveKit REFER target "
-                "(e.g., tel:+886912345678 or sip:queue@pbx.example) or an ARI "
-                "dialstring (e.g., +886912345678 or PJSIP/1234)"
-            )
+                "Cannot validate the transfer destination: the shared REFER URI "
+                "parser is not available in this container. Refusing the write "
+                "rather than storing an unvalidated auto-dial target."
+            ) from None
+
+        if not parsed.ok:
+            # ``parsed.reason`` is a fixed message that contains no part of the
+            # input, by that module's contract — the value here may be a
+            # customer number or an internal PBX host.
+            raise ValueError(f"Invalid transfer destination: {parsed.reason}")
 
         # Toll-fraud guard, not an allowlist. capacity_gate already refuses to
         # boot on a premium-rate overflow/safetynet target because "a poisoned
