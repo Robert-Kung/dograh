@@ -71,8 +71,12 @@ def get_function_schema(
     )
 
 
-def _log_scope_denied_tool(category: str, name: str) -> None:
+def log_scope_denied_tool(category: str, name: str) -> None:
     """Enabled-set deny at call time. Same shape as ``log_denied_tool``.
+
+    Public because ``pipecat_engine._open_mcp_sessions`` is a third call-time
+    consumer of the enabled set (review B-3) and the deny line has to read
+    identically wherever it fires.
 
     A distinct ``call_event`` because the cause is different: the trust registry
     asks "does this family declare a spec?", the enabled set asks "is this
@@ -89,8 +93,14 @@ def _log_scope_denied_tool(category: str, name: str) -> None:
     )
 
 
-def _allowed_tool_categories_or_none() -> Optional[frozenset]:
+def allowed_tool_categories_or_none() -> Optional[frozenset]:
     """The enabled set, or ``None`` when the canon is unreadable (fail-closed).
+
+    Three call-time consumers share this: tool advertisement, handler
+    registration (both below), and MCP session opening in
+    ``pipecat_engine._open_mcp_sessions``. The third one runs *before* the
+    other two and is the only one that makes an outbound connection, so it
+    has to consult the same canon or the filter below is decorative for MCP.
 
     ``None`` means callers register **no governed tool at all** — the canon
     being absent is exactly the state in which we know least about what is safe
@@ -232,7 +242,7 @@ class CustomToolManager:
             # — before W2a its only enforcement point was the bootstrap
             # read-back, and W2c opening the gateway write plane removes the
             # "bootstrap is the only writer" argument that made that enough.
-            allowed_categories = _allowed_tool_categories_or_none()
+            allowed_categories = allowed_tool_categories_or_none()
 
             schemas: list[FunctionSchema] = []
             for tool in tools:
@@ -241,7 +251,7 @@ class CustomToolManager:
                     or tool.category not in allowed_categories
                 ):
                     if allowed_categories is not None:
-                        _log_scope_denied_tool(tool.category, tool.name)
+                        log_scope_denied_tool(tool.category, tool.name)
                     continue
 
                 family = _family_for_category(tool.category)
@@ -341,7 +351,7 @@ class CustomToolManager:
             # above. Both are needed: advertising without registering leaves the
             # LLM calling a function that does not exist, and registering
             # without advertising leaves a reachable handler off the schema.
-            allowed_categories = _allowed_tool_categories_or_none()
+            allowed_categories = allowed_tool_categories_or_none()
 
             for tool in tools:
                 if (
@@ -349,7 +359,7 @@ class CustomToolManager:
                     or tool.category not in allowed_categories
                 ):
                     if allowed_categories is not None:
-                        _log_scope_denied_tool(tool.category, tool.name)
+                        log_scope_denied_tool(tool.category, tool.name)
                     continue
 
                 family = _family_for_category(tool.category)

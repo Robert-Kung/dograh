@@ -139,7 +139,8 @@ def test_premium_guard_degrades_instead_of_raising_when_unmounted(monkeypatch):
 
     Raising here would take ``validate_capacity_config`` down at startup — a
     missing ``-v`` would stop the platform answering the phone at all. The
-    fallback is exactly the pre-W2a check: user part only, host unguarded.
+    fallback scans every ``@``-separated part instead (review M-4), so it is
+    strictly more blocking than the pre-W2a user-part-only check, never less.
     """
     from api.services.pipecat.capacity_gate import _premium_rate
 
@@ -147,8 +148,9 @@ def test_premium_guard_degrades_instead_of_raising_when_unmounted(monkeypatch):
     platform_scope.reset_cache()
 
     assert _premium_rate("sip:1900@pbx.example") is True
-    assert _premium_rate("sip:queue@886204.example") is False  # the lost coverage
+    assert _premium_rate("sip:queue@886204.example") is True  # was the lost coverage
     assert _premium_rate("tel:+886223456789") is False
+    assert _premium_rate("sip:queue@pbx.example") is False
 
 
 # ── 2/3. the call-time enabled-set filter ─────────────────────────────────
@@ -408,3 +410,144 @@ def test_transfer_handler_wiring_calls_the_revalidator():
 
     src = inspect.getsource(mod)
     assert "revalidate_transfer_config(config or {})" in src
+
+
+# ── 6. 通話期第三條 tool 路徑：MCP session（review B-3）────────────────────
+
+
+def _mcp_tool(name="crm", url="http://mcp.example/mcp"):
+    return _tool(
+        name,
+        ToolCategory.MCP.value,
+        {"schema_version": 1, "type": "mcp", "config": {"url": url}},
+    )
+
+
+async def _open_sessions(tools, monkeypatch, *, scope):
+    """Drive ``PipecatEngine._open_mcp_sessions`` unbound over a fake engine.
+
+    Returns the list of URLs a session was actually constructed for. The real
+    ``McpToolSession`` is swapped out because the point of the test is that
+    nothing reaches the network — leaving it in would make a regression here
+    an outbound connection from the test suite rather than a red assert.
+    """
+    from api.db import db_client
+    from api.services.workflow import pipecat_engine as engine_mod
+
+    monkeypatch.setenv("PLATFORM_FEATURE_SCOPE", str(scope))
+    platform_scope.reset_cache()
+
+    dialled: list[str] = []
+
+    class _FakeSession:
+        def __init__(self, **kwargs):
+            dialled.append(kwargs["url"])
+            self.available = True
+
+        async def start(self):
+            return None
+
+    monkeypatch.setattr(engine_mod, "McpToolSession", _FakeSession)
+    monkeypatch.setattr(db_client, "get_tools_by_uuids", AsyncMock(return_value=tools))
+
+    node = MagicMock()
+    node.tool_uuids = [t.tool_uuid for t in tools]
+    engine = MagicMock()
+    engine.workflow.nodes = {"1": node}
+    engine._get_organization_id = AsyncMock(return_value=42)
+    engine._mcp_sessions = {}
+
+    await engine_mod.PipecatEngine._open_mcp_sessions(engine)
+    return dialled, engine._mcp_sessions
+
+
+@pytest.mark.asyncio
+async def test_mcp_sessions_are_not_opened_for_a_category_off_the_canon(monkeypatch):
+    """B-3: the enabled set has to be consulted **before** the connection.
+
+    This path runs at call start, ahead of any advertisement or registration,
+    and it is the one that carries the credential to the URL out of the DB row.
+    A filter that only ran downstream would leave the connection already made.
+    """
+    dialled, sessions = await _open_sessions(
+        [_mcp_tool()], monkeypatch, scope=DELIVERED_SCOPE
+    )
+    assert dialled == [], "MCP is not in the delivered enabled set; nothing may dial"
+    assert sessions == {}
+
+
+@pytest.mark.asyncio
+async def test_mcp_sessions_still_open_when_the_canon_allows_mcp(monkeypatch):
+    """Negative control. Without this the test above passes on a broken path.
+
+    ``_open_mcp_sessions`` swallows every exception by design, so a filter that
+    accidentally rejected everything — or a fixture that never produced a
+    valid definition — would read identically to a working deny.
+    """
+    from api.tests.support.platform_artifacts import PERMISSIVE_SCOPE
+
+    dialled, sessions = await _open_sessions(
+        [_mcp_tool()], monkeypatch, scope=PERMISSIVE_SCOPE
+    )
+    assert dialled == ["http://mcp.example/mcp"]
+    assert len(sessions) == 1
+
+
+@pytest.mark.asyncio
+async def test_mcp_sessions_fail_closed_when_the_canon_is_unreadable(monkeypatch):
+    """Same direction as registration: canon absent ⇒ open nothing."""
+    dialled, sessions = await _open_sessions(
+        [_mcp_tool()], monkeypatch, scope=Path("/nonexistent/feature-scope.json")
+    )
+    assert dialled == []
+    assert sessions == {}
+
+
+# ── 7. 執行層是第四處形狀規則（review B-5）─────────────────────────────────
+
+
+def test_executor_rejects_a_second_at():
+    """B-5：R-E 正本原本宣稱「多個 `@` 三處皆拒」，而實際有**四處**。
+
+    第四處是執行層的 `_DESTINATION_RE`，它的字集含 `@`，於是
+    `sip:a@b@evil.com` 通過。W2a 收斂的三處都只看得到**工作流列裡**的目的地；
+    env 來源的兩個（`SAFETYNET_FALLBACK_QUEUE`／`CAPACITY_OVERFLOW_TRANSFER_TO`）
+    只經過這一處，所以那句話對 env 路徑不成立——而它正是下一步填 `allowed_hosts`
+    的放行依據。
+    """
+    from api.services.pipecat.livekit_transfer_flow import valid_destination
+
+    assert not valid_destination("sip:a@b@evil.com")
+    assert not valid_destination("sip:queue@pbx.example@evil.com")
+    assert not valid_destination("sip:pbx.example")  # user@host，不是裸 host
+    assert not valid_destination("sip:queue@")
+    # 交付態現值與一般形不得被這次收緊擋掉
+    assert valid_destination("sip:human-queue@127.0.0.1")
+    assert valid_destination("sip:queue@pbx.example:5070")
+    assert valid_destination("tel:+886223456789")
+
+
+def test_env_sourced_destinations_are_gated_by_the_executor(monkeypatch):
+    """兩個 env 出口的開機閘：形狀由執行層擋，高費率由 `_premium_rate` 擋。
+
+    這兩條是「env 目的地今天唯一的執行期閘」這句話的釘子。第二段同時涵蓋
+    M-4：`sip:queue@x@886204.example` 兩個缺陷曾經同時沒關——多個 `@` 過形狀閘，
+    而它落進的 legacy fallback 只看第一個 `@` 之前，於是高費率主機也沒擋到。
+    """
+    from api.services.pipecat.capacity_gate import (
+        _premium_rate,
+        validate_capacity_config,
+    )
+    from api.services.pipecat.livekit_safetynet import validate_safetynet_config
+
+    monkeypatch.setenv("SAFETYNET_FALLBACK_QUEUE", "sip:a@b@evil.com")
+    with pytest.raises(RuntimeError, match="not tel:"):
+        validate_safetynet_config()
+
+    monkeypatch.delenv("SAFETYNET_FALLBACK_QUEUE", raising=False)
+    monkeypatch.setenv("CAPACITY_OVERFLOW_TRANSFER_TO", "sip:queue@x@886204.example")
+    with pytest.raises(RuntimeError):
+        validate_capacity_config()
+    assert _premium_rate("sip:queue@x@886204.example") is True, (
+        "形狀閘與高費率閘要各自成立——只靠其中一條，另一條放寬時就無聲失守"
+    )

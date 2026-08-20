@@ -27,10 +27,11 @@ differs per call site. Each caller documents which one it picked:
   destination is not.
 - **Call-time registration** (``pipecat_engine_custom_tools``) fails *closed*:
   no governed tool is registered. The call itself continues.
-- **The premium-rate guard** (``capacity_gate._premium_rate``) falls back to
-  its pre-W2a string logic with a high-signal log. It is a *guard*, and the
-  fallback is exactly the status quo — strictly not worse than before, whereas
-  raising would take a boot-time config check down and with it the whole API.
+- **The premium-rate guard** (``capacity_gate._premium_rate``) falls back to a
+  parser-free scan of every ``@``-separated part, with a high-signal log. It is
+  a *guard*, so the fallback errs towards over-blocking and is strictly not
+  weaker than the pre-W2a check, whereas raising would take a boot-time config
+  check down and with it the whole API.
 
 The missing-mount case is caught two gates earlier in normal operation
 (``preflight.sh`` §7/§8b and ``dograh-bootstrap.py`` both fail closed on it).

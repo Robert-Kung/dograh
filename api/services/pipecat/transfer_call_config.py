@@ -174,6 +174,15 @@ async def find_transfer_call_config(workflow, organization_id: int) -> dict | No
     Scans every node's tools (a press-0 safety net is global, so the target is
     workflow-wide, not per-node) and returns the first ``transfer_call`` tool's
     ``config`` — **re-validated**, see :func:`revalidate_transfer_config`.
+
+    This is a ``get_tools_by_uuids`` path that deliberately does **not** consult
+    the enabled set, unlike the three in ``pipecat_engine``/
+    ``pipecat_engine_custom_tools`` (review B-3). Those three decide what the
+    LLM may call; this one feeds press-0 and capacity overflow, which are
+    platform safety nets the caller reaches without the LLM. Gating it on the
+    canon would mean an unreadable bind mount silently removes the route to a
+    human — fail-closed in the wrong direction for C4. What it does instead is
+    re-validate the value, which is the check that actually matters here.
     """
     tool_uuids: set[str] = set()
     for node in workflow.nodes.values():
