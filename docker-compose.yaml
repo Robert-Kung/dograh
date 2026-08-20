@@ -1,3 +1,11 @@
+# NOTE (customer-center-platform fork) —— 本檔**不是**本平台的部署入口。
+# 平台一律經 customer-center-platform 的 deploy/platform-up.sh 起，它會疊上
+# deploy/overrides/dograh.override.yml：host port 收攏、憑證覆寫，以及
+# api 容器對 /opt/platform/{sip_uri.py,feature-scope.json} 的兩個唯讀掛載與
+# PLATFORM_SIP_URI／PLATFORM_FEATURE_SCOPE 兩個環境變數。
+# 直接在本目錄 `docker compose up` 會繞過以上全部（該平台的 RUNBOOK 明禁）。
+# 後果之一：api/services/platform_scope.py 讀不到正本 → 不註冊任何受管轄工具、
+# 且拒絕所有 transfer 工具寫入（fail-closed 是刻意的，理由見該檔 docstring）。
 # Dograh deployment stack — driven by the helper scripts, not by a bare
 # `docker compose up`.
 #

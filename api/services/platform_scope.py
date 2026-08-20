@@ -37,6 +37,22 @@ The missing-mount case is caught two gates earlier in normal operation
 (``preflight.sh`` §7/§8b and ``dograh-bootstrap.py`` both fail closed on it).
 What is left for these paths is "container already up, compose hand-edited" —
 residual R-O.
+
+**Running this repo's bare ``docker-compose.yaml`` is a different thing, and it
+is already forbidden.** That file mounts neither artifact and sets neither env
+var, so a stack brought up that way registers no governed tool and refuses
+every transfer-tool write. Codex review (2026-08-20) flagged this as a gap and
+asked for a local fallback for standalone installs; **declined, deliberately.**
+The platform stack is brought up by ``deploy/platform-up.sh``, which layers
+``deploy/overrides/dograh.override.yml`` (the mounts and both env vars live
+there) — and the RUNBOOK already bans bare ``docker compose up`` in this
+directory because it bypasses *every* hardening in that override, not just
+these two files. A fallback would have to fire on "neither env var nor default
+path", which is indistinguishable from the R-O state this module exists to fail
+closed on; buying convenience for a banned path by weakening the one that ships
+is the wrong trade. Contributors doing local dev per ``AGENTS.md`` hit the
+``scope.canon_unavailable`` log line, which names the path and the missing
+``-v``. Registered as residual R-T in the platform repo.
 """
 
 from __future__ import annotations

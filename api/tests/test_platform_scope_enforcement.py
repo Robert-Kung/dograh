@@ -551,3 +551,142 @@ def test_env_sourced_destinations_are_gated_by_the_executor(monkeypatch):
     assert _premium_rate("sip:queue@x@886204.example") is True, (
         "形狀閘與高費率閘要各自成立——只靠其中一條，另一條放寬時就無聲失守"
     )
+
+
+# ── 8. Codex review（2026-08-20，PR #15 merge 後）─────────────────────────
+
+
+@requires_sip_uri
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "bad_url",
+    ["http://[bad]/health", "http://[::1/health", "http://[bad]:8080/health"],
+)
+async def test_unparseable_health_url_drops_only_the_probe_keys(monkeypatch, bad_url):
+    """`urlsplit` 自己會對某些輸入拋 ValueError，而拋出去就不是「只掉兩把鑰匙」。
+
+    逃出 `revalidate_transfer_config` 之後：語音 handler 變成泛用
+    `execution_error`，容量閘的 `except` 則降級成**空 config**——排程閘與隊列
+    健康閘一起靜默關掉。那正是 B-1／M-5 關掉的失效形狀換一扇門進來。
+    """
+    config = await _resolve(
+        {
+            "destination": "tel:+886223456789",
+            "queueHealthUrl": bad_url,
+            "queueHealthToken": "t",
+        },
+        monkeypatch,
+    )
+    assert config is not None, "整條 config 不得因為一個壞健康 URL 而消失"
+    assert config["destination"] == "tel:+886223456789", "轉接目標必須活著"
+    assert "queueHealthUrl" not in config
+    assert "queueHealthToken" not in config
+
+
+def test_health_url_problem_never_raises():
+    """上一條的單元層：這個函式對任何字串都只回字串或 None。"""
+    from api.services.pipecat.transfer_call_config import _health_url_problem
+
+    for value in (
+        "http://[bad]/health",
+        "http://[::1/health",
+        "://",
+        "http://",
+        "%%",
+        "http://a b/c",
+        "",
+        "http://queue:8080/health",
+    ):
+        result = _health_url_problem(value)
+        assert result is None or isinstance(result, str), (value, result)
+
+
+def test_unparseable_health_url_reason_does_not_quote_the_input():
+    """理由字串會進通話 log，而 urlsplit 自己的訊息會把原值引出來。"""
+    from api.services.pipecat.transfer_call_config import _health_url_problem
+
+    problem = _health_url_problem("http://[secret-internal-host]/health")
+    assert problem and "secret-internal-host" not in problem
+
+
+@pytest.mark.asyncio
+async def test_empty_function_list_clears_the_previous_node_s_tools():
+    """終端節點的工具被全數拒絕時，不得沿用上一個節點的 ToolsSchema。
+
+    `set_tools` 原本被 `if functions:` 包著。潛伏在上游（需要一個完全沒有工具
+    的節點），而啟用集合過濾讓它多一條路徑：宣告的工具全被拒 → 同樣是空清單。
+    """
+    from unittest.mock import AsyncMock as _AsyncMock
+
+    from pipecat.processors.aggregators.llm_context import NOT_GIVEN
+
+    from api.services.workflow.pipecat_engine import PipecatEngine
+
+    engine = MagicMock()
+    engine.trust_enforced = False
+    engine.llm._update_settings = _AsyncMock()
+    engine.llm._context = object()  # 讓 Gemini 分支不動 context
+
+    await PipecatEngine._update_llm_context(engine, "prompt", [])
+    engine.context.set_tools.assert_called_once_with(NOT_GIVEN)
+
+
+@pytest.mark.asyncio
+async def test_non_empty_function_list_still_sets_the_schema():
+    """負面對照：上一條要是把 set_tools 整個關掉也會綠。"""
+    from unittest.mock import AsyncMock as _AsyncMock
+
+    from api.services.workflow.pipecat_engine import PipecatEngine
+
+    engine = MagicMock()
+    engine.trust_enforced = False
+    engine.llm._update_settings = _AsyncMock()
+    engine.llm._context = object()
+
+    # 真的 FunctionSchema，不是 MagicMock——ToolsSchema 會驗型別，mock 會被當成
+    # direct function 而在建構時就炸掉（也就是這條對照組原本根本沒跑到斷言）。
+    from pipecat.adapters.schemas.function_schema import FunctionSchema
+
+    schema = FunctionSchema(
+        name="end_call", description="掛斷", properties={}, required=[]
+    )
+    await PipecatEngine._update_llm_context(engine, "prompt", [schema])
+    args, _ = engine.context.set_tools.call_args
+    assert args[0].standard_tools == [schema]
+
+
+@pytest.mark.asyncio
+async def test_a_node_with_out_edges_never_composes_to_empty():
+    """釘住觸發條件比 Codex 敘述的窄：轉場 schema 會把清單撐起來。
+
+    `compose_functions_for_node` 對每條 out edge 各加一個 schema，所以「工具全
+    被拒」單獨不足以清空——還要沒有 KB 文件、且**沒有出邊**（終端節點）。
+    把這件事寫成測試而不是註解，因為上面那條修正的價值完全取決於它。
+    """
+    monkeypatch_scope = DELIVERED_SCOPE
+    os.environ["PLATFORM_FEATURE_SCOPE"] = str(monkeypatch_scope)
+    platform_scope.reset_cache()
+    try:
+        from api.services.workflow.pipecat_engine_context_composer import (
+            compose_functions_for_node,
+        )
+
+        edge = MagicMock()
+        edge.get_function_name.return_value = "go_to_next"
+        edge.condition = "客戶說完問題"
+        node = MagicMock()
+        node.document_uuids = []
+        node.tool_uuids = ["uuid-calc"]
+        node.out_edges = [edge]
+        node.mcp_tool_filters = None
+
+        manager = MagicMock()
+        manager.get_tool_schemas = AsyncMock(return_value=[])  # 工具全被拒
+
+        functions = await compose_functions_for_node(
+            node=node, custom_tool_manager=manager
+        )
+        assert len(functions) == 1, "有出邊就不會是空清單——觸發條件限終端節點"
+    finally:
+        os.environ.pop("PLATFORM_FEATURE_SCOPE", None)
+        platform_scope.reset_cache()

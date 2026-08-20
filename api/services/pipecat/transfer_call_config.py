@@ -25,15 +25,32 @@ _HEALTH_URL_SCHEMES = ("http", "https")
 
 
 def _health_url_problem(value: str) -> str | None:
-    """Minimal call-time shape check for ``queueHealthUrl``. None == usable."""
+    """Minimal call-time shape check for ``queueHealthUrl``. None == usable.
+
+    **Never raises.** ``urlsplit`` itself throws ``ValueError`` on some inputs
+    (``http://[bad]/health`` — "does not appear to be an IPv4 or IPv6 address"),
+    and a raise here does not degrade the way the caller's per-field design
+    intends: it escapes ``revalidate_transfer_config`` entirely, so instead of
+    "drop the two health keys" the voice handler reports a generic
+    ``execution_error`` and the capacity gate's ``except`` around the lookup
+    degrades to an **empty config** — schedule gate and queue-health gate both
+    silently off. That is the same failure shape review B-1/M-5 closed, arriving
+    through a different door (Codex review, 2026-08-20).
+    """
     if any(ch.isspace() for ch in value):
         return "contains whitespace"
-    parts = urlsplit(value)
-    if parts.scheme not in _HEALTH_URL_SCHEMES:
+    try:
+        parts = urlsplit(value)
+        scheme, netloc, hostname = parts.scheme, parts.netloc, parts.hostname
+    except ValueError:
+        # Deliberately no detail and no value: this string reaches a call log,
+        # and the parser's own message quotes the input.
+        return "is not parseable as a URL"
+    if scheme not in _HEALTH_URL_SCHEMES:
         return "scheme is not http/https"
-    if "@" in parts.netloc:
+    if "@" in netloc:
         return "carries userinfo"
-    if not parts.hostname:
+    if not hostname:
         return "has no host"
     return None
 

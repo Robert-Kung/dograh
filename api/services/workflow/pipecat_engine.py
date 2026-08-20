@@ -11,7 +11,7 @@ from pipecat.frames.frames import (
     TTSSpeakFrame,
 )
 from pipecat.pipeline.worker import PipelineWorker
-from pipecat.processors.aggregators.llm_context import LLMContext
+from pipecat.processors.aggregators.llm_context import NOT_GIVEN, LLMContext
 from pipecat.services.llm_service import FunctionCallParams
 from pipecat.services.settings import LLMSettings
 from pipecat.utils.enums import EndTaskReason
@@ -251,13 +251,33 @@ class PipecatEngine:
             raise
 
     async def _update_llm_context(self, system_prompt: str, functions: list[dict]):
-        """Update LLM settings with the composed system prompt and tool list."""
+        """Update LLM settings with the composed system prompt and tool list.
+
+        An **empty** ``functions`` clears the context's tools rather than
+        leaving the previous node's schema in place (Codex review, 2026-08-20).
+        ``set_tools`` was previously guarded by ``if functions:``, so a node
+        that advertises nothing inherited whatever the last node advertised.
+
+        That was latent upstream — it needed a node with no tools at all — and
+        the enabled-set filter (W2a) makes it reachable a second way: a node
+        whose declared tools are *all* denied now composes to the same empty
+        list. Note the trigger is narrower than "any node under the delivered
+        canon": ``compose_functions_for_node`` also appends one schema per
+        outgoing edge, so the list is only empty on a **terminal** node (no
+        out-edges, no knowledge base) whose tools were all denied. Narrow, but
+        the leak is in the wrong direction — the caller keeps being offered the
+        previous node's ``transfer_call`` on a node that granted no tools.
+        """
 
         if functions:
             if self.trust_enforced:
                 self._assert_no_dormant_registration_paths(functions)
             tools_schema = ToolsSchema(standard_tools=functions)
             self.context.set_tools(tools_schema)
+        else:
+            # NOT_GIVEN is pipecat's "no tools" sentinel — distinct from an
+            # empty ToolsSchema, which some providers reject outright.
+            self.context.set_tools(NOT_GIVEN)
 
         # For Gemini Live, set context on the LLM before _update_settings so that
         # _connect (triggered by reconnect) can read tools from it.
