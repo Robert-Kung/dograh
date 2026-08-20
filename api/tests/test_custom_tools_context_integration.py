@@ -32,6 +32,10 @@ def _update_llm_context(context, system_message, functions):
 
     context.set_messages(messages)
 
+    # 這份是 `_update_llm_context` 的手抄複本，**不是**被測的那支。它刻意只保留
+    # 訊息組裝那半：工具面的分支條件在 2026-08-20（review H-1）從 `if functions:`
+    # 改成三態，複本追不上就會變成「斷言被移除的行為、而且永遠綠」。本檔測的是
+    # 訊息組裝，工具面的釘子在 test_platform_scope_enforcement.py。
     if functions:
         context.set_tools(tools_schema)
 

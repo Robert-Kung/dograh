@@ -551,3 +551,239 @@ def test_env_sourced_destinations_are_gated_by_the_executor(monkeypatch):
     assert _premium_rate("sip:queue@x@886204.example") is True, (
         "形狀閘與高費率閘要各自成立——只靠其中一條，另一條放寬時就無聲失守"
     )
+
+
+# ── 8. Codex review（2026-08-20，PR #15 merge 後）─────────────────────────
+
+
+@requires_sip_uri
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "bad_url",
+    ["http://[bad]/health", "http://[::1/health", "http://[bad]:8080/health"],
+)
+async def test_unparseable_health_url_drops_only_the_probe_keys(monkeypatch, bad_url):
+    """`urlsplit` 自己會對某些輸入拋 ValueError，而拋出去就不是「只掉兩把鑰匙」。
+
+    逃出 `revalidate_transfer_config` 之後：語音 handler 變成泛用
+    `execution_error`，容量閘的 `except` 則降級成**空 config**——排程閘與隊列
+    健康閘一起靜默關掉。那正是 B-1／M-5 關掉的失效形狀換一扇門進來。
+    """
+    config = await _resolve(
+        {
+            "destination": "tel:+886223456789",
+            "queueHealthUrl": bad_url,
+            "queueHealthToken": "t",
+        },
+        monkeypatch,
+    )
+    assert config is not None, "整條 config 不得因為一個壞健康 URL 而消失"
+    assert config["destination"] == "tel:+886223456789", "轉接目標必須活著"
+    assert "queueHealthUrl" not in config
+    assert "queueHealthToken" not in config
+
+
+def test_health_url_problem_never_raises():
+    """上一條的單元層：這個函式對任何字串都只回字串或 None。"""
+    from api.services.pipecat.transfer_call_config import _health_url_problem
+
+    for value in (
+        "http://[bad]/health",
+        "http://[::1/health",
+        "://",
+        "http://",
+        "%%",
+        "http://a b/c",
+        "",
+        "http://queue:8080/health",
+    ):
+        result = _health_url_problem(value)
+        assert result is None or isinstance(result, str), (value, result)
+
+
+def test_unparseable_health_url_reason_does_not_quote_the_input():
+    """理由字串會進通話 log，而 urlsplit 自己的訊息會把原值引出來。"""
+    from api.services.pipecat.transfer_call_config import _health_url_problem
+
+    problem = _health_url_problem("http://[secret-internal-host]/health")
+    assert problem and "secret-internal-host" not in problem
+
+
+@pytest.mark.asyncio
+async def test_only_a_denied_node_clears_the_schema_not_an_end_node():
+    """**H-1 的釘子**：三態各釘一格，而中間那格是這次差點出事的地方。
+
+    第一版的修正把「空清單」一律當成「工具被拒」，並在 docstring 宣稱那只會發生在
+    「工具全被拒的終端節點」。實際上 `EndCallNodeData` **連 `tool_uuids` 欄位都沒有**，
+    `Node.__init__` 的 `getattr` 因此回 `None`——於是**每個工作流的每個 end node**
+    都走那條分支，也就是每一通電話的正常結束路徑。
+
+    那條路徑上 context 還留著轉場函式的 `tool_use`／`tool_result`，而清掉 tools 之後
+    仍會發一次 completion。Bedrock 對這個形狀有明文守衛（`has_tool_content and not
+    tools` → 塞一個 no-op tool），Anthropic 直接拒。所以「end node 不清」不是潔癖，
+    是那條路徑不能碰。
+    """
+    from unittest.mock import AsyncMock as _AsyncMock
+
+    from pipecat.processors.aggregators.llm_context import NOT_GIVEN
+
+    from api.services.workflow.pipecat_engine import PipecatEngine
+
+    def _engine():
+        e = MagicMock()
+        e.trust_enforced = False
+        e.llm._update_settings = _AsyncMock()
+        e.llm._context = object()
+        return e
+
+    # ① 有工具 → 設 schema
+    from pipecat.adapters.schemas.function_schema import FunctionSchema
+
+    schema = FunctionSchema(
+        name="end_call", description="掛斷", properties={}, required=[]
+    )
+    e1 = _engine()
+    await PipecatEngine._update_llm_context(e1, "p", [schema], tools_were_denied=False)
+    assert e1.context.set_tools.call_args[0][0].standard_tools == [schema]
+
+    # ② 宣告了工具但全被拒 → 清掉（這是修正存在的理由）
+    e2 = _engine()
+    await PipecatEngine._update_llm_context(e2, "p", [], tools_were_denied=True)
+    e2.context.set_tools.assert_called_once_with(NOT_GIVEN)
+
+    # ③ 本來就沒宣告工具（end node）→ 完全不碰，維持上游行為
+    e3 = _engine()
+    await PipecatEngine._update_llm_context(e3, "p", [], tools_were_denied=False)
+    e3.context.set_tools.assert_not_called()
+
+
+def test_an_end_node_declares_no_tools_at_all():
+    """H-1 的事實基礎，直接對型別釘住而不是對行為推論。
+
+    `tools_were_denied = bool(node.tool_uuids) and not functions` 這條式子的正確性
+    完全建立在「end node 的 `tool_uuids` 是 falsy」上。用真的 `EndCallNodeData`
+    建一個 `Node` 來釘——上游哪天給 end node 加上 `tool_uuids`，這條會紅，而那時
+    `_update_llm_context` 的三態分類要重想。
+    """
+    from api.services.workflow.dto import EndCallNodeData
+    from api.services.workflow.workflow_graph import Node
+
+    node = Node(
+        id="end1", node_type="endCall", data=EndCallNodeData(name="bye", prompt="掰掰")
+    )
+    assert node.is_end is True
+    assert not node.tool_uuids, "end node 若開始宣告工具，H-1 的分類就不成立"
+    assert not getattr(node, "document_uuids", None)
+    assert node.out_edges == []
+
+
+@pytest.mark.asyncio
+async def test_an_end_node_composes_to_empty_and_a_node_with_out_edges_does_not():
+    """兩個方向都釘。第一版只釘了後者，所以 H-1 沒被抓到。
+
+    後者（有出邊 → 不可能為空）本來就成立，因為 `compose_functions_for_node` 對每條
+    out edge 各加一個轉場 schema。前者才是關鍵：終端節點真的會組出空清單，而它
+    **不需要任何工具被拒**就會發生。
+    """
+    from api.services.workflow.dto import EndCallNodeData
+    from api.services.workflow.pipecat_engine_context_composer import (
+        compose_functions_for_node,
+    )
+    from api.services.workflow.workflow_graph import Node
+
+    end_node = Node(
+        id="end1", node_type="endCall", data=EndCallNodeData(name="bye", prompt="掰掰")
+    )
+    assert (
+        await compose_functions_for_node(node=end_node, custom_tool_manager=None) == []
+    ), "end node 組出空清單——這正是不能一律清 schema 的原因"
+
+    edge = MagicMock()
+    edge.get_function_name.return_value = "go_to_next"
+    edge.condition = "客戶說完問題"
+    node = MagicMock()
+    node.document_uuids = []
+    node.tool_uuids = ["uuid-calc"]
+    node.out_edges = [edge]
+    node.mcp_tool_filters = None
+    manager = MagicMock()
+    manager.get_tool_schemas = AsyncMock(return_value=[])  # 工具全被拒
+
+    functions = await compose_functions_for_node(node=node, custom_tool_manager=manager)
+    assert len(functions) == 1, "有出邊就不會是空清單——所以清 schema 只發生在終端節點"
+
+
+# ── 9. LOW 批次（2026-08-20）────────────────────────────────────────────────
+
+
+def test_scope_deny_log_cannot_be_forged_with_a_newline():
+    """L-1：工具名在 W2c 開寫入面後是受攻擊者影響的，而 R-P 的緩解就是 grep 這行。
+
+    換行不加引號就能偽造第二行 `scope.tool_denied`，把一支被擋的工具混成兩支、
+    或反過來讓真正被擋的那支看起來像雜訊。
+    """
+    from api.services.workflow.pipecat_engine_custom_tools import (
+        log_scope_denied_tool,
+    )
+
+    messages: list[str] = []
+
+    class _Sink:
+        def bind(self, **_kw):
+            return self
+
+        def warning(self, message):
+            messages.append(message)
+
+    import api.services.workflow.pipecat_engine_custom_tools as mod
+
+    original = mod.logger
+    mod.logger = _Sink()
+    try:
+        log_scope_denied_tool(
+            "calculator", "innocent\nscope.tool_denied category=end_call tool=fake"
+        )
+    finally:
+        mod.logger = original
+
+    assert len(messages) == 1
+    assert "\n" not in messages[0], "工具名的換行必須被引號逃逸掉，否則可偽造日誌行"
+
+
+@requires_sip_uri
+def test_premium_rate_rejection_adds_no_second_copy_of_the_destination():
+    """R-6，**但只能修到一半，而另一半修不掉**。
+
+    finding 說的是：同一個函式上方十行才立下「理由不含原值」的紀律，這裡卻把
+    原值印回去。訊息已經改掉了——但 `str(ValidationError)` 仍含該值，因為
+    **pydantic 自己會附上 `input_value=...`**，那不在我們的控制範圍內。
+
+    所以這條釘的是能釘的：驗證器自己的訊息不再貢獻**第二份**。順帶記錄那條紀律
+    在寫入層本來就比在解析器弱——這裡的值是寫的人剛送進來的，422 也是回給他，
+    不構成揭露；`parse_refer_uri` 的 reason 不同，它會進部署 log 而值可能是
+    `${ENV:…}` 代換後的真值。詳見 low-findings-register.md。
+    """
+    from pydantic import ValidationError
+
+    from api.schemas.tool import TransferCallConfig
+
+    secret = "sip:1900555@internal-pbx.corp.example"
+    with pytest.raises(ValidationError) as excinfo:
+        TransferCallConfig(destination=secret)
+    message = str(excinfo.value)
+    assert "premium-rate" in message, "拒絕理由本身要留著"
+    assert message.count(secret) <= 1, (
+        "驗證器的訊息不得再貢獻一份原值——僅剩的那一份是 pydantic 的 input_value="
+    )
+    assert "Destination 'sip:" not in message, "舊的回顯格式不得復活"
+
+
+def test_no_second_enabled_set_predicate_survives():
+    """L-7／R-5：`tool_category_allowed` 是死碼，而它剛好是 B-3 缺的那個判定。
+
+    兩份判定並存正是本 change 要消滅的形狀——留著它，下次有人改其中一份就漂移。
+    """
+    assert not hasattr(platform_scope, "tool_category_allowed"), (
+        "死碼已於 2026-08-20 移除；要復活它就要讓三個呼叫點都改用它，"
+        "不能與 `category not in allowed_categories` 並存"
+    )

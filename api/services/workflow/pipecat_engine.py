@@ -11,7 +11,7 @@ from pipecat.frames.frames import (
     TTSSpeakFrame,
 )
 from pipecat.pipeline.worker import PipelineWorker
-from pipecat.processors.aggregators.llm_context import LLMContext
+from pipecat.processors.aggregators.llm_context import NOT_GIVEN, LLMContext
 from pipecat.services.llm_service import FunctionCallParams
 from pipecat.services.settings import LLMSettings
 from pipecat.utils.enums import EndTaskReason
@@ -250,14 +250,74 @@ class PipecatEngine:
             logger.error(f"Error initializing {self.__class__.__name__}: {e}")
             raise
 
-    async def _update_llm_context(self, system_prompt: str, functions: list[dict]):
-        """Update LLM settings with the composed system prompt and tool list."""
+    async def _update_llm_context(
+        self,
+        system_prompt: str,
+        functions: list[dict],
+        *,
+        tools_were_denied: bool = False,
+    ):
+        """Update LLM settings with the composed system prompt and tool list.
+
+        ``set_tools`` is guarded, and **the guard is deliberately not just
+        ``if functions:``**. Three states have to stay distinct:
+
+        1. **Non-empty list** — set the schema. Ordinary case.
+        2. **Empty because this node declared tools and every one was denied**
+           (``tools_were_denied``) — clear the schema. Without this the caller
+           keeps being offered the previous node's ``transfer_call`` on a node
+           that granted no tools. This is the leak W2a's enabled-set filter
+           creates and the reason this branch exists.
+        3. **Empty because the node never asked for tools** — leave the schema
+           alone, i.e. upstream behaviour.
+
+        State 3 is not a corner case, which is what the first version of this
+        fix got wrong (review H-1, 2026-08-20). Its docstring claimed the empty
+        list only arose on "a terminal node whose tools were all denied"; in
+        fact ``EndCallNodeData`` declares neither ``tool_uuids`` nor
+        ``document_uuids``, so ``Node.__init__``'s ``getattr`` yields ``None``
+        and **every end node in every workflow** composes to ``[]``. Clearing
+        there put the universal end-of-call path into a shape providers do not
+        uniformly accept: entry to an end node happens *from* a transition
+        function call, so the context still holds a ``tool_use``/``tool_result``
+        pair, and a completion is issued. Bedrock guards exactly this shape
+        (``pipecat/services/aws/llm.py``: ``if has_tool_content and not tools``
+        → inject a no-op tool, "AWS Bedrock doesn't allow empty tool
+        configurations after tools were used"); Anthropic rejects it outright.
+        Scoping the clear to state 2 keeps that path byte-identical to upstream.
+
+        The trust assertion is hoisted out of the branch (review M-4): its
+        catch-all check (``None in llm._functions``) does not depend on
+        ``functions``, and leaving it inside meant the one S-L8-TRUST guard
+        that needs no schema never ran on the most common transition there is.
+
+        **This closes the advertisement leak, not the execution one.** Clearing
+        the schema does not unregister anything: ``llm.register_function``
+        accumulates into ``llm._functions``, there is no unregister anywhere
+        under ``api/services/workflow`` or ``api/services/pipecat``, and pipecat
+        dispatches off ``_functions`` without cross-checking ``context.tools``.
+        A ``transfer_call`` handler registered at node A stays callable at node
+        B. State 2 above stops the model from being *told* about it; a model
+        that emits the name anyway — hallucination, cached tool list, a realtime
+        session that already negotiated it — still reaches the handler. Strictly
+        narrower than before this change (which leaked both halves) but not
+        closed. Registered as residual R-AB; the fix is per-node unregistration
+        or an enabled-set re-check at dispatch, and both are wider than this
+        change. Note ``pipecat_engine_custom_tools`` already names this exact
+        shape: "registering without advertising leaves a reachable handler off
+        the schema".
+        """
+
+        if self.trust_enforced:
+            self._assert_no_dormant_registration_paths(functions)
 
         if functions:
-            if self.trust_enforced:
-                self._assert_no_dormant_registration_paths(functions)
             tools_schema = ToolsSchema(standard_tools=functions)
             self.context.set_tools(tools_schema)
+        elif tools_were_denied:
+            # NOT_GIVEN is pipecat's "no tools" sentinel — distinct from an
+            # empty ToolsSchema, which some providers reject outright.
+            self.context.set_tools(NOT_GIVEN)
 
         # For Gemini Live, set context on the LLM before _update_settings so that
         # _connect (triggered by reconnect) can read tools from it.
@@ -630,7 +690,14 @@ class PipecatEngine:
             node=node,
             custom_tool_manager=self._custom_tool_manager,
         )
-        await self._update_llm_context(system_prompt, functions)
+        # "This node asked for tools and ended up with none" — the only state in
+        # which the previous node's schema must be cleared. See the docstring on
+        # ``_update_llm_context``; an end node declares no tools at all and must
+        # keep upstream behaviour.
+        tools_were_denied = bool(node.tool_uuids) and not functions
+        await self._update_llm_context(
+            system_prompt, functions, tools_were_denied=tools_were_denied
+        )
 
     async def set_node(self, node_id: str, emit_transition_event: bool = True):
         """

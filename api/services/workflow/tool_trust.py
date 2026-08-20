@@ -169,9 +169,19 @@ def resolve_mcp_spec(raw_tool_name: Optional[str]) -> Optional[ToolTrustSpec]:
 
 
 def log_denied_tool(kind: str, name: str) -> None:
-    """Deny-by-default hit: loud structured log at registration/advertisement."""
+    """Deny-by-default hit: loud structured log at registration/advertisement.
+
+    ``!r`` on both, matching ``log_scope_denied_tool`` (review M-2). ``name``
+    reaches here from two attacker-influenceable sources — a stored tool name,
+    and ``fs.name`` off a **remote MCP server**, which needs no write-plane
+    access at all — and a newline in it forges a second, well-formed deny line.
+    Grepping these lines is the registered mitigation for residual R-P, so a
+    forgeable line is a defeated mitigation. Quoting only one of the two
+    emitters was the same "two copies drift" shape this change elsewhere argues
+    against.
+    """
     logger.bind(call_event="trust.tool_denied", tool_kind=kind, tool_name=name).warning(
-        f"trust.tool_denied kind={kind} tool={name}: no trust spec declared; "
+        f"trust.tool_denied kind={kind!r} tool={name!r}: no trust spec declared; "
         f"tool hidden from the LIVEKIT dialogue path (S-L8-TRUST deny-by-default)"
     )
 

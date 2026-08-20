@@ -344,8 +344,13 @@ class TransferCallConfig(BaseModel):
         )
 
         if _premium_rate(v):
+            # No value in the message (review R-6). Ten lines up this same
+            # function documents that ``parsed.reason`` deliberately contains
+            # no part of the input because the value may be a customer number
+            # or an internal PBX host — and then echoed it here. Pre-existing,
+            # but the inconsistency is inside one function.
             raise ValueError(
-                f"Destination {v!r} matches a premium-rate prefix "
+                f"Transfer destination matches a premium-rate prefix "
                 f"{PREMIUM_RATE_PREFIXES}; refusing to save a transfer target "
                 "that would auto-dial a premium number on every transfer"
             )
