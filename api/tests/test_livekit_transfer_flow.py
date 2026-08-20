@@ -17,6 +17,7 @@ from api.services.pipecat.livekit_transfer_flow import (
     plan_transfer,
     valid_destination,
 )
+from api.tests.support.platform_artifacts import requires_sip_uri
 
 TPE = ZoneInfo("Asia/Taipei")
 SCHED = {"tz": "Asia/Taipei", "mon": [["09:00", "18:00"]]}
@@ -95,6 +96,7 @@ LIVEKIT_DESTINATIONS = [
 ]
 
 
+@requires_sip_uri
 @pytest.mark.parametrize("destination", LIVEKIT_DESTINATIONS)
 def test_schema_accepts_livekit_destinations(destination):
     """Every canonically-shaped executor target is writable, for both fields.
@@ -112,6 +114,7 @@ def test_schema_accepts_livekit_destinations(destination):
     assert cfg.alternateDestination == destination
 
 
+@requires_sip_uri
 def test_schema_no_longer_accepts_ari_dialstrings():
     """The ARI dialect retires (W2a D-A6) — the union collapses to the REFER form.
 
@@ -127,23 +130,32 @@ def test_schema_no_longer_accepts_ari_dialstrings():
     from api.schemas.tool import TransferCallConfig
 
     for destination in ("+886223456789", "PJSIP/1234", "SIP/human-queue@10.0.0.1"):
-        with pytest.raises(ValidationError):
+        # ``match`` pins the *reason*, not just the refusal. With the parser
+        # unmounted the write path refuses everything ("not available in this
+        # container"), so a bare ``raises`` here reads green while testing
+        # nothing (review M-7). Shape rejections all carry this prefix.
+        with pytest.raises(ValidationError, match="Invalid transfer destination"):
             TransferCallConfig(destination=destination)
 
 
+@requires_sip_uri
 def test_schema_still_rejects_caller_shaped_destinations():
     from pydantic import ValidationError
 
     from api.schemas.tool import TransferCallConfig
 
     for destination in ("0912345678", "queue@pbx.example", "sip:", "tel:0912345678"):
-        with pytest.raises(ValidationError):
+        # ``match`` pins the *reason*: an unmounted parser refuses every write
+        # ("not available in this container"), so a bare ``raises`` reads green
+        # while testing nothing (review M-7).
+        with pytest.raises(ValidationError, match="Invalid transfer destination"):
             TransferCallConfig(destination=destination)
 
 
 # --- guards that travel with the widened dialect --------------------------
 
 
+@requires_sip_uri
 @pytest.mark.parametrize(
     "destination",
     [
@@ -155,18 +167,21 @@ def test_schema_still_rejects_caller_shaped_destinations():
 def test_both_layers_reject_homoglyph_hosts(destination):
     """``\\w`` was Unicode-aware, so these read as the real host and resolved elsewhere.
 
-    Pinned on both layers because the schema copies the executor's shape, and
-    both now track deploy/bin/feature_scope_check.py's canonical DESTINATION_RE.
+    Pinned on both layers: the executor's ASCII character class and the shared
+    parser (``deploy/bin/sip_uri.py``, which replaced the three hand-maintained
+    copies this test used to reference) have to agree that these are not hosts.
     """
     from pydantic import ValidationError
 
     from api.schemas.tool import TransferCallConfig
 
     assert not valid_destination(destination)
-    with pytest.raises(ValidationError):
+    # ``match`` pins the *reason* — see test_schema_no_longer_accepts_ari_dialstrings.
+    with pytest.raises(ValidationError, match="Invalid transfer destination"):
         TransferCallConfig(destination=destination)
 
 
+@requires_sip_uri
 @pytest.mark.parametrize(
     "destination", ["tel:+886912345678\n", "sip:queue@pbx.example\n"]
 )
@@ -183,10 +198,12 @@ def test_schema_rejects_trailing_newline(destination):
 
     from api.schemas.tool import TransferCallConfig
 
-    with pytest.raises(ValidationError):
+    # ``match`` pins the *reason* — see test_schema_no_longer_accepts_ari_dialstrings.
+    with pytest.raises(ValidationError, match="Invalid transfer destination"):
         TransferCallConfig(destination=destination)
 
 
+@requires_sip_uri
 @pytest.mark.parametrize(
     "destination",
     [
@@ -210,6 +227,7 @@ def test_schema_refuses_premium_rate_targets(destination):
         TransferCallConfig(destination=destination)
 
 
+@requires_sip_uri
 def test_premium_guard_uses_capacity_gate_as_the_single_source():
     """Same prefix list, not a second copy that can drift."""
     from pydantic import ValidationError
