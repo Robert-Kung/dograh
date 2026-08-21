@@ -552,7 +552,15 @@ class WorkflowClient(BaseDBClient):
         async with self.async_session() as session:
             query = (
                 select(WorkflowModel)
-                .options(selectinload(WorkflowModel.current_definition))
+                .options(
+                    selectinload(WorkflowModel.current_definition),
+                    # released_definition is eager-loaded to match get_workflow().
+                    # Without it, a name-only update (no versioned changes) skips
+                    # the re-fetch below and returns a detached instance whose
+                    # released_definition would lazy-load in the caller, raising
+                    # DetachedInstanceError. The route folds that into a 500.
+                    selectinload(WorkflowModel.released_definition),
+                )
                 .where(WorkflowModel.id == workflow_id)
             )
 
@@ -575,7 +583,13 @@ class WorkflowClient(BaseDBClient):
             except Exception as e:
                 await session.rollback()
                 raise e
-            await session.refresh(workflow)
+
+            # Re-execute the eager-loaded query instead of session.refresh():
+            # commit expires every attribute, and refresh() reloads column
+            # attributes only, so the relationships loaded above would come back
+            # unloaded and lazy-load in the caller once the session has closed.
+            result = await session.execute(query)
+            workflow = result.scalars().first()
 
         # Save versioned changes as a draft
         has_versioned_changes = any(

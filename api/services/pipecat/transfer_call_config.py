@@ -218,9 +218,25 @@ async def find_transfer_call_config(workflow, organization_id: int) -> dict | No
         return None
 
     tools = await db_client.get_tools_by_uuids(list(tool_uuids), organization_id)
-    for tool in tools:
-        if tool.category == ToolCategory.TRANSFER_CALL.value:
-            return revalidate_transfer_config(
-                (tool.definition or {}).get("config", {}) or {}
-            )
-    return None
+    transfer_tools = [
+        tool for tool in tools if tool.category == ToolCategory.TRANSFER_CALL.value
+    ]
+    if not transfer_tools:
+        return None
+
+    if len(transfer_tools) > 1:
+        # Deterministic by construction (get_tools_by_uuids orders by id), but the
+        # choice is still arbitrary: the workflow declares two transfer targets and
+        # only one of them is reachable. Not an error — raising here would remove
+        # the route to a human, which is the wrong direction for C4 — so pick and
+        # say so loudly enough to be found when the call went to the wrong queue.
+        logger.warning(
+            "workflow declares {} active transfer_call tools; using {} (tool_uuids={})",
+            len(transfer_tools),
+            transfer_tools[0].tool_uuid,
+            [tool.tool_uuid for tool in transfer_tools],
+        )
+
+    return revalidate_transfer_config(
+        (transfer_tools[0].definition or {}).get("config", {}) or {}
+    )

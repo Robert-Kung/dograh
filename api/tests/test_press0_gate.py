@@ -291,7 +291,7 @@ async def test_malformed_destination_records_outcome_not_just_an_event(observabi
     ai_completed at the end of the pipeline, so an entire misconfigured
     deployment reads back as clean AI completions (Codex review, PR #13).
     """
-    from api.services.pipecat.run_pipeline import resolve_press0_gate
+    from api.services.pipecat.press0_gate import resolve_press0_gate
 
     events, outcomes = observability
     engine, run = _run(destination="SIP/human-queue@10.0.0.1")
@@ -307,7 +307,7 @@ async def test_malformed_destination_records_outcome_not_just_an_event(observabi
 
 @pytest.mark.asyncio
 async def test_valid_destination_installs_the_gate_quietly(observability):
-    from api.services.pipecat.run_pipeline import resolve_press0_gate
+    from api.services.pipecat.press0_gate import resolve_press0_gate
 
     events, outcomes = observability
     engine, run = _run()
@@ -319,7 +319,7 @@ async def test_valid_destination_installs_the_gate_quietly(observability):
 @pytest.mark.asyncio
 async def test_no_transfer_tool_stays_silent(observability):
     """No transfer_call tool is a workflow choice, not a defect — nothing to alert."""
-    from api.services.pipecat.run_pipeline import resolve_press0_gate
+    from api.services.pipecat.press0_gate import resolve_press0_gate
 
     events, outcomes = observability
     engine, run = _run(destination=None)
@@ -330,7 +330,7 @@ async def test_no_transfer_tool_stays_silent(observability):
 
 @pytest.mark.asyncio
 async def test_non_livekit_mode_is_untouched(observability):
-    from api.services.pipecat.run_pipeline import resolve_press0_gate
+    from api.services.pipecat.press0_gate import resolve_press0_gate
 
     events, outcomes = observability
     from api.enums import WorkflowRunMode
