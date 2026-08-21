@@ -309,10 +309,17 @@ class ToolClient(BaseDBClient):
             return []
 
         async with self.async_session() as session:
-            query = select(ToolModel).where(
-                ToolModel.tool_uuid.in_(tool_uuids),
-                ToolModel.organization_id == organization_id,
-                ToolModel.status == ToolStatus.ACTIVE.value,
+            # Stable ordering: callers that pick "the first" match (e.g.
+            # transfer_call_config) would otherwise let the database's row order
+            # decide, which is unspecified without an ORDER BY.
+            query = (
+                select(ToolModel)
+                .where(
+                    ToolModel.tool_uuid.in_(tool_uuids),
+                    ToolModel.organization_id == organization_id,
+                    ToolModel.status == ToolStatus.ACTIVE.value,
+                )
+                .order_by(ToolModel.id)
             )
 
             result = await session.execute(query)

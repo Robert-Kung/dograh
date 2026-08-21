@@ -216,11 +216,39 @@ async def update_tool(
             status_code=400, detail="No organization selected for the user"
         )
 
-    if request.status:
+    # `is not None`, not truthiness: the value below is forwarded unconditionally
+    # and tool_client.update_tool persists anything that is not None, so an empty
+    # string would reach the column having skipped this validator.
+    if request.status is not None:
         validate_status(request.status)
 
     definition = None
     if request.definition:
+        # category is the dispatch key at call time (find_transfer_call_config
+        # filters on it), but UpdateToolRequest has no category field, so a PUT
+        # can only ever change definition.type. Left unchecked the two diverge:
+        # a transfer_call tool becomes {category: transfer_call, definition.type:
+        # http_api} and TransferCallConfig's validators — destination shape,
+        # premium-rate — stop running on a tool the runtime still dispatches as
+        # a transfer. CreateToolRequest enforces the same invariant with
+        # validate_category_matches_definition; this is the update-side half.
+        existing = await db_client.get_tool_by_uuid(
+            tool_uuid,
+            organization_id=user.selected_organization_id,
+            include_archived=True,
+        )
+        if existing is None:
+            raise HTTPException(status_code=404, detail="Tool not found")
+        if request.definition.type != existing.category:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"definition.type '{request.definition.type}' does not match "
+                    f"the tool's category '{existing.category}'. A tool's category "
+                    f"is immutable; create a new tool instead."
+                ),
+            )
+
         definition = request.definition.model_dump()
         try:
             await validate_tool_credential_references(
