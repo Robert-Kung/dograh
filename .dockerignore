@@ -1,6 +1,16 @@
 # All env files, not just api/.env: .env.test carries real (dev/test) DATABASE_URL,
 # REDIS_URL and DOGRAH_DEVOPS_SECRET values and was being baked into the image.
 api/.env*
+# W2d task 1.2d：**build context 根目錄**的 dograh/.env 也含實值
+# （OSS_JWT_SECRET／LIVEKIT_API_SECRET／DEEPGRAM_API_KEY）。今天沒被烤進去純粹
+# 因為 COPY 是逐路徑的——正是 scan-image-secrets.sh 自己註解寫的「巧合不是保證」。
+# W2d 新增第二個用同一 context 的 build，把這個巧合的維護面加倍。
+.env
+**/.env
+**/.env.*
+# 範本檔不含實值，且 1.2j 的權限檢查明文排除它們——保留。
+!**/.env.example
+!**/.env.test.example
 .git
 .github
 .claude

@@ -38,8 +38,12 @@ COPY ui/src ./src
 # Set build-time environment variables (needed for Next.js build)
 ENV NEXT_PUBLIC_NODE_ENV="oss"
 ENV NEXT_TELEMETRY_DISABLED="1"
-ENV NEXT_PUBLIC_CHATWOOT_URL="https://chat.dograh.com"
-ENV NEXT_PUBLIC_CHATWOOT_TOKEN="3fkFx2mCEjNHjM9gaNc4A82X"
+# W2d task 1.2h（U-19）：移除硬編的 Chatwoot URL 與 website token。
+# 上游把它們烤進 builder 階段，Next.js 再把 NEXT_PUBLIC_* **內聯進 client bundle**
+# ——自建之後這顆 token 就是我方烤進交付態、經閘門送給每個客戶主管瀏覽器的東西。
+# 該第三方整合不在 egress-allowlist.yml、不在任何殘留登記，今天擋住它的只有
+# 閘門的 CSP `script-src 'self'`。ChatwootWidget.tsx:43 在值為空時安全短路。
+# 需要時由部署層以 build arg／env 提供（鍵名須先進 preflight 的正面表列）。
 ENV BACKEND_URL="http://api:8000"
 
 # Build the application with standalone mode
