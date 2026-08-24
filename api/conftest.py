@@ -2,9 +2,17 @@
 Pytest configuration and fixtures for async database testing.
 
 This module sets up the test infrastructure using:
-- A separate test database (appends _test to the database name)
+- A separate test database, taken verbatim from DATABASE_URL (nothing is
+  appended -- see _assert_is_test_database below for the guard that keeps a
+  non-test database out)
 - Alembic migrations run once per test session
 - Transaction-based isolation for each test (savepoint pattern)
+
+Note that load_dotenv() below does NOT override an already-exported
+DATABASE_URL: CI supplies its own (different host, same db name) and must win
+over .env.test. That is also why the guard exists -- inside a running api
+container DATABASE_URL points at the dev database, and without the guard a
+test session would run alembic migrations against it.
 
 References:
 - https://www.core27.co/post/transactional-unit-tests-with-pytest-and-async-sqlalchemy
@@ -81,11 +89,31 @@ from sqlalchemy.orm import SessionTransaction
 from sqlalchemy.pool import NullPool
 
 
+def _assert_is_test_database(url: str) -> None:
+    """Refuse to run against a database whose name does not mark it as a test db.
+
+    .env.test is only honoured when DATABASE_URL is unset, so an exported
+    DATABASE_URL (an api container's, pointing at the dev database) silently
+    becomes the test target and the session-scoped fixture runs alembic against
+    it. Fail loudly instead.
+    """
+    db_name = urlparse(url).path.lstrip("/")
+    if "test" not in db_name.lower():
+        raise ValueError(
+            f"DATABASE_URL points at database {db_name!r}, which is not a test "
+            "database. api/.env.test is ignored whenever DATABASE_URL is "
+            "already exported, so running here would apply alembic migrations "
+            "to it. Unset DATABASE_URL to pick up api/.env.test, or export one "
+            "whose database name contains 'test'."
+        )
+
+
 def get_test_database_url() -> str:
     """Get the test database URL from the DATABASE_URL env var."""
     test_url = os.environ.get("DATABASE_URL")
     if not test_url:
         raise ValueError("DATABASE_URL environment variable is not set")
+    _assert_is_test_database(test_url)
     return test_url
 
 
