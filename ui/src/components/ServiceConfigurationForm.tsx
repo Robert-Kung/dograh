@@ -17,6 +17,8 @@ import { Textarea } from "@/components/ui/textarea";
 import { VoiceSelector } from "@/components/VoiceSelector";
 import { LANGUAGE_DISPLAY_NAMES } from "@/constants/languages";
 import { useUserConfig } from "@/context/UserConfigContext";
+// customer-center-platform fork（母 repo W2d task 3.3／3.5）
+import { ccpDisabledProps } from "@/lib/ccp/notice-bar";
 import type { ModelOverrides } from "@/types/workflow-configurations";
 
 export type ServiceSegment = "llm" | "tts" | "stt" | "embeddings" | "realtime";
@@ -108,6 +110,12 @@ export interface ServiceConfigurationFormProps {
      * Leave undefined to keep the user-controllable toggle (legacy + overrides).
      */
     forceRealtime?: boolean;
+    /**
+     * customer-center-platform fork（母 repo W2d task 3.3／3.5）：停用存檔。
+     * **由呼叫端決定**——同一個元件在 Models 頁是「兩角色皆 deny」、
+     * 在工作流設定頁是「主管 deny／實施方 allow」，元件內硬編任一邊都會錯一半。
+     */
+    ccpDisabled?: boolean;
 }
 
 function getProviderDisplayName(
@@ -151,6 +159,7 @@ export function ServiceConfigurationForm({
     configurationDefaults,
     initialConfig,
     forceRealtime,
+    ccpDisabled = false,
 }: ServiceConfigurationFormProps) {
     const [apiError, setApiError] = useState<string | null>(null);
     const [isSaving, setIsSaving] = useState(false);
@@ -927,7 +936,12 @@ export function ServiceConfigurationForm({
 
             {apiError && <p className="text-red-500 mt-4">{apiError}</p>}
 
-            <Button type="submit" className="w-full mt-6" disabled={isSaving}>
+            <Button
+                type="submit"
+                className="w-full mt-6"
+                disabled={isSaving}
+                {...ccpDisabledProps(ccpDisabled)}
+            >
                 {isSaving ? "Saving..." : (submitLabel || "Save Configuration")}
             </Button>
         </form>

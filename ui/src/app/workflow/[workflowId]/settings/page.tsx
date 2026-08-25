@@ -42,6 +42,16 @@ import { UnsavedChangesProvider, useUnsavedChanges, useUnsavedChangesContext } f
 import { useAudioPlayback } from "@/hooks/useAudioPlayback";
 import { detailFromError } from "@/lib/apiError";
 import { useAuth } from "@/lib/auth";
+// customer-center-platform fork（母 repo W2d task 3.5）：這一頁**橫跨兩桶**。
+// (a) 兩角色皆 deny：環境音上傳（`POST /workflow/ambient-noise/upload-url`）、
+//     嵌入小工具（`embed-token` POST／DELETE）。
+// (b) 主管 deny／實施方 allow：四個寫入入口——三處 `saveWorkflowConfigurations`
+//     與模型覆寫的 `saveV2Override`／`removeV2Override`，全部走
+//     `PUT /workflow/{id}`（`roles: [implementer]`）。
+// **這頁不在 `WorkflowProvider` 之內**（唯一掛載點是 `RenderWorkflow`），
+// 所以 2.2 的 context 機制對它零作用，只有 app 層的 `useCcpReadOnly()` 到得了。
+import { useCcpReadOnly } from "@/lib/ccp/access";
+import { ccpDisabledProps, useCcpPageNotice } from "@/lib/ccp/notice-bar";
 import logger from "@/lib/logger";
 import {
     type AmbientNoiseConfiguration,
@@ -273,6 +283,7 @@ function GeneralSection({
     workflowId: number;
     onSave: (configurations: WorkflowConfigurations, workflowName: string) => Promise<void>;
 }) {
+    const ccpReadOnly = useCcpReadOnly();
     const [name, setName] = useState(workflowName);
     const [ambientNoiseConfig, setAmbientNoiseConfig] = useState<AmbientNoiseConfiguration>(
         workflowConfigurations.ambient_noise_configuration || DEFAULT_AMBIENT_NOISE_CONFIG,
@@ -512,6 +523,8 @@ function GeneralSection({
                                             className="text-sm font-normal"
                                             onClick={() => ambientFileInputRef.current?.click()}
                                             disabled={isUploadingAudio}
+                                            title="環境音檔的上傳在本部署未開放（其設定面在部署層）"
+                                            {...ccpDisabledProps(true)}
                                         >
                                             {isUploadingAudio ? (
                                                 <Loader2 className="w-4 h-4 mr-2 animate-spin" />
@@ -659,7 +672,11 @@ function GeneralSection({
             </CardContent>
             <CardFooter className="justify-end gap-3 border-t pt-6">
                 {isDirty && <span className="text-xs text-muted-foreground">Unsaved changes</span>}
-                <Button onClick={handleSave} disabled={isSaving || !isDirty}>
+                <Button
+                    onClick={handleSave}
+                    disabled={isSaving || !isDirty}
+                    {...ccpDisabledProps(ccpReadOnly)}
+                >
                     {isSaving ? "Saving..." : "Save General Settings"}
                 </Button>
             </CardFooter>
@@ -678,6 +695,7 @@ function TemplateVariablesSection({
     templateContextVariables: Record<string, string>;
     onSave: (variables: Record<string, string>) => Promise<void>;
 }) {
+    const ccpReadOnly = useCcpReadOnly();
     const [contextVars, setContextVars] = useState<Record<string, string>>(templateContextVariables);
     const [newKey, setNewKey] = useState("");
     const [newValue, setNewValue] = useState("");
@@ -782,7 +800,11 @@ function TemplateVariablesSection({
             </CardContent>
             <CardFooter className="justify-end gap-3 border-t pt-6">
                 {isDirty && <span className="text-xs text-muted-foreground">Unsaved changes</span>}
-                <Button onClick={handleSave} disabled={isSaving || !isDirty}>
+                <Button
+                    onClick={handleSave}
+                    disabled={isSaving || !isDirty}
+                    {...ccpDisabledProps(ccpReadOnly)}
+                >
                     {isSaving ? "Saving..." : "Save Variables"}
                 </Button>
             </CardFooter>
@@ -801,6 +823,7 @@ function DictionarySection({
     dictionary: string;
     onSave: (dictionary: string) => Promise<void>;
 }) {
+    const ccpReadOnly = useCcpReadOnly();
     const [dictionaryValue, setDictionaryValue] = useState(dictionary);
     const [isSaving, setIsSaving] = useState(false);
 
@@ -842,7 +865,11 @@ function DictionarySection({
             </CardContent>
             <CardFooter className="justify-end gap-3 border-t pt-6">
                 {isDirty && <span className="text-xs text-muted-foreground">Unsaved changes</span>}
-                <Button onClick={handleSave} disabled={isSaving || !isDirty}>
+                <Button
+                    onClick={handleSave}
+                    disabled={isSaving || !isDirty}
+                    {...ccpDisabledProps(ccpReadOnly)}
+                >
                     {isSaving ? "Saving..." : "Save Dictionary"}
                 </Button>
             </CardFooter>
@@ -863,6 +890,7 @@ function VoicemailSection({
     workflowName: string;
     onSave: (configurations: WorkflowConfigurations, workflowName: string) => Promise<void>;
 }) {
+    const ccpReadOnly = useCcpReadOnly();
     const getConfig = (): VoicemailDetectionConfiguration => ({
         ...DEFAULT_VOICEMAIL_DETECTION_CONFIGURATION,
         ...workflowConfigurations.voicemail_detection,
@@ -1000,7 +1028,11 @@ function VoicemailSection({
             </CardContent>
             <CardFooter className="justify-end gap-3 border-t pt-6">
                 {isDirty && <span className="text-xs text-muted-foreground">Unsaved changes</span>}
-                <Button onClick={handleSave} disabled={isSaving || !isDirty}>
+                <Button
+                    onClick={handleSave}
+                    disabled={isSaving || !isDirty}
+                    {...ccpDisabledProps(ccpReadOnly)}
+                >
                     {isSaving ? "Saving..." : "Save Voicemail Settings"}
                 </Button>
             </CardFooter>
@@ -1083,6 +1115,7 @@ function WorkflowModelOverridesSection({
     modelConfigurationLoading: boolean;
     modelConfigurationError: string | null;
 }) {
+    const ccpReadOnly = useCcpReadOnly();
     const savedV2Override = workflowConfigurations.model_configuration_v2_override;
     const hasSavedModelOverride = Boolean(savedV2Override || workflowConfigurations.model_overrides);
     const [overrideEnabled, setOverrideEnabled] = useState(Boolean(savedV2Override));
@@ -1204,6 +1237,7 @@ function WorkflowModelOverridesSection({
                                         : organizationModelConfiguration.effective_configuration
                                 }
                                 submitLabel="Save Model Override"
+                                ccpDisabled={ccpReadOnly}
                                 onSave={saveV2Override}
                             />
                         ) : (
@@ -1218,6 +1252,7 @@ function WorkflowModelOverridesSection({
                                         className="mt-3"
                                         onClick={removeV2Override}
                                         disabled={isRemovingOverride}
+                                        {...ccpDisabledProps(ccpReadOnly)}
                                     >
                                         {isRemovingOverride ? "Saving..." : "Save Organization Configuration"}
                                     </Button>
@@ -1318,6 +1353,23 @@ function WorkflowSettingsInner({
 
     const [isEmbedDialogOpen, setIsEmbedDialogOpen] = useState(false);
     const [activeSection, setActiveSection] = useState("general");
+    // task 3.5：說明 SHALL 講清楚**哪一半可寫**——這頁同時有 ② 桶與 (a) 兩角色皆
+    // deny 的入口，籠統一句「唯讀」對實施方是錯的（他這頁大部分可寫）。
+    useCcpPageNotice({
+        supervisor: {
+            title: '工作流設定對您是唯讀的',
+            message:
+                '這頁的一般設定、模型覆寫、語音信箱與變數由負責建置的實施方維護；'
+                + '環境音檔上傳與網站嵌入小工具則對所有帳號都未開放。'
+                + '需要調整時，請與您的專案窗口提出。',
+        },
+        implementer: {
+            title: '這頁有兩項不經編輯器變更',
+            message:
+                '環境音檔上傳與網站嵌入小工具在本部署是拒絕的（其設定面在部署層）；'
+                + '這頁其餘設定您可以直接存檔。',
+        },
+    });
     const [modelConfigurationDefaults, setModelConfigurationDefaults] = useState<ModelConfigurationDefaultsV2 | null>(null);
     const [organizationModelConfiguration, setOrganizationModelConfiguration] = useState<OrganizationAiModelConfigurationResponse | null>(null);
     const [modelConfigurationLoading, setModelConfigurationLoading] = useState(true);
@@ -1507,7 +1559,12 @@ function WorkflowSettingsInner({
                                     </CardDescription>
                                 </CardHeader>
                                 <CardFooter className="border-t pt-6">
-                                    <Button variant="outline" onClick={() => setIsEmbedDialogOpen(true)}>
+                                    <Button
+                                        variant="outline"
+                                        onClick={() => setIsEmbedDialogOpen(true)}
+                                        title="本部署未開放嵌入式小工具"
+                                        {...ccpDisabledProps(true)}
+                                    >
                                         Configure Widget
                                     </Button>
                                 </CardFooter>

@@ -26,6 +26,10 @@ import {
 import { Separator } from "@/components/ui/separator";
 import { Switch } from "@/components/ui/switch";
 import { WIDGET_MODE_DOCUMENTATION_URLS } from "@/constants/documentation";
+// customer-center-platform fork（母 repo W2d task 3.4d）：
+// `POST`／`DELETE /workflow/{id}/embed-token` 對**兩個角色皆 deny**
+// （嵌入式小工具的能力尚未開放）⇒ 存檔對誰都不會成功。
+import { ccpDisabledProps } from "@/lib/ccp/notice-bar";
 
 interface EmbedDialogProps {
     open: boolean;
@@ -542,7 +546,12 @@ document.getElementById('talk-btn').addEventListener('click', () => {
 
                                 {/* Save Button */}
                                 <div className="flex justify-end">
-                                    <Button onClick={handleSave} disabled={saving}>
+                                    <Button
+                                        onClick={handleSave}
+                                        disabled={saving}
+                                        title="本部署未開放嵌入式小工具"
+                                        {...ccpDisabledProps(true)}
+                                    >
                                         {saving ? (
                                             <>
                                                 <Loader2 className="h-4 w-4 mr-2 animate-spin" />

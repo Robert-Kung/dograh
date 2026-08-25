@@ -14,6 +14,12 @@ import {
     DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { useAuth } from '@/lib/auth';
+// customer-center-platform fork（母 repo W2d task 3.1／3.4）：
+// `POST /workflow/create/definition` 對主管 403（② 桶）；
+// Agent Builder 那條走 `POST /workflow/create/template`，**對兩個角色皆 deny**
+// （③ 桶，伺服端產生內容本部署未開放）⇒ 兩個角色都停用並說明。
+import { useCcpReadOnly } from '@/lib/ccp/access';
+import { ccpDisabledProps } from '@/lib/ccp/notice-bar';
 import logger from '@/lib/logger';
 import { getRandomId } from '@/lib/utils';
 
@@ -48,6 +54,7 @@ export function CreateWorkflowButton() {
     const router = useRouter();
     const { user, getAccessToken } = useAuth();
     const [isCreating, setIsCreating] = useState(false);
+    const readOnly = useCcpReadOnly();
 
     const handleAgentBuilder = () => {
         router.push('/workflow/create');
@@ -91,18 +98,33 @@ export function CreateWorkflowButton() {
                 </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end">
-                <DropdownMenuItem onClick={handleAgentBuilder} className="cursor-pointer">
+                <DropdownMenuItem
+                    onClick={handleAgentBuilder}
+                    className="cursor-pointer"
+                    {...ccpDisabledProps(true)}
+                >
                     <Bot className="w-4 h-4 mr-2" />
                     <div>
                         <div className="font-medium">Use Agent Builder</div>
-                        <div className="text-xs text-muted-foreground">AI generates a workflow from your description</div>
+                        <div className="text-xs text-muted-foreground">
+                            本部署未開放：這條流程由伺服端產生話術，需由實施方在部署層開啟
+                        </div>
                     </div>
                 </DropdownMenuItem>
-                <DropdownMenuItem onClick={handleBlankCanvas} disabled={isCreating} className="cursor-pointer">
+                <DropdownMenuItem
+                    onClick={handleBlankCanvas}
+                    disabled={isCreating}
+                    className="cursor-pointer"
+                    {...ccpDisabledProps(readOnly)}
+                >
                     <LayoutTemplate className="w-4 h-4 mr-2" />
                     <div>
                         <div className="font-medium">Blank Canvas</div>
-                        <div className="text-xs text-muted-foreground">Start from scratch with an empty workflow</div>
+                        <div className="text-xs text-muted-foreground">
+                            {readOnly
+                                ? '建立話術需要實施方帳號，請與您的專案窗口提出'
+                                : 'Start from scratch with an empty workflow'}
+                        </div>
                     </div>
                 </DropdownMenuItem>
             </DropdownMenuContent>

@@ -31,7 +31,7 @@
  * 並在 click 端擋掉實際動作。
  */
 
-import React from 'react';
+import React, { createContext, useContext, useEffect, useMemo, useState } from 'react';
 
 import { cn } from '@/lib/utils';
 
@@ -69,6 +69,60 @@ export const CCP_NOTICE_COPY = {
     },
 } as const satisfies Record<string, CcpNoticeCopy>;
 
+/**
+ * 說明條只有**一個**（掛在 `AppLayout`），逐頁的專屬文案經這個插槽送進去。
+ *
+ * 為什麼不是「每頁自己畫一條」：頁面各畫各的話，① 主管會在同一頁看到兩條說明
+ * （全域那條 ＋ 頁面那條），② DOM 順序要靠每個呼叫端自己記得放最前面，
+ * ③ `aria-describedby` 指向的 id 會有兩份。插槽讓「一頁一條、且在最前面」
+ * 變成結構保證而不是紀律。
+ */
+export interface CcpPageNoticeCopy {
+    readonly supervisor?: CcpNoticeCopy;
+    readonly implementer?: CcpNoticeCopy;
+}
+
+const CcpNoticeSlotContext = createContext<{
+    copy: CcpPageNoticeCopy;
+    set: (copy: CcpPageNoticeCopy | null) => void;
+}>({ copy: {}, set: () => { } });
+
+export function CcpNoticeSlotProvider({ children }: { children: React.ReactNode }) {
+    const [copy, setCopy] = useState<CcpPageNoticeCopy>({});
+    const value = useMemo(
+        () => ({ copy, set: (next: CcpPageNoticeCopy | null) => setCopy(next ?? {}) }),
+        [copy],
+    );
+    return (
+        <CcpNoticeSlotContext.Provider value={value}>
+            {children}
+        </CcpNoticeSlotContext.Provider>
+    );
+}
+
+/**
+ * 頁面把自己的專屬文案掛進說明條。卸載時自動還原成預設文案——換頁後仍留著
+ * 上一頁的說明，就是另一種「說了錯的原因」。
+ *
+ * `copy` 每次 render 都是新物件，故以其**內容**為相依項（頁面文案是常數字串，
+ * 序列化成本可忽略）。
+ */
+export function useCcpPageNotice(copy: CcpPageNoticeCopy) {
+    const { set } = useContext(CcpNoticeSlotContext);
+    const key = JSON.stringify(copy);
+    useEffect(() => {
+        set(JSON.parse(key) as CcpPageNoticeCopy);
+        return () => set(null);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [key]);
+}
+
+/** 給 server component 的頁面用：渲染它等於呼叫 `useCcpPageNotice`。 */
+export function CcpPageNotice(copy: CcpPageNoticeCopy) {
+    useCcpPageNotice(copy);
+    return null;
+}
+
 interface CcpAccessNoticeProps {
     /** 已確認為唯讀角色（主管）時的文案。省略即用預設。 */
     readonly supervisor?: CcpNoticeCopy;
@@ -91,6 +145,10 @@ export function CcpAccessNotice({
     className,
 }: CcpAccessNoticeProps) {
     const access = useCcpAccess();
+    const slot = useContext(CcpNoticeSlotContext).copy;
+    // 頁面掛進來的文案優先於 props（props 是掛載點給的預設）。
+    const supervisorCopy = slot.supervisor ?? supervisor;
+    const implementerCopy = slot.implementer ?? implementer;
 
     const copy: CcpNoticeCopy | null = (() => {
         switch (access.state) {
@@ -101,9 +159,9 @@ export function CcpAccessNotice({
                 // 一定是錯的（我們並不知道使用者是誰）。
                 return CCP_NOTICE_COPY.signalUnavailable;
             case 'readonly-role':
-                return supervisor ?? CCP_NOTICE_COPY.readonlyRole;
+                return supervisorCopy ?? CCP_NOTICE_COPY.readonlyRole;
             case 'writable':
-                return implementer ?? null;
+                return implementerCopy ?? null;
         }
     })();
 
@@ -136,10 +194,22 @@ export function CcpAccessNotice({
  *
  * 未停用時回空物件，對可寫身分零影響。
  */
+export interface CcpDisabledProps {
+    'aria-disabled'?: true;
+    'aria-describedby'?: string;
+    'data-ccp-disabled'?: 'true';
+    onClick?: (event: React.MouseEvent<HTMLElement>) => void;
+}
+
+/**
+ * 回傳型別**只列這四個鍵**，不是 `ButtonHTMLAttributes`：後者帶著
+ * `onSelect: ReactEventHandler`，與 Radix 的 `DropdownMenuItem`
+ * （`onSelect: (event: Event) => void`）衝突，spread 到選單項目上會編不過。
+ */
 export function ccpDisabledProps(
     disabled: boolean,
     options?: { describedBy?: string },
-): React.ButtonHTMLAttributes<HTMLElement> & { 'data-ccp-disabled'?: 'true' } {
+): CcpDisabledProps {
     if (!disabled) return {};
     return {
         'aria-disabled': true,

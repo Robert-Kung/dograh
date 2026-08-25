@@ -13,6 +13,8 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useAuth } from "@/lib/auth";
+// customer-center-platform fork（母 repo W2d task 3.3b）
+import { ccpDisabledProps } from "@/lib/ccp/notice-bar";
 
 export function TelemetrySection() {
   const { user, loading: authLoading } = useAuth();
@@ -124,11 +126,26 @@ export function TelemetrySection() {
         />
       </div>
       <div className="flex gap-2">
-        <Button type="submit" disabled={saving}>
+        {/* customer-center-platform fork（母 repo W2d task 3.3b）：
+            `POST`／`DELETE /organizations/langfuse-credentials` 對兩個角色皆 deny
+            ——遙測憑證由平台管理。 */}
+        <Button
+          type="submit"
+          disabled={saving}
+          title="遙測憑證由平台管理，不經編輯器變更"
+          {...ccpDisabledProps(true)}
+        >
           {saving ? "Saving..." : "Save"}
         </Button>
         {credentials.configured && (
-          <Button type="button" variant="destructive" disabled={saving} onClick={handleDelete}>
+          <Button
+            type="button"
+            variant="destructive"
+            disabled={saving}
+            onClick={handleDelete}
+            title="遙測憑證由平台管理，不經編輯器變更"
+            {...ccpDisabledProps(true)}
+          >
             Remove
           </Button>
         )}

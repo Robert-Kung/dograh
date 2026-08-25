@@ -50,13 +50,13 @@ export function MCPSection() {
         <p className="text-xs text-muted-foreground">
           Connect an MCP-compatible AI assistant to this URL over Streamable
           HTTP. Requires an API key in the X-API-Key header.{" "}
-          <Link
-            href="/api-keys"
-            target="_blank"
-            className="text-primary underline hover:no-underline"
-          >
-            Get your API key
-          </Link>
+          {/* customer-center-platform fork（母 repo W2d task 3.6b）：
+              上游的「Get your API key」連到 `/api-keys`，該頁在閘門的 UI 拒絕清單內
+              ⇒ 開新分頁得 403。與 `DocumentSelector` 那顆完全同型，依 task 3.2b
+              的「入口本身通往不可達頁面」例外移除。 */}
+          <span className="text-muted-foreground">
+            金鑰由建置單位配發，請與您的專案窗口索取。
+          </span>
         </p>
         <div className="grid gap-3">
           {endpoints.map(({ key, label, url }) => (

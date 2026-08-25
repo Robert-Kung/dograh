@@ -36,6 +36,9 @@ import {
     TableHeader,
     TableRow,
 } from "@/components/ui/table";
+// customer-center-platform fork（母 repo W2d task 3.1）
+import { useCcpReadOnly } from '@/lib/ccp/access';
+import { ccpDisabledProps } from '@/lib/ccp/notice-bar';
 interface Workflow {
     id: number;
     name: string;
@@ -57,6 +60,8 @@ interface WorkflowTableProps {
     currentFolderId?: number | null;
 }
 
+// customer-center-platform fork（母 repo W2d task 3.1）：`PUT /workflow/{id}/status`
+// 與 `PUT /workflow/{id}/folder` 皆帶 `roles: [implementer]` ⇒ 對主管 403。
 export function WorkflowTable({
     workflows,
     showArchived,
@@ -67,6 +72,7 @@ export function WorkflowTable({
     const [isPending, startTransition] = useTransition();
     const [loadingWorkflowId, setLoadingWorkflowId] = useState<number | null>(null);
     const [movingWorkflowId, setMovingWorkflowId] = useState<number | null>(null);
+    const readOnly = useCcpReadOnly();
 
     const handleEdit = (id: number) => {
         router.push(`/workflow/${id}`);
@@ -182,6 +188,7 @@ export function WorkflowTable({
                                                         size="sm"
                                                         disabled={movingWorkflowId === workflow.id || isPending}
                                                         className="flex items-center gap-2"
+                                                        {...ccpDisabledProps(readOnly)}
                                                     >
                                                         {movingWorkflowId === workflow.id ? (
                                                             <div className="h-4 w-4 animate-spin rounded-full border-2 border-current border-t-transparent" />
@@ -226,6 +233,7 @@ export function WorkflowTable({
                                             onClick={() => handleArchiveToggle(workflow.id, workflow.status)}
                                             disabled={loadingWorkflowId === workflow.id || isPending}
                                             className="flex items-center gap-2"
+                                            {...ccpDisabledProps(readOnly)}
                                         >
                                             {loadingWorkflowId === workflow.id ? (
                                                 <>

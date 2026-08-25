@@ -16,6 +16,8 @@ import { Label } from "@/components/ui/label";
 import { useUserConfig } from "@/context/UserConfigContext";
 import { detailFromError } from "@/lib/apiError";
 import { useAuth } from "@/lib/auth";
+// customer-center-platform fork（母 repo W2d task 3.3b）
+import { ccpDisabledProps } from "@/lib/ccp/notice-bar";
 
 const emptyPreferences: OrganizationPreferences = {
   test_phone_number: "",
@@ -212,7 +214,14 @@ export function OrganizationPreferencesSection() {
           />
         </div>
       </div>
-      <Button type="submit" disabled={saving}>
+      {/* customer-center-platform fork（母 repo W2d task 3.3b）：
+          `PUT /organizations/preferences` 對兩個角色皆 deny。 */}
+      <Button
+        type="submit"
+        disabled={saving}
+        title="組織偏好由平台設定，不經編輯器變更"
+        {...ccpDisabledProps(true)}
+      >
         <Save className="mr-2 h-4 w-4" />
         {saving ? "Saving..." : "Save"}
       </Button>

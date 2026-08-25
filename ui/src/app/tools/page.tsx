@@ -40,6 +40,13 @@ import {
 } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useAuth } from "@/lib/auth";
+// customer-center-platform fork（母 repo W2d task 3.1／3.4b）：
+// `POST /tools/` 帶 `roles: [implementer]` ⇒ 對主管 403（② 桶）；
+// `DELETE /tools/{uuid}`（no-restore-path）與 `POST /tools/{uuid}/unarchive`
+// （no-admission-object-on-restore）**對兩個角色皆 deny**（③ 桶）——原本
+// 實施方按下 Archive 得到的是 `Failed to archive tool`。
+import { useCcpReadOnly } from "@/lib/ccp/access";
+import { ccpDisabledProps, useCcpPageNotice } from "@/lib/ccp/notice-bar";
 
 import {
     createMcpDefinition,
@@ -63,6 +70,21 @@ export default function ToolsPage() {
     const [newToolDescription, setNewToolDescription] = useState("");
     const [newToolCategory, setNewToolCategory] = useState<ToolCategory>("http_api");
     const [isCreating, setIsCreating] = useState(false);
+    const readOnly = useCcpReadOnly();
+    useCcpPageNotice({
+        supervisor: {
+            title: '工具設定對您是唯讀的',
+            message:
+                '您可以檢視這裡的工具與其設定，但新增與修改由負責建置的實施方進行。'
+                + '封存與還原在本部署對所有帳號都不開放，需要時請與您的專案窗口提出。',
+        },
+        implementer: {
+            title: '封存與還原不經編輯器',
+            message:
+                '本部署未開放經編輯器封存或還原工具（還原沒有內容檢查的對象）。'
+                + '需要調整工具清單時，請依 RUNBOOK 的部署層程序處理。',
+        },
+    });
     const [error, setError] = useState<string | null>(null);
     const [createError, setCreateError] = useState<string | null>(null);
 
@@ -321,7 +343,10 @@ export default function ToolsPage() {
                                         Create and manage tools for your organization
                                     </CardDescription>
                                 </div>
-                                <Button onClick={() => setIsCreateDialogOpen(true)}>
+                                <Button
+                                    onClick={() => setIsCreateDialogOpen(true)}
+                                    {...ccpDisabledProps(readOnly)}
+                                >
                                     <Plus className="w-4 h-4 mr-2" />
                                     Create Tool
                                 </Button>
@@ -363,7 +388,10 @@ export default function ToolsPage() {
                                             : "No tools found"}
                                     </p>
                                     {!searchQuery && (
-                                        <Button onClick={() => setIsCreateDialogOpen(true)}>
+                                        <Button
+                                            onClick={() => setIsCreateDialogOpen(true)}
+                                            {...ccpDisabledProps(readOnly)}
+                                        >
                                             Create Your First Tool
                                         </Button>
                                     )}
@@ -412,6 +440,8 @@ export default function ToolsPage() {
                                                             handleDeleteTool(tool.tool_uuid, e)
                                                         }
                                                         className="text-destructive hover:text-destructive/90"
+                                                        title="本部署未開放經編輯器封存工具"
+                                                        {...ccpDisabledProps(true)}
                                                     >
                                                         <Trash2 className="w-4 h-4" />
                                                     </Button>
@@ -423,7 +453,10 @@ export default function ToolsPage() {
                                             <p className="text-muted-foreground mb-4">
                                                 No active tools
                                             </p>
-                                            <Button onClick={() => setIsCreateDialogOpen(true)}>
+                                            <Button
+                                                onClick={() => setIsCreateDialogOpen(true)}
+                                                {...ccpDisabledProps(readOnly)}
+                                            >
                                                 Create Your First Tool
                                             </Button>
                                         </div>
@@ -476,7 +509,8 @@ export default function ToolsPage() {
                                                                 handleUnarchiveTool(tool.tool_uuid, e)
                                                             }
                                                             className="text-primary hover:text-primary/90"
-                                                            title="Restore tool"
+                                                            title="本部署未開放經編輯器還原工具"
+                                                            {...ccpDisabledProps(true)}
                                                         >
                                                             <RotateCcw className="w-4 h-4" />
                                                         </Button>
@@ -623,7 +657,11 @@ export default function ToolsPage() {
                         >
                             Cancel
                         </Button>
-                        <Button onClick={handleCreateTool} disabled={isCreating}>
+                        <Button
+                            onClick={handleCreateTool}
+                            disabled={isCreating}
+                            {...ccpDisabledProps(readOnly)}
+                        >
                             {isCreating ? "Creating..." : "Create Tool"}
                         </Button>
                     </DialogFooter>

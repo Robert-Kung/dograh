@@ -27,11 +27,23 @@ import {
     PopoverTrigger,
 } from "@/components/ui/popover";
 import { useSidebar } from "@/components/ui/sidebar";
+// customer-center-platform fork（母 repo W2d task 3.1／3.4／3.4c）：
+// Save／Publish／改名走 `PUT /workflow/{id}`、`POST /{id}/publish`
+// （`roles: [implementer]` ⇒ 對主管 403，② 桶）；
+// **Duplicate Workflow／Phone Call／View Runs 對兩個角色皆 deny**（③ 桶）——
+// 前者是伺服端產生內容、Phone Call 打 `PUT /organizations/preferences` ＋
+// `POST /telephony/initiate-call`、View Runs 的資料面 GET 亦 deny。
+// 上游把這幾顆做成**條件渲染**；照那個模式接 readOnly 會讓按鈕整個消失，
+// 違反 task 3.2b 的「停用是預設，移除是例外」。
+import { useCcpReadOnly } from "@/lib/ccp/access";
+import { ccpDisabledProps } from "@/lib/ccp/notice-bar";
 
 interface WorkflowEditorHeaderProps {
     workflowName: string;
     isDirty: boolean;
     workflowValidationErrors: WorkflowError[];
+    /** customer-center-platform fork（母 repo W2d task 3.9）：驗證結果不可得。 */
+    ccpValidationUnavailable?: boolean;
     rfInstance: React.RefObject<ReactFlowInstance<FlowNode, FlowEdge> | null>;
     workflowId: number;
     workflowUuid?: string;
@@ -52,6 +64,7 @@ export const WorkflowEditorHeader = ({
     workflowName,
     isDirty,
     workflowValidationErrors,
+    ccpValidationUnavailable = false,
     rfInstance,
     saveWorkflow,
     onPhoneCallClick,
@@ -84,6 +97,7 @@ export const WorkflowEditorHeader = ({
     const nameInputRef = useRef<HTMLInputElement>(null);
     const renameButtonRef = useRef<HTMLButtonElement>(null);
 
+    const readOnly = useCcpReadOnly();
     const hasValidationErrors = workflowValidationErrors.length > 0;
     const isCallDisabled = isDirty || hasValidationErrors;
 
@@ -289,6 +303,7 @@ export const WorkflowEditorHeader = ({
                                     onClick={enterEditMode}
                                     aria-label="Rename workflow"
                                     className="flex items-center justify-center w-8 h-8 rounded-lg hover:bg-[#2a2a2a] transition-colors"
+                                    {...ccpDisabledProps(readOnly)}
                                 >
                                     <Pencil className="w-4 h-4 text-gray-400" />
                                 </button>
@@ -315,6 +330,7 @@ export const WorkflowEditorHeader = ({
                     <Button
                         onClick={onBackToDraft}
                         className="bg-teal-600 hover:bg-teal-700 text-white px-4"
+                        {...ccpDisabledProps(readOnly)}
                     >
                         Back to Draft
                     </Button>
@@ -339,8 +355,18 @@ export const WorkflowEditorHeader = ({
                     </div>
                 )}
 
+                {/* customer-center-platform fork（母 repo W2d task 3.9）：
+                    驗證對這個身分不可得時，**說出來**——原本的畫面是「沒有錯誤」，
+                    而那是一句沒有人查得證的假話。 */}
+                {ccpValidationUnavailable && (
+                    <div className="flex items-center gap-2 px-3 py-1.5 rounded-md border border-gray-500/30 bg-gray-500/10">
+                        <AlertCircle className="w-4 h-4 text-gray-400" />
+                        <span className="text-sm text-gray-300">此身分看不到驗證結果</span>
+                    </div>
+                )}
+
                 {/* Validation errors indicator */}
-                {hasValidationErrors && (
+                {!ccpValidationUnavailable && hasValidationErrors && (
                     <Popover>
                         <PopoverTrigger asChild>
                             <button className="flex items-center gap-2 px-3 py-1.5 rounded-md border border-red-500/30 bg-red-500/10 hover:bg-red-500/20 transition-colors cursor-pointer">
@@ -390,6 +416,7 @@ export const WorkflowEditorHeader = ({
                     <Button
                         onClick={handlePublish}
                         disabled={isDirty || publishing || hasValidationErrors}
+                        {...ccpDisabledProps(readOnly)}
                         variant="outline"
                         className="border-[#3a3a3a] bg-transparent hover:bg-[#2a2a2a] text-white px-4"
                     >
@@ -413,6 +440,8 @@ export const WorkflowEditorHeader = ({
                         className="flex items-center gap-2 bg-transparent border-[#3a3a3a] hover:bg-[#2a2a2a] text-white"
                         disabled={isCallDisabled}
                         onClick={onPhoneCallClick}
+                        title="本部署未開放自編輯器發話"
+                        {...ccpDisabledProps(true)}
                     >
                         <Phone className="w-4 h-4" />
                         Phone Call
@@ -434,6 +463,7 @@ export const WorkflowEditorHeader = ({
                         onClick={handleSave}
                         disabled={!isDirty || savingWorkflow}
                         className="bg-teal-600 hover:bg-teal-700 text-white px-4"
+                        {...ccpDisabledProps(readOnly)}
                     >
                         {savingWorkflow ? (
                             <>
@@ -461,6 +491,8 @@ export const WorkflowEditorHeader = ({
                         <DropdownMenuItem
                             onClick={() => router.push(`/workflow/${workflowId}/runs`)}
                             className="text-white hover:bg-[#2a2a2a] cursor-pointer"
+                            title="本部署未開放通話紀錄"
+                            {...ccpDisabledProps(true)}
                         >
                             <History className="w-4 h-4 mr-2" />
                             View Runs
@@ -469,6 +501,8 @@ export const WorkflowEditorHeader = ({
                             onClick={handleDuplicate}
                             disabled={duplicating}
                             className="text-white hover:bg-[#2a2a2a] cursor-pointer"
+                            title="本部署未開放複製話術（伺服端產生內容）"
+                            {...ccpDisabledProps(true)}
                         >
                             {duplicating ? (
                                 <LoaderCircle className="w-4 h-4 mr-2 animate-spin" />

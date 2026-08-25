@@ -19,12 +19,31 @@ import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Textarea } from '@/components/ui/textarea';
 import { useAuth } from '@/lib/auth';
+// customer-center-platform fork（母 repo W2d task 3.4）：
+// `POST /workflow/create/template` 對**兩個角色皆 deny**（伺服端產生內容，
+// 本部署未開放）。這一頁對誰都只有一顆按了會失敗的按鈕，故停用＋說明；
+// 入口（Create Agent 選單的 Agent Builder）同批停用。
+import { ccpDisabledProps, useCcpPageNotice } from '@/lib/ccp/notice-bar';
 import logger from '@/lib/logger';
 
 export default function CreateWorkflowPage() {
     const router = useRouter();
     const { user, getAccessToken } = useAuth();
     const [isLoading, setIsLoading] = useState(false);
+    useCcpPageNotice({
+        supervisor: {
+            title: '本部署未開放由 AI 產生話術',
+            message:
+                '這條流程會請伺服端產生一份話術，本部署沒有開放；'
+                + '話術由負責建置的實施方維護。需要新增話術時，請與您的專案窗口提出。',
+        },
+        implementer: {
+            title: '本部署未開放由 AI 產生話術',
+            message:
+                '`POST /workflow/create/template` 在本部署是拒絕的（伺服端產生內容）。'
+                + '請以既有話術為基礎編輯，或依 RUNBOOK 於部署層匯入。',
+        },
+    });
     const [error, setError] = useState<string | null>(null);
     const [showSuccessModal, setShowSuccessModal] = useState(false);
     const [workflowId, setWorkflowId] = useState<string | null>(null);
@@ -153,6 +172,8 @@ export default function CreateWorkflowPage() {
                                 onClick={handleCreateWorkflow}
                                 disabled={isLoading || !useCase || !activityDescription}
                                 className="w-full"
+                                title="本部署未開放由 AI 產生話術"
+                                {...ccpDisabledProps(true)}
                             >
                                 {isLoading ? 'Creating...' : 'Create Agent'}
                             </Button>

@@ -40,6 +40,13 @@ import {
 } from "@/components/ui/select";
 import { useUserConfig } from "@/context/UserConfigContext";
 import { detailFromError } from "@/lib/apiError";
+// customer-center-platform fork（母 repo W2d task 3.4c／導航死路）：
+// `POST /telephony/initiate-call`（call-plane）與 `PUT /organizations/preferences`
+// 對**兩個角色皆 deny**；「Configure Telephony」兩顆連到
+// `/telephony-configurations`，該頁在閘門的 UI 拒絕清單內 ⇒ 開過去是 403。
+// 目的頁不可達者依 task 3.2b 得以停用＋說明（此處兩顆是 dialog 內的按鈕，
+// 移除會讓對話框沒有任何說明，故取停用並就地說出設定在部署層）。
+import { ccpDisabledProps } from "@/lib/ccp/notice-bar";
 
 interface PhoneCallDialogProps {
     open: boolean;
@@ -303,7 +310,11 @@ export const PhoneCallDialog = ({
                 <Button variant="ghost" onClick={() => onOpenChange(false)}>
                     Do it Later
                 </Button>
-                <Button onClick={handleConfigureContinue}>
+                <Button
+                    onClick={handleConfigureContinue}
+                    title="電話設定在部署層，編輯器內不開放"
+                    {...ccpDisabledProps(true)}
+                >
                     Continue
                 </Button>
             </DialogFooter>
@@ -396,6 +407,8 @@ export const PhoneCallDialog = ({
                         onOpenChange(false);
                         router.push('/telephony-configurations');
                     }}
+                    title="電話設定在部署層，編輯器內不開放"
+                    {...ccpDisabledProps(true)}
                 >
                     Configure Telephony
                 </Button>
@@ -407,6 +420,8 @@ export const PhoneCallDialog = ({
                         <Button
                             onClick={handleStartCall}
                             disabled={callLoading || !phoneNumber}
+                            title="本部署未開放自編輯器發話"
+                            {...ccpDisabledProps(true)}
                         >
                             {callLoading ? "Calling..." : "Start Call"}
                         </Button>

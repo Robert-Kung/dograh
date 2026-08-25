@@ -11,6 +11,9 @@ import { SidebarInset, SidebarProvider, useSidebar } from "@/components/ui/sideb
 import { PostHogEvent } from "@/constants/posthog-events";
 import { useAppConfig } from "@/context/AppConfigContext";
 import { LeadFormsProvider } from "@/context/LeadFormsContext";
+// customer-center-platform fork（母 repo W2d task 3.2）：角色綁定的頁面級說明條。
+// 掛在這裡而不是每頁自己畫——一頁一條、且在內容最前面，是結構保證不是紀律。
+import { CcpAccessNotice, CcpNoticeSlotProvider } from "@/lib/ccp/notice-bar";
 
 import { AppSidebar } from "./AppSidebar";
 import { GitHubStarBadge } from "./GitHubStarBadge";
@@ -110,6 +113,7 @@ const AppLayout: React.FC<AppLayoutProps> = ({
   // Always render SidebarProvider to keep the component tree shape consistent
   // across route changes (avoids React hooks ordering violations during navigation).
   return (
+    <CcpNoticeSlotProvider>
     <SidebarProvider defaultOpen>
       {shouldShowSidebar ? (
         <LeadFormsProvider>
@@ -117,6 +121,7 @@ const AppLayout: React.FC<AppLayoutProps> = ({
             <AppSidebar />
             <SidebarInset className="flex-1">
               <BackendStatusBanner />
+              <CcpAccessNotice />
               {!isWorkflowEditor && <AppHeader />}
               {/* Optional header area for specific pages */}
               {headerActions && (
@@ -150,10 +155,12 @@ const AppLayout: React.FC<AppLayoutProps> = ({
       ) : (
         <div className="app-surface w-full flex-1">
           <BackendStatusBanner />
+          <CcpAccessNotice />
           {children}
         </div>
       )}
     </SidebarProvider>
+    </CcpNoticeSlotProvider>
   );
 };
 

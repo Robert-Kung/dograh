@@ -14,6 +14,12 @@ import { PostHogEvent } from "@/constants/posthog-events";
 import { WORKFLOW_RUN_MODES } from "@/constants/workflowRunModes";
 import { useOnboarding } from "@/context/OnboardingContext";
 import { useAuth } from "@/lib/auth";
+// customer-center-platform fork（母 repo W2d task 3.4d／3.1b）：
+// **語音測試**走 `POST /workflow/{id}/runs`，對**兩個角色皆 deny** ⇒ 這顆按鈕
+// 今天是半壞的（按了拿到英文錯誤）。**文字聊天是例外**：text-chat 的三條
+// `roles: [supervisor, implementer]` 是 CS-12 給客戶主管的唯一互動能力，
+// MUST NOT 停用——呈現面比授權面更嚴同樣是未達成規格。
+import { ccpDisabledProps } from "@/lib/ccp/notice-bar";
 import { cn, getRandomId } from "@/lib/utils";
 
 import { AiSimulatorPlaceholder } from "./workflow-tester/AiSimulatorPlaceholder";
@@ -131,7 +137,11 @@ export function WorkflowTesterPanel({
     const authUnavailableReason = tokenReady && !accessToken
         ? "Authentication is required before testing can start."
         : null;
-    const effectiveDisabledReason = disabledReason ?? authUnavailableReason;
+    // 語音測試對兩個角色皆不可用（見檔頭）。理由固定寫在這裡，
+    // 而不是等按下去由 3.0 的兜底說——AC2 要的是**停用態**，不是按了才知道。
+    const voiceDeniedReason =
+        "本部署未開放瀏覽器語音測試（通話面在部署層）。右邊的「Test Chat」分頁可以用文字測試同一套話術。";
+    const effectiveDisabledReason = disabledReason ?? authUnavailableReason ?? voiceDeniedReason;
     const testerBlocked = disabled || authUnavailableReason !== null;
     const showRunTestTooltip =
         showWebCallOnboarding &&
@@ -208,6 +218,7 @@ export function WorkflowTesterPanel({
                                             ref={runTestButtonRef}
                                             onClick={createVoiceRun}
                                             disabled={creatingVoiceRun || testerBlocked}
+                                            {...ccpDisabledProps(true)}
                                         >
                                             {creatingVoiceRun ? (
                                                 <>

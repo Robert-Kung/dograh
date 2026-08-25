@@ -24,6 +24,10 @@ import {
     SelectValue,
 } from "@/components/ui/select";
 import { useAuth } from "@/lib/auth";
+// customer-center-platform fork（母 repo W2d task 3.4d）：
+// `POST /credentials/`（credential-plane）對**兩個角色皆 deny**——憑證由平台管理，
+// 不經編輯器建立。入口在 `/tools` 與節點屬性的 CredentialSelector。
+import { ccpDisabledProps } from "@/lib/ccp/notice-bar";
 
 interface CreateCredentialDialogProps {
     open: boolean;
@@ -225,6 +229,8 @@ export function CreateCredentialDialog({
                     <Button
                         onClick={handleCreate}
                         disabled={!name.trim() || isCreating}
+                        title="憑證由平台管理，不經編輯器建立"
+                        {...ccpDisabledProps(true)}
                     >
                         {isCreating ? (
                             <>

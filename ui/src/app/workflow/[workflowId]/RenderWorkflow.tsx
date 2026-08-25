@@ -14,7 +14,6 @@ import { createWorkflowDraftApiV1WorkflowWorkflowIdCreateDraftPost, getWorkflowV
 import type { DocumentResponseSchema, RecordingResponseSchema, ToolResponse } from '@/client/types.gen';
 import { useNodeSpecs } from "@/components/flow/renderer";
 import { FlowEdge, FlowNode, NodeType } from "@/components/flow/types";
-import { HireExpertNudge } from "@/components/lead-forms/HireExpertNudge";
 import { Button } from '@/components/ui/button';
 import { Sheet, SheetContent } from '@/components/ui/sheet';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
@@ -107,6 +106,7 @@ function RenderWorkflow({
         workflowName,
         isDirty,
         workflowValidationErrors,
+        ccpValidationUnavailable,
         templateContextVariables,
         setNodes,
         setEdges,
@@ -260,6 +260,14 @@ function RenderWorkflow({
         }
 
         // No draft exists — ask the backend to create one from published
+        //
+        // customer-center-platform fork（母 repo W2d task 3.4f）：
+        // `POST /workflow/{id}/create-draft` 帶 `roles: [implementer]` ⇒ 對主管 403，
+        // 而這裡原本無 try/catch：403 時 `response.data` 是 undefined、整個 `if (draft)`
+        // 區塊跳過，**畫面零反應**。呈現面的按鈕已於 header 停用（② 桶），這裡是
+        // 「按鈕以外的路徑」也走不到假成功的第二道：拒絕時直接返回，由 3.0 的兜底
+        // 說出理由（文案的正本在閘門）。
+        if (ccpReadOnly) return;
         const response = await createWorkflowDraftApiV1WorkflowWorkflowIdCreateDraftPost({
             path: { workflow_id: workflowId },
         });
@@ -277,7 +285,7 @@ function RenderWorkflow({
             // Refresh the version list so the new draft appears
             fetchVersions(true);
         }
-    }, [versions, handleSelectVersion, workflowId, setNodes, setEdges, setIsDirty, fetchVersions]);
+    }, [versions, handleSelectVersion, workflowId, setNodes, setEdges, setIsDirty, fetchVersions, ccpReadOnly]);
 
     // After a successful publish, refresh the version list and update status
     const handlePublished = useCallback(() => {
@@ -506,12 +514,20 @@ function RenderWorkflow({
     return (
         <WorkflowProvider value={workflowContextValue}>
             <div className="flex flex-col h-screen min-w-fit">
-                <HireExpertNudge workflowId={workflowId} />
+                {/* customer-center-platform fork（母 repo W2d task 3.4e）：
+                    上游的 `HireExpertNudge` 已移除。它進編輯器 5 分鐘後自動彈出，
+                    表單送 `api-leads.dograh.com`（外部 host、無 auth、identity 就是
+                    使用者填的 email），而 client 端把 4xx／5xx 與網路錯誤全部吞進
+                    `console.error`；閘門的 CSP `connect-src 'self'` 會擋掉那個跨源
+                    POST ⇒ 主管填完姓名電話按送出，畫面表現為成功、資料哪裡都沒到。
+                    這是 AC3c 的**假成功**類別，比沒有原因的錯誤更糟。
+                    採移除而非停用：入口本身是外部廠商招攬，於本交付態無對應流程。 */}
                 {/* New Workflow Editor Header */}
                 <WorkflowEditorHeader
                     workflowName={workflowName}
                     isDirty={isDirty}
                     workflowValidationErrors={workflowValidationErrors}
+                    ccpValidationUnavailable={ccpValidationUnavailable}
                     rfInstance={rfInstance}
                     workflowId={workflowId}
                     workflowUuid={workflowUuid}

@@ -1,7 +1,6 @@
 "use client";
 
-import { ExternalLink, FileText } from "lucide-react";
-import Link from "next/link";
+import { FileText } from "lucide-react";
 import { useMemo } from "react";
 
 import type { DocumentResponseSchema } from "@/client/types.gen";
@@ -69,14 +68,11 @@ export const DocumentSelector = ({
                     <div className="text-sm text-muted-foreground text-center">
                         No documents available. Upload documents to the knowledge base first.
                     </div>
-                    <div className="flex justify-center">
-                        <Button variant="outline" size="sm" asChild>
-                            <Link href="/files" target="_blank">
-                                <ExternalLink className="h-4 w-4 mr-2" />
-                                Upload Documents
-                            </Link>
-                        </Button>
-                    </div>
+                    {/* customer-center-platform fork（母 repo W2d task 3.6）：
+                        上游的「Upload Documents」連到 `/files`，該頁在閘門的 UI 拒絕
+                        清單內 ⇒ 開新分頁只會拿到 403。依 task 3.2b，**入口本身通往
+                        不可達頁面**是「移除」而非「停用」的唯一合格情形，故移除。
+                        知識庫在本部署是唯讀（僅清單與 metadata），文件由建置單位匯入。 */}
                 </div>
             </div>
         );
@@ -131,16 +127,9 @@ export const DocumentSelector = ({
                         </div>
                     ))}
                 </div>
-                <div className="p-2 bg-muted/30">
-                    <Link
-                        href="/files"
-                        target="_blank"
-                        className="flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground"
-                    >
-                        <ExternalLink className="h-4 w-4" />
-                        Manage Documents
-                    </Link>
-                </div>
+                {/* customer-center-platform fork（母 repo W2d task 3.6）：
+                    「Manage Documents」同樣連到 `/files`（不可達）——同批移除。
+                    完整的空狀態文案歸 W4。 */}
             </div>
 
             {value.length > 0 && (
