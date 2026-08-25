@@ -15,6 +15,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useUserConfig } from "@/context/UserConfigContext";
 import { detailFromError } from "@/lib/apiError";
+import { ccpDenialFromError } from "@/lib/ccp/denial";
 import { useAuth } from "@/lib/auth";
 // customer-center-platform fork（母 repo W2d task 3.3b）
 import { CCP_ACCESS_NOTICE_ID, ccpDisabledProps, ccpReadOnlyFieldProps } from "@/lib/ccp/notice-bar";
@@ -119,6 +120,14 @@ export function OrganizationPreferencesSection() {
         await getPreferencesApiV1OrganizationsPreferencesGet();
 
       if (result.error) {
+        // customer-center-platform fork（§6 巡檢 G4）：
+        // **閘門的讀取拒絕不發 toast**。這是頁面載入時自動發的 GET，
+        // 使用者什麼都沒按；而本頁的繁中說明條已經寫明「部分欄位甚至讀不到」。
+        // 不擋的話畫面上會跳一張英文的 `path not allowed`——那是閘門的內部
+        // 措辭，對客戶既看不懂也沒有下一步，與 §3 的 F2（403 兜底對讀取
+        // 連發 toast）是同一條判準：**讀取面的常態 403 MUST NOT 進 toast**。
+        // 寫入失敗仍然 toast（那是使用者按了才發生的）。
+        if (ccpDenialFromError(result.error)) return;
         toast.error(
           detailFromError(
             result.error,
