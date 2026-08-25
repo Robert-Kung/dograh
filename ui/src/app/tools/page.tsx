@@ -46,6 +46,10 @@ import { useAuth } from "@/lib/auth";
 // （no-admission-object-on-restore）**對兩個角色皆 deny**（③ 桶）——原本
 // 實施方按下 Archive 得到的是 `Failed to archive tool`。
 import { useCcpReadOnly } from "@/lib/ccp/access";
+import {
+    CCP_DEFAULT_TOOL_CATEGORY,
+    ccpToolTypeAdmission,
+} from "@/lib/ccp/feature-scope";
 import { ccpDisabledProps, useCcpPageNotice } from "@/lib/ccp/notice-bar";
 
 import {
@@ -68,7 +72,9 @@ export default function ToolsPage() {
     const [isCreateDialogOpen, setIsCreateDialogOpen] = useState(false);
     const [newToolName, setNewToolName] = useState("");
     const [newToolDescription, setNewToolDescription] = useState("");
-    const [newToolCategory, setNewToolCategory] = useState<ToolCategory>("http_api");
+    // task 4.1b：上游預設是 `http_api`，而它在 `blocked_tool_types` 內——
+    // 只做「不可選」會留下一個**當前值即為 disabled 項**的 Select。
+    const [newToolCategory, setNewToolCategory] = useState<ToolCategory>(CCP_DEFAULT_TOOL_CATEGORY);
     const [isCreating, setIsCreating] = useState(false);
     const readOnly = useCcpReadOnly();
     useCcpPageNotice({
@@ -79,9 +85,15 @@ export default function ToolsPage() {
                 + '封存與還原在本部署對所有帳號都不開放，需要時請與您的專案窗口提出。',
         },
         implementer: {
-            title: '封存與還原不經編輯器',
+            // task 4.1：新建面在本部署**只剩一個類型**，而那不是靠「五種／三種」
+            // 這類計數敘述表達的——判準是 `ccpToolTypeAdmission()`。文案只說
+            // 「哪些選不了、為什麼」，數字留給選單自己呈現。
+            title: '工具的新建面在本部署是收窄的',
             message:
-                '本部署未開放經編輯器封存或還原工具（還原沒有內容檢查的對象）。'
+                '建立對話框裡不在啟用集合內的類型一律不可選（選單上會寫原因）；'
+                + '轉接工具雖然是啟用類型，但它的必要欄位由部署層管理，'
+                + '新建時湊不齊，所以也不從這裡建。'
+                + '封存與還原則對所有帳號都未開放（還原沒有內容檢查的對象）。'
                 + '需要調整工具清單時，請依 RUNBOOK 的部署層程序處理。',
         },
     });
@@ -185,7 +197,7 @@ export default function ToolsPage() {
                 setIsCreateDialogOpen(false);
                 setNewToolName("");
                 setNewToolDescription("");
-                setNewToolCategory("http_api");
+                setNewToolCategory(CCP_DEFAULT_TOOL_CATEGORY);
                 setMcpUrl("");
                 setMcpCredentialUuid("");
                 setMcpToolsFilter("");
@@ -565,15 +577,31 @@ export default function ToolsPage() {
                                     <SelectValue />
                                 </SelectTrigger>
                                 <SelectContent>
-                                    {TOOL_CATEGORIES.map((category) => (
-                                        <SelectItem
-                                            key={category.value}
-                                            value={category.value}
-                                            disabled={category.disabled}
-                                        >
-                                            {category.label}
-                                        </SelectItem>
-                                    ))}
+                                    {/* task 4.1：啟用集合外者一律不可選**並附原因**。
+                                        判準是 `ccpToolTypeAdmission()` 的集合運算，
+                                        不是「五種／三種」這類會過期的計數。
+                                        `category.disabled` 是上游自己的
+                                        Coming Soon 旗標，兩者取聯集。 */}
+                                    {TOOL_CATEGORIES.map((category) => {
+                                        const admission = ccpToolTypeAdmission(category.value);
+                                        return (
+                                            <SelectItem
+                                                key={category.value}
+                                                value={category.value}
+                                                disabled={category.disabled || !admission.selectable}
+                                                title={admission.reason || undefined}
+                                            >
+                                                <span className="flex flex-col items-start gap-0.5">
+                                                    <span>{category.label}</span>
+                                                    {!admission.selectable && admission.reason && (
+                                                        <span className="text-xs text-muted-foreground whitespace-normal">
+                                                            {admission.reason}
+                                                        </span>
+                                                    )}
+                                                </span>
+                                            </SelectItem>
+                                        );
+                                    })}
                                 </SelectContent>
                             </Select>
                             <p className="text-xs text-muted-foreground">
