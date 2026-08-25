@@ -358,10 +358,14 @@ export const WorkflowEditorHeader = ({
                 {/* customer-center-platform fork（母 repo W2d task 3.9）：
                     驗證對這個身分不可得時，**說出來**——原本的畫面是「沒有錯誤」，
                     而那是一句沒有人查得證的假話。 */}
+                {/* §3 巡檢 F4：`shrink-0 whitespace-nowrap` 不是裝飾。這個 badge 在
+                    flex row 裡沒有下限，實測同一頁只改視窗寬：1440 一行（140×20）、
+                    1366 兩行、1280 四行、≤1152 **一字一行**（27×200）並溢出頁首壓到畫布。
+                    1280 是常見的筆電寬度 ⇒ 這句話在真實使用寬度上讀不出來。 */}
                 {ccpValidationUnavailable && (
-                    <div className="flex items-center gap-2 px-3 py-1.5 rounded-md border border-gray-500/30 bg-gray-500/10">
-                        <AlertCircle className="w-4 h-4 text-gray-400" />
-                        <span className="text-sm text-gray-300">此身分看不到驗證結果</span>
+                    <div className="flex shrink-0 items-center gap-2 px-3 py-1.5 rounded-md border border-gray-500/30 bg-gray-500/10">
+                        <AlertCircle className="w-4 h-4 shrink-0 text-gray-400" />
+                        <span className="text-sm whitespace-nowrap text-gray-300">此身分看不到驗證結果</span>
                     </div>
                 )}
 

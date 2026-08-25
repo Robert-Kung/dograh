@@ -18,7 +18,7 @@ import { VoiceSelector } from "@/components/VoiceSelector";
 import { LANGUAGE_DISPLAY_NAMES } from "@/constants/languages";
 import { useUserConfig } from "@/context/UserConfigContext";
 // customer-center-platform fork（母 repo W2d task 3.3／3.5）
-import { ccpDisabledProps } from "@/lib/ccp/notice-bar";
+import { ccpDisabledProps, ccpReadOnlyFieldProps } from "@/lib/ccp/notice-bar";
 import type { ModelOverrides } from "@/types/workflow-configurations";
 
 export type ServiceSegment = "llm" | "tts" | "stt" | "embeddings" | "realtime";
@@ -553,6 +553,7 @@ export function ServiceConfigurationForm({
                             onValueChange={(providerName) => {
                                 handleProviderChange(service, providerName);
                             }}
+                            disabled={ccpDisabled}
                         >
                             <SelectTrigger className="w-full">
                                 <SelectValue placeholder="Select provider" />
@@ -623,6 +624,7 @@ export function ServiceConfigurationForm({
                                         newKeys[index] = e.target.value;
                                         setApiKeys(prev => ({ ...prev, [service]: newKeys }));
                                     }}
+                                    {...ccpReadOnlyFieldProps(ccpDisabled)}
                                 />
                                 {apiKeys[service].length > 1 && (
                                     <Button
@@ -736,10 +738,12 @@ export function ServiceConfigurationForm({
                             onChange={(e) => {
                                 setValue(fieldKey, e.target.value, { shouldDirty: true });
                             }}
+                            {...ccpReadOnlyFieldProps(ccpDisabled)}
                         />
                         <div className="flex items-center space-x-2">
                             <Checkbox
                                 id={`custom-input-${fieldKey}`}
+                                disabled={ccpDisabled}
                                 checked={true}
                                 onCheckedChange={(checked) => {
                                     setIsCustomInput(prev => ({ ...prev, [fieldKey]: checked as boolean }));
@@ -764,6 +768,7 @@ export function ServiceConfigurationForm({
                             if (!value) return;
                             setValue(fieldKey, value, { shouldDirty: true });
                         }}
+                        disabled={ccpDisabled}
                     >
                         <SelectTrigger className="w-full">
                             <SelectValue placeholder={`Select ${field}`} />
@@ -779,6 +784,7 @@ export function ServiceConfigurationForm({
                     <div className="flex items-center space-x-2">
                         <Checkbox
                             id={`custom-input-${fieldKey}-dropdown`}
+                            disabled={ccpDisabled}
                             checked={false}
                             onCheckedChange={(checked) => {
                                 setIsCustomInput(prev => ({ ...prev, [fieldKey]: checked as boolean }));
@@ -810,6 +816,7 @@ export function ServiceConfigurationForm({
                         if (!value) return;
                         setValue(`${service}_${field}`, value, { shouldDirty: true });
                     }}
+                    disabled={ccpDisabled}
                 >
                     <SelectTrigger className="w-full">
                         <SelectValue placeholder={`Select ${field}`} />
@@ -831,6 +838,7 @@ export function ServiceConfigurationForm({
                     rows={6}
                     className="font-mono text-xs"
                     placeholder={`Enter ${field}`}
+                    {...ccpReadOnlyFieldProps(ccpDisabled)}
                     {...register(`${service}_${field}`, {
                         required: service !== "embeddings" && providerSchema.required?.includes(field),
                     })}
@@ -843,6 +851,7 @@ export function ServiceConfigurationForm({
                 type={actualSchema?.type === "number" ? "number" : "text"}
                 {...(actualSchema?.type === "number" && { step: "any" })}
                 placeholder={`Enter ${field}`}
+                {...ccpReadOnlyFieldProps(ccpDisabled)}
                 {...register(`${service}_${field}`, {
                     required: service !== "embeddings" && providerSchema.required?.includes(field),
                     valueAsNumber: actualSchema?.type === "number"

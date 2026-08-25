@@ -14,7 +14,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useAuth } from "@/lib/auth";
 // customer-center-platform fork（母 repo W2d task 3.3b）
-import { ccpDisabledProps } from "@/lib/ccp/notice-bar";
+import { ccpDisabledProps, ccpReadOnlyFieldProps } from "@/lib/ccp/notice-bar";
 
 export function TelemetrySection() {
   const { user, loading: authLoading } = useAuth();
@@ -102,6 +102,7 @@ export function TelemetrySection() {
           value={credentials.host}
           onChange={(e) => setCredentials({ ...credentials, host: e.target.value })}
           required
+          {...ccpReadOnlyFieldProps(true)}
         />
       </div>
       <div className="space-y-2">
@@ -112,6 +113,7 @@ export function TelemetrySection() {
           value={credentials.public_key}
           onChange={(e) => setCredentials({ ...credentials, public_key: e.target.value })}
           required
+          {...ccpReadOnlyFieldProps(true)}
         />
       </div>
       <div className="space-y-2">
@@ -123,6 +125,7 @@ export function TelemetrySection() {
           value={credentials.secret_key}
           onChange={(e) => setCredentials({ ...credentials, secret_key: e.target.value })}
           required
+          {...ccpReadOnlyFieldProps(true)}
         />
       </div>
       <div className="flex gap-2">

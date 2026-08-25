@@ -222,3 +222,41 @@ export function ccpDisabledProps(
         },
     };
 }
+
+export interface CcpReadOnlyFieldProps {
+    readOnly?: true;
+    'aria-readonly'?: true;
+    'aria-describedby'?: string;
+    'data-ccp-readonly'?: 'true';
+}
+
+/**
+ * 唯讀頁的**輸入欄位**（§3 巡檢 F5，2026-08-25 拍板取 `readOnly`）。
+ *
+ * 巡檢實測：`/settings` 的五個 input 與 Models 頁的 Provider／Model／Base Url／
+ * API Key 全部 `disabled=false, readOnly=false`，只有 Save 停用。使用者可以改
+ * 一輪、以為改好了，再發現存不了——與「按下去才失敗」同族，只是位置從按鈕
+ * 搬到了欄位。
+ *
+ * **為什麼是 `readOnly` 而不是 `disabled`**：3.3 刻意選了「唯讀但保留呈現」
+ * （要看得到現值）。`disabled` 在部分瀏覽器會掉對比度、長值讀不清，且不可選取
+ * 複製；`readOnly` 仍可聚焦、選取、複製，只是改不動——正好是「唯讀」這件事。
+ *
+ * `aria-readonly` 是給 AT 的；`data-ccp-readonly` 是給 §6 巡檢腳本數的
+ * （判準欄要能機器讀出「這一格已處置」，不能靠人盯畫面）。
+ *
+ * 不適用 `<Button>`——那是 `ccpDisabledProps()` 的事。react-select 這類沒有
+ * `readOnly` 概念的元件用它自己的 `isDisabled`。
+ */
+export function ccpReadOnlyFieldProps(
+    readOnly: boolean,
+    options?: { describedBy?: string },
+): CcpReadOnlyFieldProps {
+    if (!readOnly) return {};
+    return {
+        readOnly: true,
+        'aria-readonly': true,
+        'aria-describedby': options?.describedBy ?? CCP_ACCESS_NOTICE_ID,
+        'data-ccp-readonly': 'true',
+    };
+}

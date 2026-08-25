@@ -22,9 +22,13 @@
  *
  * ## 兜底 MUST NOT 靜默（gate S-12／S-18）
  *
- * 每次觸發至少留一筆可見痕跡：畫面上的 toast、console 的一行、以及
- * `window.__ccpDenials` 的一筆紀錄。第三者是給 §6 巡檢用的——判準欄的
- * 「本頁零非預期 403」需要一個機器讀得到的面，靠人盯畫面數不出來。
+ * 每次觸發至少留一筆可見痕跡：console 的一行、以及 `window.__ccpDenials`
+ * 的一筆紀錄；**寫入方法另外上畫面**（toast）。後者是給 §6 巡檢用的——
+ * 判準欄的「本頁零非預期 403」需要一個機器讀得到的面，靠人盯畫面數不出來。
+ *
+ * **toast 只給寫入方法**（§3 巡檢 F2，見 `PRESENTED_METHODS`）：讀取面的
+ * 403 是常態且與使用者的動作無關，一律上畫面等於把說明面變成雜訊。
+ * 「不靜默」的保證由 console ＋ `__ccpDenials` 承擔，那兩者對**所有**方法都在。
  */
 
 import { toast } from 'sonner';
@@ -60,6 +64,22 @@ function record(entry: CcpDenialRecord) {
     if (typeof window !== 'undefined') window.__ccpDenials = denials;
 }
 
+/**
+ * 上說明面的方法（§3 巡檢 F2）。
+ *
+ * **兜底存在的理由是「列舉式覆蓋面漏掉的**使用者入口**」**（見檔頭）——
+ * 讀取面的常態 403 從來不在那個意圖裡。不分方法一律 toast 的後果已實測：
+ * 每頁載入堆 11–13 則紅色錯誤（sidebar 的 `?_rsc=` 預取 ×10、`/api/config/*`
+ * ×4、`telephony-config-warnings`、`onboarding-state`），使用者一顆按鈕都沒按，
+ * 而頁首的說明條同時在說「這個頁面對您是唯讀的」——兩句話互相打架，
+ * 且錯誤說的是「此**操作**」。
+ *
+ * GET／HEAD 維持 `console.warn` ＋ `window.__ccpDenials`：§6 判準欄①
+ * 「本頁零非預期 403」要的是**機器可讀**的面，那一面完全不受影響。
+ * 導航型的 403 另有閘門的整頁說明（帶「回到工作流清單」），不需要再補一張。
+ */
+const PRESENTED_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
+
 function present(notice: CcpDenialNotice, method: string, path: string) {
     // 同一個入口連按兩下不該疊出兩張一樣的 toast；`id` 讓 sonner 取代前一張。
     const id = `ccp-denial:${notice.kind}:${method}:${path}`;
@@ -67,7 +87,9 @@ function present(notice: CcpDenialNotice, method: string, path: string) {
         // 上游原文**不是**我方文案：標示來源，純文字、已限長（denial.ts）。
         ? `${notice.message}（伺服器訊息：${notice.upstreamDetail}）`
         : notice.message;
-    toast.error(notice.title, { id, description, duration: 8000 });
+    if (PRESENTED_METHODS.has(method)) {
+        toast.error(notice.title, { id, description, duration: 8000 });
+    }
     console.warn(
         `[ccp] 403 兜底 kind=${notice.kind} gateway=${notice.fromGateway} ${method} ${path}`,
     );

@@ -49,9 +49,28 @@ import { useAuth } from "@/lib/auth";
 //     與模型覆寫的 `saveV2Override`／`removeV2Override`，全部走
 //     `PUT /workflow/{id}`（`roles: [implementer]`）。
 // **這頁不在 `WorkflowProvider` 之內**（唯一掛載點是 `RenderWorkflow`），
-// 所以 2.2 的 context 機制對它零作用，只有 app 層的 `useCcpReadOnly()` 到得了。
-import { useCcpReadOnly } from "@/lib/ccp/access";
+// 所以 2.2 的 context 機制對它零作用。§3 巡檢 F3 之後這頁的停用**與角色無關**
+// （欄位層 deny 對兩個角色都成立），所以連 `useCcpReadOnly()` 都不需要了；
+// 角色分流只留在說明條的文案上（`useCcpPageNotice` 自己讀訊號）。
 import { ccpDisabledProps, useCcpPageNotice } from "@/lib/ccp/notice-bar";
+// §3 巡檢 F3（2026-08-25 實機）：這一頁上面那段註解把五個寫入入口判成 (b) ②桶
+// （實施方可寫），依據是 `decide(method, path, role)`——`PUT /workflow/{id}` 的
+// `roles:` 確實是 `[implementer]`。**但授權面還有欄位層那一軸**：
+// `deploy/feature-scope.json` 的 `forbidden_keys` 含 `workflow_configurations`
+// 與 `template_context_variables`，而這頁**五個入口全部帶其中之一**
+// （`saveWorkflowConfigurations` ×3、`saveTemplateContextVariables`、`saveDictionary`）。
+//
+// 實測（實施方 session）：改 Max Call Duration 後按 Save General Settings
+// → `PUT /api/v1/workflow/1` 403 `content-not-permitted`
+// （「定義含排除清單上的欄位：workflow_configurations」）。
+// 只帶 `name` 的 PUT 則 200 ⇒ 擋的是欄位不是路徑。
+//
+// 故實際判定是**兩個角色皆 deny**。這與 task 4.1c 替 `transfer_call` 認出的
+// 是同一軸（「deny 來自 `required_keys` ＋ 遮罩哨兵，不是 `allowed_tool_types`」），
+// 只是當時沒有回頭套用到 `PUT /workflow/{id}`。
+const CCP_SETTINGS_FIELD_DENY =
+    '本部署未開放經編輯器變更這一節：內容含部署層管理的欄位，閘門會擋下';
+
 import logger from "@/lib/logger";
 import {
     type AmbientNoiseConfiguration,
@@ -283,7 +302,6 @@ function GeneralSection({
     workflowId: number;
     onSave: (configurations: WorkflowConfigurations, workflowName: string) => Promise<void>;
 }) {
-    const ccpReadOnly = useCcpReadOnly();
     const [name, setName] = useState(workflowName);
     const [ambientNoiseConfig, setAmbientNoiseConfig] = useState<AmbientNoiseConfiguration>(
         workflowConfigurations.ambient_noise_configuration || DEFAULT_AMBIENT_NOISE_CONFIG,
@@ -675,7 +693,8 @@ function GeneralSection({
                 <Button
                     onClick={handleSave}
                     disabled={isSaving || !isDirty}
-                    {...ccpDisabledProps(ccpReadOnly)}
+                    title={CCP_SETTINGS_FIELD_DENY}
+                    {...ccpDisabledProps(true)}
                 >
                     {isSaving ? "Saving..." : "Save General Settings"}
                 </Button>
@@ -695,7 +714,6 @@ function TemplateVariablesSection({
     templateContextVariables: Record<string, string>;
     onSave: (variables: Record<string, string>) => Promise<void>;
 }) {
-    const ccpReadOnly = useCcpReadOnly();
     const [contextVars, setContextVars] = useState<Record<string, string>>(templateContextVariables);
     const [newKey, setNewKey] = useState("");
     const [newValue, setNewValue] = useState("");
@@ -803,7 +821,8 @@ function TemplateVariablesSection({
                 <Button
                     onClick={handleSave}
                     disabled={isSaving || !isDirty}
-                    {...ccpDisabledProps(ccpReadOnly)}
+                    title={CCP_SETTINGS_FIELD_DENY}
+                    {...ccpDisabledProps(true)}
                 >
                     {isSaving ? "Saving..." : "Save Variables"}
                 </Button>
@@ -823,7 +842,6 @@ function DictionarySection({
     dictionary: string;
     onSave: (dictionary: string) => Promise<void>;
 }) {
-    const ccpReadOnly = useCcpReadOnly();
     const [dictionaryValue, setDictionaryValue] = useState(dictionary);
     const [isSaving, setIsSaving] = useState(false);
 
@@ -868,7 +886,8 @@ function DictionarySection({
                 <Button
                     onClick={handleSave}
                     disabled={isSaving || !isDirty}
-                    {...ccpDisabledProps(ccpReadOnly)}
+                    title={CCP_SETTINGS_FIELD_DENY}
+                    {...ccpDisabledProps(true)}
                 >
                     {isSaving ? "Saving..." : "Save Dictionary"}
                 </Button>
@@ -890,7 +909,6 @@ function VoicemailSection({
     workflowName: string;
     onSave: (configurations: WorkflowConfigurations, workflowName: string) => Promise<void>;
 }) {
-    const ccpReadOnly = useCcpReadOnly();
     const getConfig = (): VoicemailDetectionConfiguration => ({
         ...DEFAULT_VOICEMAIL_DETECTION_CONFIGURATION,
         ...workflowConfigurations.voicemail_detection,
@@ -1031,7 +1049,8 @@ function VoicemailSection({
                 <Button
                     onClick={handleSave}
                     disabled={isSaving || !isDirty}
-                    {...ccpDisabledProps(ccpReadOnly)}
+                    title={CCP_SETTINGS_FIELD_DENY}
+                    {...ccpDisabledProps(true)}
                 >
                     {isSaving ? "Saving..." : "Save Voicemail Settings"}
                 </Button>
@@ -1115,7 +1134,6 @@ function WorkflowModelOverridesSection({
     modelConfigurationLoading: boolean;
     modelConfigurationError: string | null;
 }) {
-    const ccpReadOnly = useCcpReadOnly();
     const savedV2Override = workflowConfigurations.model_configuration_v2_override;
     const hasSavedModelOverride = Boolean(savedV2Override || workflowConfigurations.model_overrides);
     const [overrideEnabled, setOverrideEnabled] = useState(Boolean(savedV2Override));
@@ -1237,7 +1255,7 @@ function WorkflowModelOverridesSection({
                                         : organizationModelConfiguration.effective_configuration
                                 }
                                 submitLabel="Save Model Override"
-                                ccpDisabled={ccpReadOnly}
+                                ccpDisabled={true}
                                 onSave={saveV2Override}
                             />
                         ) : (
@@ -1252,7 +1270,8 @@ function WorkflowModelOverridesSection({
                                         className="mt-3"
                                         onClick={removeV2Override}
                                         disabled={isRemovingOverride}
-                                        {...ccpDisabledProps(ccpReadOnly)}
+                                        title={CCP_SETTINGS_FIELD_DENY}
+                                        {...ccpDisabledProps(true)}
                                     >
                                         {isRemovingOverride ? "Saving..." : "Save Organization Configuration"}
                                     </Button>
@@ -1353,21 +1372,27 @@ function WorkflowSettingsInner({
 
     const [isEmbedDialogOpen, setIsEmbedDialogOpen] = useState(false);
     const [activeSection, setActiveSection] = useState("general");
-    // task 3.5：說明 SHALL 講清楚**哪一半可寫**——這頁同時有 ② 桶與 (a) 兩角色皆
-    // deny 的入口，籠統一句「唯讀」對實施方是錯的（他這頁大部分可寫）。
+    // task 3.5 ＋ §3 巡檢 F3。**原文對實施方是錯的**：它寫「這頁其餘設定您可以
+    // 直接存檔」，而實測五個入口全部 403（見 `CCP_SETTINGS_FIELD_DENY` 上方）。
+    // 那正是 AC5 要消滅的「按下去才失敗」，只是失敗的承諾這次寫在我方的說明條上。
+    // 改寫後兩個角色講同一件事，差別只在「下一步找誰」。
     useCcpPageNotice({
         supervisor: {
             title: '工作流設定對您是唯讀的',
             message:
-                '這頁的一般設定、模型覆寫、語音信箱與變數由負責建置的實施方維護；'
-                + '環境音檔上傳與網站嵌入小工具則對所有帳號都未開放。'
+                '這頁的設定在本部署都不經編輯器變更——一般設定、模型覆寫、'
+                + '語音信箱、變數與發音詞典的內容含部署層管理的欄位，'
+                + '環境音檔上傳與網站嵌入小工具則未開放。'
                 + '需要調整時，請與您的專案窗口提出。',
         },
         implementer: {
-            title: '這頁有兩項不經編輯器變更',
+            title: '這頁的設定不經編輯器變更',
             message:
-                '環境音檔上傳與網站嵌入小工具在本部署是拒絕的（其設定面在部署層）；'
-                + '這頁其餘設定您可以直接存檔。',
+                '一般設定、模型覆寫、語音信箱、變數與發音詞典都會被內容檢查擋下'
+                + '（`workflow_configurations` 與 `template_context_variables` 在排除清單上，'
+                + '見 deploy/feature-scope.json）；環境音檔上傳與網站嵌入小工具亦未開放。'
+                + '請依 RUNBOOK 的部署層程序變更後重新部署。'
+                + '話術本身（節點圖）仍可在編輯器直接存檔。',
         },
     });
     const [modelConfigurationDefaults, setModelConfigurationDefaults] = useState<ModelConfigurationDefaultsV2 | null>(null);

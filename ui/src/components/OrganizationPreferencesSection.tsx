@@ -17,7 +17,7 @@ import { useUserConfig } from "@/context/UserConfigContext";
 import { detailFromError } from "@/lib/apiError";
 import { useAuth } from "@/lib/auth";
 // customer-center-platform fork（母 repo W2d task 3.3b）
-import { ccpDisabledProps } from "@/lib/ccp/notice-bar";
+import { CCP_ACCESS_NOTICE_ID, ccpDisabledProps, ccpReadOnlyFieldProps } from "@/lib/ccp/notice-bar";
 
 const emptyPreferences: OrganizationPreferences = {
   test_phone_number: "",
@@ -202,15 +202,19 @@ export function OrganizationPreferencesSection() {
               })
             }
             placeholder="+15551234567"
+            {...ccpReadOnlyFieldProps(true)}
           />
         </div>
         <div className="space-y-2">
           <Label>Timezone</Label>
+          {/* react-select 沒有 readOnly 的概念，用它自己的 isDisabled（§3 巡檢 F5） */}
           <TimezoneSelect
             instanceId={timezoneSelectId}
             value={timezone}
             onChange={setTimezone}
             styles={timezoneSelectStyles}
+            isDisabled
+            aria-describedby={CCP_ACCESS_NOTICE_ID}
           />
         </div>
       </div>

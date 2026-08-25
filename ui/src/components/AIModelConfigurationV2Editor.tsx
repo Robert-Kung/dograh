@@ -19,7 +19,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { VoiceSelectorModal } from "@/components/VoiceSelectorModal";
 import { LANGUAGE_DISPLAY_NAMES } from "@/constants/languages";
 // customer-center-platform fork（母 repo W2d task 3.3／3.5）
-import { ccpDisabledProps } from "@/lib/ccp/notice-bar";
+import { ccpDisabledProps, ccpReadOnlyFieldProps } from "@/lib/ccp/notice-bar";
 
 type ModelMode = "realtime" | "dograh" | "byok";
 
@@ -419,7 +419,7 @@ export function AIModelConfigurationV2Editor({
 
                                 <div className="space-y-2 sm:col-span-2">
                                     <Label>Language</Label>
-                                    <Select value={dograh.language} onValueChange={(language) => setDograh({ ...dograh, language })}>
+                                    <Select value={dograh.language} onValueChange={(language) => setDograh({ ...dograh, language })} disabled={ccpDisabled}>
                                         <SelectTrigger className="w-full">
                                             <SelectValue placeholder="Select language" />
                                         </SelectTrigger>
@@ -454,6 +454,7 @@ export function AIModelConfigurationV2Editor({
                                                 speed: Number.isFinite(speed) ? speed : defaults.dograh.defaults.speed,
                                             });
                                         }}
+                                        {...ccpReadOnlyFieldProps(ccpDisabled)}
                                     />
                                 </div>
 
@@ -467,6 +468,7 @@ export function AIModelConfigurationV2Editor({
                                             value={dograh.api_key}
                                             onChange={(event) => setDograh({ ...dograh, api_key: event.target.value })}
                                             placeholder="Enter API key"
+                                            {...ccpReadOnlyFieldProps(ccpDisabled)}
                                         />
                                     </div>
                                 </div>
