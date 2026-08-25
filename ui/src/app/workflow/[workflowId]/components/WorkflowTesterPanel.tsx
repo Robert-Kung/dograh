@@ -217,8 +217,16 @@ export function WorkflowTesterPanel({
                                         <Button
                                             ref={runTestButtonRef}
                                             onClick={createVoiceRun}
-                                            disabled={creatingVoiceRun || testerBlocked}
-                                            {...ccpDisabledProps(true)}
+                                            // customer-center-platform fork（§6 巡檢 G1）：
+                                            // 原本是 `disabled={creatingVoiceRun || testerBlocked}`
+                                            // ＋ `ccpDisabledProps(true)`。後者是**無條件**的
+                                            // （語音測試在本部署對兩個角色都不開放，WS 升級一律拒），
+                                            // 所以那個原生 `disabled` 只剩一個效果：**讓這顆不可聚焦**
+                                            // ⇒ 鍵盤與讀屏使用者遇不到它，因而遇不到停用的原因
+                                            // （3.2c 的整個目的）。上游的 busy／blocked 兩個狀態在
+                                            // 這裡不可能被觀察到——按都按不了。
+                                            title="本部署未開放編輯器內的語音測試（WS 升級一律拒）；文字測試可用"
+                                            {...ccpDisabledProps(true, { describedBy: null })}
                                         >
                                             {creatingVoiceRun ? (
                                                 <>

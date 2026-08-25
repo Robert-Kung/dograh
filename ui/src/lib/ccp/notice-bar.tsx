@@ -208,12 +208,30 @@ export interface CcpDisabledProps {
  */
 export function ccpDisabledProps(
     disabled: boolean,
-    options?: { describedBy?: string },
+    options?: { describedBy?: string | null },
 ): CcpDisabledProps {
     if (!disabled) return {};
+    // `describedBy: null` ＝ **這顆自己帶原因**（`title`），不要指向頁面級說明條。
+    //
+    // **為什麼需要這個選項**（§6 巡檢 G1，2026-08-25）：頁面級說明條是
+    // **分角色**渲染的——`writable` 且頁面沒給 implementer 文案時
+    // `CcpAccessNotice` 回 `null`，元素根本不存在。而 ③ 桶（兩角色皆 deny）的
+    // 控制項在那種頁面上照樣是停用的，於是 `aria-describedby` 指到一個
+    // **不存在的 id**：實測 `/workflow/1` 的實施方檢視，`Phone Call` 那顆就是
+    // 這個形狀。懸空的 IDREF 依規範會被丟棄，AT 拿到的描述變成不確定
+    // （多數實作會落回 `title`，但那是實作細節不是契約）。
+    //
+    // **為什麼不改成「說明條一律渲染」**：那會讓可寫身分看到一條他不需要的
+    // 橫幅；而若渲染成 sr-only 的通用句子，AT 讀到的會是**通用句取代了逐項
+    // 原因**——比現況更差。故契約改為二擇一：**指得到說明條**，或
+    // **自己帶 `title`**。§6 的判準欄同批改寫。
+    const describedBy =
+        options && 'describedBy' in options
+            ? options.describedBy
+            : CCP_ACCESS_NOTICE_ID;
     return {
         'aria-disabled': true,
-        'aria-describedby': options?.describedBy ?? CCP_ACCESS_NOTICE_ID,
+        ...(describedBy ? { 'aria-describedby': describedBy } : {}),
         'data-ccp-disabled': 'true',
         onClick: (event: React.MouseEvent<HTMLElement>) => {
             // 鍵盤的 Enter／Space 在 button 上同樣是 click，這一條一併擋住。
@@ -250,13 +268,18 @@ export interface CcpReadOnlyFieldProps {
  */
 export function ccpReadOnlyFieldProps(
     readOnly: boolean,
-    options?: { describedBy?: string },
+    options?: { describedBy?: string | null },
 ): CcpReadOnlyFieldProps {
     if (!readOnly) return {};
+    // `describedBy: null` 的語意同 `ccpDisabledProps`（見該處註解）。
+    const describedBy =
+        options && 'describedBy' in options
+            ? options.describedBy
+            : CCP_ACCESS_NOTICE_ID;
     return {
         readOnly: true,
         'aria-readonly': true,
-        'aria-describedby': options?.describedBy ?? CCP_ACCESS_NOTICE_ID,
+        ...(describedBy ? { 'aria-describedby': describedBy } : {}),
         'data-ccp-readonly': 'true',
     };
 }

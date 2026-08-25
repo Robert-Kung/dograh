@@ -313,7 +313,7 @@ export const PhoneCallDialog = ({
                 <Button
                     onClick={handleConfigureContinue}
                     title="電話設定在部署層，編輯器內不開放"
-                    {...ccpDisabledProps(true)}
+                    {...ccpDisabledProps(true, { describedBy: null })}
                 >
                     Continue
                 </Button>
@@ -408,7 +408,7 @@ export const PhoneCallDialog = ({
                         router.push('/telephony-configurations');
                     }}
                     title="電話設定在部署層，編輯器內不開放"
-                    {...ccpDisabledProps(true)}
+                    {...ccpDisabledProps(true, { describedBy: null })}
                 >
                     Configure Telephony
                 </Button>
@@ -421,7 +421,7 @@ export const PhoneCallDialog = ({
                             onClick={handleStartCall}
                             disabled={callLoading || !phoneNumber}
                             title="本部署未開放自編輯器發話"
-                            {...ccpDisabledProps(true)}
+                            {...ccpDisabledProps(true, { describedBy: null })}
                         >
                             {callLoading ? "Calling..." : "Start Call"}
                         </Button>

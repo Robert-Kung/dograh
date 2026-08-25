@@ -273,7 +273,7 @@ export function ToolSelector({
                                                     disabled={busy}
                                                     onClick={() => doRefresh(tool.tool_uuid)}
                                                     title="本部署未開放自編輯器重整 MCP 工具清單"
-                                                    {...ccpDisabledProps(true)}
+                                                    {...ccpDisabledProps(true, { describedBy: null })}
                                                 >
                                                     <RefreshCw
                                                         className={`h-3 w-3 mr-2 ${busy ? "animate-spin" : ""}`}

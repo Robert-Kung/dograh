@@ -550,7 +550,7 @@ document.getElementById('talk-btn').addEventListener('click', () => {
                                         onClick={handleSave}
                                         disabled={saving}
                                         title="本部署未開放嵌入式小工具"
-                                        {...ccpDisabledProps(true)}
+                                        {...ccpDisabledProps(true, { describedBy: null })}
                                     >
                                         {saving ? (
                                             <>

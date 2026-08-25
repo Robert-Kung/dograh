@@ -230,7 +230,7 @@ export function CreateCredentialDialog({
                         onClick={handleCreate}
                         disabled={!name.trim() || isCreating}
                         title="憑證由平台管理，不經編輯器建立"
-                        {...ccpDisabledProps(true)}
+                        {...ccpDisabledProps(true, { describedBy: null })}
                     >
                         {isCreating ? (
                             <>
