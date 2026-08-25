@@ -591,7 +591,10 @@ export default function ToolsPage() {
                                                 disabled={category.disabled || !admission.selectable}
                                                 title={admission.reason || undefined}
                                             >
-                                                <span className="flex flex-col items-start gap-0.5">
+                                                {/* `max-w-` 不是裝飾：沒有上限時 Radix 的 popper 會撐到最長
+                                                    那一行的寬度，`transfer_call` 那句話會把整個選單拉得比對話框還寬
+                                                    （實測 1030px）。用 trigger 寬度當基準，選單就跟著欄位對齊。 */}
+                                                <span className="flex max-w-[var(--radix-select-trigger-width)] flex-col items-start gap-0.5">
                                                     <span>{category.label}</span>
                                                     {!admission.selectable && admission.reason && (
                                                         <span className="text-xs text-muted-foreground whitespace-normal">
