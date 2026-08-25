@@ -153,7 +153,18 @@ export function CcpAccessNotice({
     const copy: CcpNoticeCopy | null = (() => {
         switch (access.state) {
             case 'loading':
-                return CCP_NOTICE_COPY.loading;
+                // **不渲染**（§6 review F-3）。`loading` 在 SSR 與首次 client paint
+                // 都必為 true（訊號靠 `useEffect` 內的 client-side fetch），所以
+                // 渲染文案＝**每一次整頁載入都先閃一條全寬琥珀色橫幅**：對實施方
+                // 穩態是「沒有橫幅」⇒ 出現、一次往返後消失、下方內容整塊上跳；
+                // 對主管則是同一個 `role="status"` live region 連播兩次不同內容。
+                //
+                // 不渲染不會少掉說明面：**控制項在這一格已經是停用的**
+                // （`resolveAccess` 的 loading 分支回 readOnly=true），各自的 `title`
+                // 也在；訊號到齊後說明條才出現，只有一次進場、沒有回退。
+                // 文案常數保留不刪——它是「這一格是什麼」的說明，且刪了會讓
+                // `CCP_NOTICE_COPY` 的四態少一態、下一個人以為漏了。
+                return null;
             case 'signal-unavailable':
                 // 訊號不可得的文案**不可被覆寫**：頁面自訂的角色說明在這一格
                 // 一定是錯的（我們並不知道使用者是誰）。

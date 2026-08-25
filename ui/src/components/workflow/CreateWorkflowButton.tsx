@@ -103,13 +103,23 @@ export function CreateWorkflowButton() {
                     className="cursor-pointer"
                     // 原因**寫在項目本身**（下面那行 text-xs），而本頁對實施方
                     // 不渲染頁面級說明條 ⇒ 不指向它（§6 巡檢 G1）。
+                    // `title` 是 §6 review F-8 補的：這原本是 12 個
+                    // `describedBy: null` 站點中唯一兩者皆無的一格，實務上 AT 會把
+                    // 子節點文字算進可及名稱所以還能用，但那是實作細節不是契約。
+                    title="本部署未開放由 AI 產生話術"
                     {...ccpDisabledProps(true, { describedBy: null })}
                 >
                     <Bot className="w-4 h-4 mr-2" />
                     <div>
                         <div className="font-medium">Use Agent Builder</div>
                         <div className="text-xs text-muted-foreground">
-                            本部署未開放：這條流程由伺服端產生話術，需由實施方在部署層開啟
+                            {/* 文案分角色（§6 review F-8）：原文無條件寫「需由實施方
+                                在部署層開啟」，而這一顆對**實施方自己**也是停用的
+                                ⇒ 他讀到的是「叫實施方去開」。同一顆按鈕的第二個選項
+                                早就有分角色三元式，不是不會做，是漏了。 */}
+                            {readOnly
+                                ? '本部署未開放：這條流程由伺服端產生話術，請與您的專案窗口提出'
+                                : '本部署未開放：這條流程由伺服端產生話術，改用下方的空白畫布'}
                         </div>
                     </div>
                 </DropdownMenuItem>

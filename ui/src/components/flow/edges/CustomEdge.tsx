@@ -135,8 +135,12 @@ const EdgeDetailsDialog = ({ open, onOpenChange, data, onSave }: EdgeDetailsDial
                 <DialogFooter>
                     <div className="flex items-center gap-2">
                         <Button variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
+                        {/* customer-center-platform fork（母 repo §6 review F-7）：
+                            task 3.8 改了 `NodeEditDialog` 的同型字串卻漏了這一顆
+                            ——同一張畫布上、相鄰的兩種對話框（點節點 vs 點連線）
+                            一個繁中一個英文。這不是 R-Z 的「一致地英文」取捨，是不一致。 */}
                         <Button onClick={handleSave} disabled={readOnly}>
-                            {readOnly ? "Read Only" : "Save"}
+                            {readOnly ? "唯讀" : "Save"}
                         </Button>
                     </div>
                 </DialogFooter>

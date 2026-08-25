@@ -119,7 +119,18 @@ export const NodeEditDialog = ({
                     用 `fieldset[disabled]` 而不是逐個對話框改：每個節點型別的欄位都由
                     `children` 傳進來，逐一改是十幾個檔的 rebase 衝突面，而原生 fieldset
                     會連同裡面的 input／textarea／select／button 一起停用。 */}
-                <fieldset disabled={readOnly} className="grid gap-4 py-4">
+                {/* **例外已登記**（§6 review F-5）：這是全 change 唯一刻意保留原生
+                    `disabled` 的地方，與 3.2c（一律經 `ccpDisabledProps`，保留可聚焦）
+                    及 F5（唯讀欄位取 `readOnly`，保留對比與可選取複製）相反。
+                    代價是**話術本文不可選取複製**——主管最想複製一段去問窗口的東西。
+                    對比那一半以下方的 `data-ccp-node-readonly` 補回；選取那一半補不回，
+                    登記在 `coverage-map.md` 的例外節，落點掛 W3（CS-5 的 UI 表單改動
+                    本來就會逐個節點型別動這些欄位，屆時可換成 `ccpReadOnlyFieldProps`）。 */}
+                <fieldset
+                    disabled={readOnly}
+                    data-ccp-node-readonly={readOnly ? 'true' : undefined}
+                    className="grid gap-4 py-4"
+                >
                     {children}
                 </fieldset>
                 {error && (

@@ -90,7 +90,13 @@ export default function ToolDetailPage() {
     // task 3.7：transfer_call 的設定分屬部署層 ⇒ 兩個角色皆唯讀，說明分角色。
     // 其餘工具走 ② 桶（主管唯讀、實施方可寫）。
     const isTransferCallCategory = tool?.category === "transfer_call";
-    const saveDisabled = readOnly || isTransferCallCategory;
+    // `!tool` 那一項是 §6 review F-9 補的：`tool` 未載入時 `tool?.category` 是
+    // undefined ⇒ `isTransferCallCategory` 為 false ⇒ 對實施方 `saveDisabled` 為
+    // false，而該頁若是 transfer_call 工具，資料到齊後才翻成停用。那個窗口內按下去
+    // 就是欄位層 403——AC5 的形狀，只是窗口很短。
+    // 這條紀律與 `resolveAccess`「訊號未到一律唯讀」是同一條，只是那裡套的是**角色**
+    // 訊號，這裡套的是這一格依賴的**第二個**訊號（工具類型）。
+    const saveDisabled = readOnly || !tool || isTransferCallCategory;
     useCcpPageNotice(
         isTransferCallCategory
             ? {

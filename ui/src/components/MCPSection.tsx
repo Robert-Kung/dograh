@@ -14,15 +14,25 @@ const MCP_PATH = "/api/v1/mcp/";
 
 export function MCPSection() {
   const { config } = useAppConfig();
-  // customer-center-platform fork（母 repo W2d task 5.3c，殘留 R-X 重評）：
-  // 這兩個位址是**基礎設施拓樸**——`backendApiEndpoint` 是部署主機（常是私有 IP）、
-  // `tunnelUrl` 是對外的 Cloudflare tunnel URL，上游把它們渲染成**可複製的 `<code>`**。
-  // W2c 讓主管首次取得這頁的讀取面，W2d 把它從「API 回應裡」搬到「主管天天看的畫面上」。
-  // 主管在本平台**沒有任何用途需要這兩個位址**（MCP 接線是建置單位的工作），故對
-  // 非實施方只給摘要。
-  // **這不是授權執行點**：角色訊號住在瀏覽器裡、可被改寫，真正的邊界是閘門的
-  // `response_filter`（而 `base_url` 形狀的鍵不在它的憑證鍵集合內——R-X 未關閉）。
-  // 訊號不可得時走遮罩側（fail-closed 的方向是少顯示）。
+  // customer-center-platform fork（母 repo W2d task 5.3c；**2026-08-25 文字審計後更正理由**）。
+  //
+  // **這一格是版面整潔，不是機密控制。** 原本的理由寫成「遮住基礎設施拓樸」，
+  // 而那個前提是錯的，兩個值都不是：
+  //   - `tunnelUrl` **早就到不了瀏覽器**——閘門在 `main.py` 的 `_config_version()`
+  //     直接回 `None`（該處註解逐字：「對外隧道位址沒有進頁面的理由」），
+  //     且 `/api/config/version` 由閘門攔在 UI 面全拒之前自產。`endpoints` 因此
+  //     **對兩個角色都只有一個元素**。
+  //   - `backendApiEndpoint` 等於 `EDITOR_PUBLIC_ORIGIN`（override 的
+  //     `BACKEND_API_ENDPOINT`）——也就是**使用者網址列上那個位址**，不是私有 IP。
+  //
+  // 真正剩下的理由只有一條，而它成立：主管在本平台**用不到**這個端點
+  //（MCP 接線是建置單位的工作，且 MCP authoring 本身是 CS-2「不一定開」），
+  // 給他一個帶複製鈕的 `<code>` 只是噪音。
+  //
+  // **MUST NOT 被讀成保密**：`backendApiEndpoint` 仍在 `/api/config/version` 的
+  // 回應裡、任何角色都取得到（閘門那支沒有角色分支），也還在 SDK 的 baseUrl 與
+  // devtools 的 Network 面板上。角色訊號本來就住在瀏覽器裡、可被改寫。
+  // 訊號不可得時走不顯示那側（保守的呈現預設）。
   const { role } = useCcpAccess();
   const showEndpoints = role === "implementer";
   // Backend URL: the address the deployment runs on (a private IP when the backend
