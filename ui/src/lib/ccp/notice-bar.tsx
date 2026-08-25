@@ -236,6 +236,10 @@ export function ccpDisabledProps(
     // 橫幅；而若渲染成 sr-only 的通用句子，AT 讀到的會是**通用句取代了逐項
     // 原因**——比現況更差。故契約改為二擇一：**指得到說明條**，或
     // **自己帶 `title`**。§6 的判準欄同批改寫。
+    // `'describedBy' in options` 而不是 `?? 預設`：**`null` 要能表達「不要指」**。
+    // 代價（§6 review L-3）：顯式傳 `{describedBy: undefined}` 也會落進不指那一支
+    // ——與 `null` 同義。呼叫端沒有這樣寫的（12 個站點逐一看過），且真的要預設
+    // 就別傳這個鍵；但這是一顆「傳 undefined 就默默失去說明」的地雷，記在這裡。
     const describedBy =
         options && 'describedBy' in options
             ? options.describedBy
