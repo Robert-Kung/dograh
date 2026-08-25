@@ -101,7 +101,9 @@ export function CreateWorkflowButton() {
                 <DropdownMenuItem
                     onClick={handleAgentBuilder}
                     className="cursor-pointer"
-                    {...ccpDisabledProps(true)}
+                    // 原因**寫在項目本身**（下面那行 text-xs），而本頁對實施方
+                    // 不渲染頁面級說明條 ⇒ 不指向它（§6 巡檢 G1）。
+                    {...ccpDisabledProps(true, { describedBy: null })}
                 >
                     <Bot className="w-4 h-4 mr-2" />
                     <div>

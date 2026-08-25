@@ -445,7 +445,7 @@ export const WorkflowEditorHeader = ({
                         disabled={isCallDisabled}
                         onClick={onPhoneCallClick}
                         title="本部署未開放自編輯器發話"
-                        {...ccpDisabledProps(true)}
+                        {...ccpDisabledProps(true, { describedBy: null })}
                     >
                         <Phone className="w-4 h-4" />
                         Phone Call
@@ -496,7 +496,7 @@ export const WorkflowEditorHeader = ({
                             onClick={() => router.push(`/workflow/${workflowId}/runs`)}
                             className="text-white hover:bg-[#2a2a2a] cursor-pointer"
                             title="本部署未開放通話紀錄"
-                            {...ccpDisabledProps(true)}
+                            {...ccpDisabledProps(true, { describedBy: null })}
                         >
                             <History className="w-4 h-4 mr-2" />
                             View Runs
@@ -506,7 +506,7 @@ export const WorkflowEditorHeader = ({
                             disabled={duplicating}
                             className="text-white hover:bg-[#2a2a2a] cursor-pointer"
                             title="本部署未開放複製話術（伺服端產生內容）"
-                            {...ccpDisabledProps(true)}
+                            {...ccpDisabledProps(true, { describedBy: null })}
                         >
                             {duplicating ? (
                                 <LoaderCircle className="w-4 h-4 mr-2 animate-spin" />
