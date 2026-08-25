@@ -55,9 +55,13 @@ export const CCP_ACCESS_FALLBACK: CcpAccess = {
  * provider 窄化到 `LocalUser`（W2d task 2.3）。`as any` 會讓型別擋不住任何東西，
  * 而「TS 會擋」正是那條 task 存在的理由。
  *
- * 參數型別在這裡刻意寫成**結構型**而不是 import `AuthUser`：那個型別鏈會把
- * `@stackframe/stack` 拉進來，本檔就不再是零依賴、也就測不動了。呼叫端
- * （`access.tsx`）傳的仍是 `AuthUser`，結構相容。
+ * 參數型別在這裡刻意寫成 `unknown` 而不是 import `AuthUser`：那個型別鏈會把
+ * `@stackframe/stack` 拉進來，本檔就不再是零依賴、也就測不動了。
+ *
+ * **但「TS 會擋」那條紀律沒有因此消失**（§6 review M-8）：`access.tsx` 有一層
+ * 薄包裝把參數釘回 `AuthUser | null`，型別護欄留在 fork 邊界上。上游 rebase
+ * 改了 `LocalUser` 的欄位名時，紅的是那一層——而不是靜默讓所有人落
+ * `signal-unavailable`（fail-closed 沒錯，但那是 build 期發現不了的功能全失）。
  */
 export function localRole(user: unknown): string | null {
     if (!user) return null;

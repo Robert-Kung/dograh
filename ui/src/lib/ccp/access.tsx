@@ -37,10 +37,11 @@
 import React, { createContext, useContext, useEffect, useMemo } from 'react';
 
 import { useAuth } from '@/lib/auth';
+import type { AuthUser } from '@/lib/auth/types';
 
 import {
     CCP_ACCESS_FALLBACK as FALLBACK,
-    resolveAccess,
+    resolveAccess as resolveAccessUntyped,
 } from './access-rules';
 import type { CcpAccess } from './access-rules';
 import { installCcpDenialFallback } from './denial-fallback';
@@ -56,12 +57,32 @@ export {
     CCP_KNOWN_ROLES,
     CCP_ACCESS_FALLBACK,
     localRole,
-    resolveAccess,
     WRITABLE_ROLES,
 } from './access-rules';
+// `resolveAccess` **不自 `./access-rules` re-export**：本檔上方那層薄包裝才是
+// 帶型別的版本（§6 review M-8）。純判定要測時直接 import `./access-rules`。
+export { resolveAccess };
 export type { CcpAccess, CcpAccessState, CcpRole } from './access-rules';
 
 const CcpAccessContext = createContext<CcpAccess>(FALLBACK);
+
+/**
+ * **型別護欄回到 fork 邊界上**（§6 review M-8）。
+ *
+ * `access-rules.ts` 的參數是 `unknown`，那是它保持零依賴（＝可用上游的 `.mts`
+ * 慣例測）的代價：`AuthUser` 的型別鏈會把 `@stackframe/stack` 拉進來。
+ * 但 task 2.3 的整個理由是「**TS 會擋**」——上游 rebase 後 `LocalUser` 的欄位
+ * 改名時要在 build 期就紅，而不是靜默讓每個人落 `signal-unavailable`
+ * （方向是 fail-closed，但那是一次沒人會在 build 期發現的**功能全失**：
+ * 實施方的整個編輯器變唯讀，而畫面說的是「取不到權限訊號」）。
+ */
+function resolveAccess(args: {
+    loading: boolean;
+    isAuthenticated: boolean;
+    user: AuthUser | null;
+}): CcpAccess {
+    return resolveAccessUntyped(args);
+}
 
 export function CcpAccessProvider({ children }: { children: React.ReactNode }) {
     const { user, isAuthenticated, loading } = useAuth();
