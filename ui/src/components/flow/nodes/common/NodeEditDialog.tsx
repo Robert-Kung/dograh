@@ -113,9 +113,15 @@ export const NodeEditDialog = ({
                         </div>
                     )}
                 </DialogHeader>
-                <div className="grid gap-4 py-4">
+                {/* customer-center-platform fork（母 repo W2d task 2.2d）：唯讀要及於
+                    **欄位**，不只送出鈕。上游只 disable 了 Save，欄位仍可編輯 ⇒ 主管打完
+                    整段話術才發現存不了，關掉時再吃一個英文 "Discard changes?"。
+                    用 `fieldset[disabled]` 而不是逐個對話框改：每個節點型別的欄位都由
+                    `children` 傳進來，逐一改是十幾個檔的 rebase 衝突面，而原生 fieldset
+                    會連同裡面的 input／textarea／select／button 一起停用。 */}
+                <fieldset disabled={readOnly} className="grid gap-4 py-4">
                     {children}
-                </div>
+                </fieldset>
                 {error && (
                     <div className="flex items-center gap-2 rounded-md bg-red-50 p-3 text-sm text-red-600 border border-red-200">
                         <AlertCircle className="h-4 w-4 flex-shrink-0" />
@@ -131,7 +137,10 @@ export const NodeEditDialog = ({
                             Cancel
                         </Button>
                         <Button onClick={handleSave} disabled={readOnly}>
-                            {readOnly ? "Read Only" : "Save"}
+                            {/* customer-center-platform fork（母 repo W2d task 3.8）：
+                                本 change 新增的說明面為繁中；這顆上游的 "Read Only"
+                                隨 2.2d 一併處置。 */}
+                            {readOnly ? "唯讀" : "Save"}
                         </Button>
                     </div>
                 </DialogFooter>

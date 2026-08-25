@@ -16,6 +16,9 @@ import { OnboardingProvider } from "@/context/OnboardingContext";
 import { OrgConfigProvider } from "@/context/OrgConfigContext";
 import { TelephonyConfigWarningsProvider } from "@/context/TelephonyConfigWarningsContext";
 import { AuthProvider } from "@/lib/auth";
+// customer-center-platform fork（母 repo W2d task 2.1）：app 層唯讀訊號。
+// 必須在 AuthProvider 之內——它消費 useAuth()。
+import { CcpAccessProvider } from "@/lib/ccp/access";
 
 
 const geistSans = Geist({
@@ -68,6 +71,8 @@ export default function RootLayout({
         <ThemeProvider attribute="class" defaultTheme="dark" enableSystem={false} disableTransitionOnChange>
           <SentryErrorBoundary>
             <AuthProvider>
+              {/* fork patch 刻意不重排下方縮排：每次 rebase 的衝突面就只有這兩行。 */}
+              <CcpAccessProvider>
               <AppConfigProvider>
                 <Suspense fallback={<SpinLoader />}>
                   <OrgConfigProvider>
@@ -84,6 +89,7 @@ export default function RootLayout({
                   </OrgConfigProvider>
                 </Suspense>
               </AppConfigProvider>
+              </CcpAccessProvider>
             </AuthProvider>
           </SentryErrorBoundary>
         </ThemeProvider>
