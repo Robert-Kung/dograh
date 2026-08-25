@@ -34,11 +34,12 @@
  * （訊號不可得），兩者 MUST NOT 共用同一段說明文案。
  */
 
-import React, { createContext, useContext, useMemo } from 'react';
+import React, { createContext, useContext, useEffect, useMemo } from 'react';
 
 import { useAuth } from '@/lib/auth';
 import type { AuthUser } from '@/lib/auth/types';
 
+import { installCcpDenialFallback } from './denial-fallback';
 import { CCP_FORK_MARKER } from './fork-marker';
 
 /** 閘門 `allowlist.py` 的 `KNOWN_ROLES`。這裡刻意列舉而非接受任何字串——
@@ -106,6 +107,13 @@ export function resolveAccess(args: {
 
 export function CcpAccessProvider({ children }: { children: React.ReactNode }) {
     const { user, isAuthenticated, loading } = useAuth();
+
+    // 全域 403 兜底（W2d task 3.0）。掛在這裡是因為這是 fork 在 root layout
+    // 上唯一的接點——多一個 provider 就多一段 rebase 衝突面。安裝本身冪等，
+    // strict mode 跑兩次不會疊出兩張 toast。
+    useEffect(() => {
+        installCcpDenialFallback();
+    }, []);
 
     const value = useMemo(
         () => resolveAccess({ loading, isAuthenticated, user }),

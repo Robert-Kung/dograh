@@ -323,3 +323,12 @@
   box-shadow: none;
   border-bottom-color: var(--cta);
 }
+
+/* customer-center-platform fork（母 repo W2d task 3.2c）：以 `aria-disabled` 停用的
+   入口。原生 `disabled` 不進 tab 序，鍵盤與螢幕閱讀器使用者遇不到那顆按鈕，也就
+   遇不到「為什麼不能按」——`ccpDisabledProps()`（`src/lib/ccp/notice-bar.tsx`）因此
+   保留可聚焦性，視覺上的停用態由這裡統一給，呼叫端不必各自記得帶 className。 */
+[data-ccp-disabled="true"] {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
