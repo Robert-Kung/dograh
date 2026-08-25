@@ -22,6 +22,8 @@ import { NodeSpec, WorkflowError } from "@/client/types.gen";
 import { useNodeSpecs } from "@/components/flow/renderer";
 import { FlowEdge, FlowNode, FlowNodeData, NodeType } from "@/components/flow/types";
 import { PostHogEvent } from "@/constants/posthog-events";
+// customer-center-platform fork（母 repo W2d task 2.2c／2.2e）：app 層唯讀訊號。
+import { useCcpReadOnly } from '@/lib/ccp/access';
 import logger from '@/lib/logger';
 import { getNextNodeId, getRandomId } from "@/lib/utils";
 import { DEFAULT_WORKFLOW_CONFIGURATIONS, WorkflowConfigurations } from "@/types/workflow-configurations";
@@ -109,6 +111,18 @@ export const useWorkflowState = ({
     initialWorkflowConfigurations,
     user,
 }: UseWorkflowStateProps) => {
+    // customer-center-platform fork（母 repo W2d task 2.2c／2.2e）。
+    //
+    // 這一層要自己拿唯讀訊號，不能只靠 `RenderWorkflow` 的 `guardedSaveWorkflow`：
+    // ①Cmd/Ctrl+S 的 handler 就在這個檔裡，呼叫的是**未包裝的** `saveWorkflow`；
+    // ②`saveWorkflowConfigurations` 的唯一使用頁 `/workflow/{id}/settings`
+    //   **不在** `WorkflowProvider` 之內（全 repo 唯一掛載點是 `RenderWorkflow`），
+    //   所以 `WorkflowContext.readOnly` 對它完全構不到。
+    // app 層的 `CcpAccessProvider` 掛在 root layout，兩條路徑都到得了。
+    //
+    // 這裡擋的是**版本無關**的那一軸（角色訊號）。看歷史版本那一軸仍由
+    // `guardedSaveWorkflow` 負責——它才知道 `isViewingHistoricalVersion`。
+    const ccpReadOnly = useCcpReadOnly();
     const router = useRouter();
     const rfInstance = useRef<ReactFlowInstance<FlowNode, FlowEdge> | null>(null);
 
@@ -301,6 +315,12 @@ export const useWorkflowState = ({
 
     // Save workflow function. Returns version info from the API response.
     const saveWorkflow = useCallback(async (updateWorkflowDefinition: boolean = true): Promise<{ versionNumber?: number; versionStatus?: string } | undefined> => {
+        // customer-center-platform fork（母 repo W2d task 2.2c）：擋在源頭而不是只擋
+        // Cmd+S 的 handler——這支還有其他未包裝的呼叫端，逐一補守門式會漏。
+        if (ccpReadOnly) {
+            logger.warn('saveWorkflow suppressed: session is read-only');
+            return;
+        }
         if (!user?.id || !rfInstance.current) return;
         // Read nodes/edges from the Zustand store (synchronously up-to-date)
         // and viewport from the ReactFlow instance to build the flow object.
@@ -392,9 +412,13 @@ export const useWorkflowState = ({
         validateWorkflow,
         applyWorkflowErrors,
         specs,
+        ccpReadOnly,
     ]);
 
-    // Set up keyboard shortcut for save (Cmd/Ctrl + S)
+    // Set up keyboard shortcut for save (Cmd/Ctrl + S).
+    // customer-center-platform fork（母 repo W2d task 2.2c）：這條路徑呼叫的是
+    // **未包裝的** `saveWorkflow`，不是 `RenderWorkflow` 的 `guardedSaveWorkflow`。
+    // 唯讀守門式因此放在 `saveWorkflow` 內部（見上），不在這個 handler 裡。
     useEffect(() => {
         const handleKeyDown = (e: KeyboardEvent) => {
             if ((e.metaKey || e.ctrlKey) && e.key === 's') {
@@ -462,6 +486,14 @@ export const useWorkflowState = ({
 
     // Save template context variables
     const saveTemplateContextVariables = useCallback(async (variables: Record<string, string>) => {
+        // customer-center-platform fork（母 repo W2d task 2.2e）：第二／三／四條未經
+        // `guardedSaveWorkflow` 的存檔路徑。2.2e 只點名 `saveWorkflowConfigurations`，
+        // 另兩支是同一形狀（同一個 PUT、同樣不在 `WorkflowProvider` 之內），同批納入。
+        // 這是**兜底**——各頁的控制項本身由 3.5 依角色停用，走到這裡表示前面漏了。
+        if (ccpReadOnly) {
+            logger.warn('saveTemplateContextVariables suppressed: session is read-only');
+            return;
+        }
         if (!user?.id) return;
         try {
             await updateWorkflowApiV1WorkflowWorkflowIdPut({
@@ -480,10 +512,18 @@ export const useWorkflowState = ({
             logger.error(`Error saving template context variables: ${error}`);
             throw error;
         }
-    }, [workflowId, workflowName, user, setTemplateContextVariables]);
+    }, [workflowId, workflowName, user, setTemplateContextVariables, ccpReadOnly]);
 
     // Save workflow configurations
     const saveWorkflowConfigurations = useCallback(async (configurations: WorkflowConfigurations, newWorkflowName: string) => {
+        // customer-center-platform fork（母 repo W2d task 2.2e）：第二／三／四條未經
+        // `guardedSaveWorkflow` 的存檔路徑。2.2e 只點名 `saveWorkflowConfigurations`，
+        // 另兩支是同一形狀（同一個 PUT、同樣不在 `WorkflowProvider` 之內），同批納入。
+        // 這是**兜底**——各頁的控制項本身由 3.5 依角色停用，走到這裡表示前面漏了。
+        if (ccpReadOnly) {
+            logger.warn('saveWorkflowConfigurations suppressed: session is read-only');
+            return;
+        }
         if (!user?.id) return;
         // Preserve the current dictionary when saving other configurations
         const currentDictionary = useWorkflowStore.getState().dictionary;
@@ -526,10 +566,18 @@ export const useWorkflowState = ({
             logger.error(`Error saving workflow configurations: ${error}`);
             throw error;
         }
-    }, [workflowId, user, setWorkflowConfigurations]);
+    }, [workflowId, user, setWorkflowConfigurations, ccpReadOnly]);
 
     // Save dictionary
     const saveDictionary = useCallback(async (newDictionary: string) => {
+        // customer-center-platform fork（母 repo W2d task 2.2e）：第二／三／四條未經
+        // `guardedSaveWorkflow` 的存檔路徑。2.2e 只點名 `saveWorkflowConfigurations`，
+        // 另兩支是同一形狀（同一個 PUT、同樣不在 `WorkflowProvider` 之內），同批納入。
+        // 這是**兜底**——各頁的控制項本身由 3.5 依角色停用，走到這裡表示前面漏了。
+        if (ccpReadOnly) {
+            logger.warn('saveDictionary suppressed: session is read-only');
+            return;
+        }
         if (!user) return;
         const currentConfigurations = useWorkflowStore.getState().workflowConfigurations ?? DEFAULT_WORKFLOW_CONFIGURATIONS;
         const updatedConfigurations: WorkflowConfigurations = { ...currentConfigurations, dictionary: newDictionary };
@@ -550,7 +598,7 @@ export const useWorkflowState = ({
             logger.error(`Error saving dictionary: ${error}`);
             throw error;
         }
-    }, [workflowId, workflowName, user, setDictionary, setWorkflowConfigurations]);
+    }, [workflowId, workflowName, user, setDictionary, setWorkflowConfigurations, ccpReadOnly]);
 
     // Update rfInstance when it changes
     useEffect(() => {

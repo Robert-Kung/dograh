@@ -19,6 +19,8 @@ import { Button } from '@/components/ui/button';
 import { Sheet, SheetContent } from '@/components/ui/sheet';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { useOnboarding } from '@/context/OnboardingContext';
+// customer-center-platform fork（母 repo W2d task 2.2）：app 層唯讀訊號。
+import { useCcpReadOnly } from '@/lib/ccp/access';
 import { WorkflowConfigurations } from '@/types/workflow-configurations';
 
 import AddNodePanel from "../../../components/flow/AddNodePanel";
@@ -229,6 +231,19 @@ function RenderWorkflow({
         return true;
     }, [activeVersionId, versions, hasDraft]);
 
+    // customer-center-platform fork（母 repo W2d task 2.2／2.2b）。
+    //
+    // 編輯器有**兩個**互相獨立的唯讀來源：看歷史版本（上游既有），以及角色訊號說
+    // 這個人不能寫（本平台新增；訊號不可得時也算）。所有互動旗標、守門式與鍵盤捷徑
+    // 一律讀這個 OR 之後的值——只改下面 context 的 `readOnly` 一處是不夠的：
+    // 拖節點、連線、Backspace 刪、Add node 面板今天全部**直接**讀
+    // `isViewingHistoricalVersion`，主管會變成「改得動但存不了」，比「按了報錯」更糟。
+    //
+    // `isViewingHistoricalVersion` 本身保留給**版本**語意的地方（回到草稿、版本標籤、
+    // 測試器的「先回草稿」提示），那些文案對唯讀角色講不通。
+    const ccpReadOnly = useCcpReadOnly();
+    const isReadOnly = ccpReadOnly || isViewingHistoricalVersion;
+
     useEffect(() => {
         if (!isViewingHistoricalVersion) {
             return;
@@ -417,12 +432,21 @@ function RenderWorkflow({
         [rfInstance],
     );
 
-    // Guard saveWorkflow so it's a no-op when viewing a historical version.
-    // This is the single safety net that covers every save path: header button,
-    // Cmd+S, node edit dialogs, stale doc/tool cleanup, etc.
+    // Guard saveWorkflow so it's a no-op while the editor is read-only — either
+    // because we're viewing a historical version or because the role signal says
+    // this session can't write (customer-center-platform fork, W2d task 2.2b①).
+    //
+    // This guard covers the save paths that go through this callback: header
+    // button, node edit dialogs, stale doc/tool cleanup, etc. It does **not**
+    // cover Cmd/Ctrl+S — that handler lives in useWorkflowState and calls the
+    // unwrapped saveWorkflow directly, so it carries its own guard. The comment
+    // that used to sit here claimed this was "the single safety net that covers
+    // every save path: header button, Cmd+S, node edit dialogs" — the Cmd+S half
+    // of that was already false before this fork touched it (W2d task 2.2c).
+    //
     // Uses the save response to immediately update version label and hasDraft.
     const guardedSaveWorkflow = useCallback(async (updateWorkflowDefinition?: boolean) => {
-        if (isViewingHistoricalVersion) return;
+        if (isReadOnly) return;
         const result = await saveWorkflow(updateWorkflowDefinition);
         if (result) {
             // If the versions list has been fetched (user interacted with versioning
@@ -438,7 +462,7 @@ function RenderWorkflow({
                 if (result.versionStatus) setCurrentVersionStatus(result.versionStatus);
             }
         }
-    }, [saveWorkflow, isViewingHistoricalVersion, fetchVersions]);
+    }, [saveWorkflow, isReadOnly, fetchVersions]);
 
     const renameWorkflow = useCallback(async (newName: string) => {
         // The header doesn't render the pencil until the page has mounted with
@@ -469,14 +493,14 @@ function RenderWorkflow({
         tools,
         updateTool,
         recordings,
-        readOnly: isViewingHistoricalVersion,
+        readOnly: isReadOnly,
     }), [
         guardedSaveWorkflow,
         documents,
         tools,
         updateTool,
         recordings,
-        isViewingHistoricalVersion,
+        isReadOnly,
     ]);
 
     return (
@@ -516,7 +540,7 @@ function RenderWorkflow({
                                 onEdgesChange={onEdgesChange}
                                 nodeTypes={nodeTypes}
                                 edgeTypes={edgeTypes}
-                                onConnect={isViewingHistoricalVersion ? undefined : onConnect}
+                                onConnect={isReadOnly ? undefined : onConnect}
                                 minZoom={0.4}
                                 onInit={(instance) => {
                                     rfInstance.current = instance;
@@ -527,11 +551,11 @@ function RenderWorkflow({
                                 }}
                                 defaultEdgeOptions={defaultEdgeOptions}
                                 defaultViewport={initialFlow?.viewport}
-                                nodesDraggable={!isViewingHistoricalVersion}
-                                nodesConnectable={!isViewingHistoricalVersion}
-                                edgesReconnectable={!isViewingHistoricalVersion}
+                                nodesDraggable={!isReadOnly}
+                                nodesConnectable={!isReadOnly}
+                                edgesReconnectable={!isReadOnly}
                                 zoomOnDoubleClick={false}
-                                deleteKeyCode={isViewingHistoricalVersion ? null : "Backspace"}
+                                deleteKeyCode={isReadOnly ? null : "Backspace"}
                             >
                                 <Background
                                     variant={BackgroundVariant.Dots}
@@ -540,8 +564,12 @@ function RenderWorkflow({
                                     color="#94a3b8"
                                 />
 
-                                {/* Top-right controls - vertical layout (hidden when viewing history) */}
-                                {!isViewingHistoricalVersion && (
+                                {/* Top-right controls - vertical layout (hidden while read-only) */}
+                                {/* customer-center-platform fork（母 repo W2d task 2.2b）：
+                                    Add node 面板。維持上游「唯讀就整個不畫」的形狀——
+                                    「停用 ＋ 說明」vs「隱藏」的最終選擇由 3.2b 定案，
+                                    見該 task 對這兩個 canvas 控制項的登記。 */}
+                                {!isReadOnly && (
                                     <Panel position="top-right">
                                         <TooltipProvider>
                                             <div className="flex flex-col gap-2">
@@ -633,7 +661,10 @@ function RenderWorkflow({
                                         </TooltipContent>
                                     </Tooltip>
 
-                                    {!isViewingHistoricalVersion && (
+                                    {/* customer-center-platform fork（母 repo W2d task 2.2b）：
+                                        Tidy Up **不在** 2.2b 的枚舉內，但它 `setIsDirty(true)`
+                                        ⇒ 對唯讀身分正是該 task 要擋的「改了白改」。同批納入。 */}
+                                    {!isReadOnly && (
                                         <Tooltip>
                                             <TooltipTrigger asChild>
                                                 <Button
