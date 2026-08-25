@@ -8,11 +8,23 @@ import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { useAppConfig } from "@/context/AppConfigContext";
 import { resolveBrowserBackendUrl } from "@/lib/apiClient";
+import { useCcpAccess } from "@/lib/ccp/access";
 
 const MCP_PATH = "/api/v1/mcp/";
 
 export function MCPSection() {
   const { config } = useAppConfig();
+  // customer-center-platform fork（母 repo W2d task 5.3c，殘留 R-X 重評）：
+  // 這兩個位址是**基礎設施拓樸**——`backendApiEndpoint` 是部署主機（常是私有 IP）、
+  // `tunnelUrl` 是對外的 Cloudflare tunnel URL，上游把它們渲染成**可複製的 `<code>`**。
+  // W2c 讓主管首次取得這頁的讀取面，W2d 把它從「API 回應裡」搬到「主管天天看的畫面上」。
+  // 主管在本平台**沒有任何用途需要這兩個位址**（MCP 接線是建置單位的工作），故對
+  // 非實施方只給摘要。
+  // **這不是授權執行點**：角色訊號住在瀏覽器裡、可被改寫，真正的邊界是閘門的
+  // `response_filter`（而 `base_url` 形狀的鍵不在它的憑證鍵集合內——R-X 未關閉）。
+  // 訊號不可得時走遮罩側（fail-closed 的方向是少顯示）。
+  const { role } = useCcpAccess();
+  const showEndpoints = role === "implementer";
   // Backend URL: the address the deployment runs on (a private IP when the backend
   // sits on one). Tunnel URL, when present: the publicly reachable Cloudflare tunnel
   // URL externally-hosted assistants should use to reach an otherwise-private host.
@@ -58,8 +70,13 @@ export function MCPSection() {
             金鑰由建置單位配發，請與您的專案窗口索取。
           </span>
         </p>
+        {!showEndpoints && (
+          <p className="text-xs text-muted-foreground">
+            端點位址（部署主機／對外通道）不在本畫面呈現，請與您的專案窗口索取。
+          </p>
+        )}
         <div className="grid gap-3">
-          {endpoints.map(({ key, label, url }) => (
+          {showEndpoints && endpoints.map(({ key, label, url }) => (
             <div key={key} className="grid gap-1">
               {endpoints.length > 1 && (
                 <span className="text-xs font-medium text-muted-foreground">
@@ -86,7 +103,7 @@ export function MCPSection() {
             </div>
           ))}
         </div>
-        {tunnelUrl && (
+        {showEndpoints && tunnelUrl && (
           <p className="text-xs text-muted-foreground">
             Use the public URL from externally-hosted assistants; the backend URL
             works from the deployment&apos;s own network.
