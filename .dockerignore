@@ -8,9 +8,19 @@ api/.env*
 .env
 **/.env
 **/.env.*
-# 範本檔不含實值，且 1.2j 的權限檢查明文排除它們——保留。
-!**/.env.example
-!**/.env.test.example
+# **兩條 `!` 反排除已移除（母 repo W2d task 7.4 從零演練實測，2026-08-26）。**
+# `.dockerignore` 是後匹配優先：這兩行把第 3 行 `api/.env*` 已排掉的
+# `api/.env.example`／`api/.env.test.example` **又放回 build context**，於是
+# 它們進了 `ccp-dograh-api:local` 的層，被母 repo `deploy/bin/scan-image-secrets.sh`
+# 的檔名規則（`(^|/)\.env(\..*)?$`，task 11.7）擋下，`platform-up.sh` 直接失敗。
+# 第一趟演練（本 commit 之前的指標）掃描是綠的——回歸由 1.2d 這兩行引入。
+#
+# 選擇「不讓範本進映像」而不是「放寬 11.7 的檔名規則」：範本在交付映像內
+# **零用途**（`api/Dockerfile`／`ui/Dockerfile` 皆不提及；引用它們的
+# `scripts/setup_fork.sh`、`.devcontainer/scripts/post-create.sh` 與文件都跑在
+# checkout 上，不在映像裡），而 11.7 的價值正是它是不需判斷的形狀規則。
+# `.dockerignore` 只影響 build context，不動工作副本——開發者的 checkout 照舊有這兩個檔。
+# 1.2j 的權限檢查仍明文排除範本檔，與本項無關。
 .git
 .github
 .claude
