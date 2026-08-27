@@ -521,8 +521,13 @@ def test_executor_rejects_a_second_at():
     assert not valid_destination("sip:queue@pbx.example@evil.com")
     assert not valid_destination("sip:pbx.example")  # user@host，不是裸 host
     assert not valid_destination("sip:queue@")
-    # 交付態現值與一般形不得被這次收緊擋掉
-    assert valid_destination("sip:human-queue@127.0.0.1")
+    # 一般形不得被這次收緊擋掉。**MUST NOT 在此斷言某一台部署的 `.env` 現值**
+    # （2026-08-27 母 repo archive 前 security review S-4）：原本這行寫的是交付態
+    # `DOGRAH_TRANSFER_DESTINATION` 的**字面現值**，於是①換一台部署就得改測試，
+    # 或反過來為了讓測試綠而遷就 `.env`——設定與 enforcement 被綁在一起；
+    # ②該值隨映像與 public fork 出貨（本例是 loopback，無曝險，但形狀是壞的）。
+    # 這裡要驗的是**形狀**：user@裸 IP、不帶 port。
+    assert valid_destination("sip:queue@127.0.0.1")
     assert valid_destination("sip:queue@pbx.example:5070")
     assert valid_destination("tel:+886223456789")
 

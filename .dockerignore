@@ -31,6 +31,26 @@ api/.env*
 **/node_modules
 .mypy_cache
 .pytest_cache
+# **測試樹不進交付映像**（母 repo W2d archive 前 security review S-3，2026-08-27）。
+#
+# 為什麼要寫在**這一檔**：override 的 api 與 ui **兩個 build 都用 `context: .`**
+# （`deploy/overrides/dograh.override.yml` 的 `:54` 與 `:215`，基準是 compose 專案目錄
+# ＝`dograh/`），而 Docker **只讀 build context 根的 `.dockerignore`** ⇒
+# `api/.dockerignore`（其 `tests/`／`test_*.py`／`.env*` 等 20 餘行）與 `ui/.dockerignore`
+# **完全不生效，是死設定**。實測：`ccp-dograh-api:local` 內 `/app/api/tests` 有 167 個檔。
+#
+# 出貨測試樹的代價：`api/Dockerfile:143` 是 `COPY ./api ./api`，於是 fixture、conftest、
+# integrations 全隨映像走——取得映像的人拿到的是內部端點與認證路徑的地圖。本次 review
+# 實測到的具體一例：`api/tests/test_platform_scope_enforcement.py` 斷言了部署期
+# `DOGRAH_TRANSFER_DESTINATION` 的字面值（已於同批修掉，見 S-4）。
+#
+# **不影響測試工作流**：測試跑在 `dograh-test` sidecar，做法是 `docker cp dograh/api`
+# 把**主機上的**原始碼灌進去（見專案 RUNBOOK／dograh-container-test-recipe），
+# 不依賴映像內的 tests。`.dockerignore` 也不動工作副本，開發者 checkout 照舊。
+api/tests/
+api/conftest.py
+**/test_*.py
+**/*_test.py
 .ruff_cache
 .venv
 evals/
