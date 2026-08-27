@@ -8,6 +8,11 @@ import {
 } from '@/client/sdk.gen';
 import type { OnboardingStateUpdate } from '@/client/types.gen';
 import { useAuth } from '@/lib/auth';
+// customer-center-platform fork（母 repo W2d task 3.9）：
+// `PUT /user/onboarding-state` 對**兩個角色皆 deny**，而這支是 fire-and-forget
+// ⇒ 引導狀態永遠存不下來，且每次開頁多灌一筆 `editor.denied` 稽核噪音。
+// 唯讀身分不發起這個請求；引導狀態退化為「只在這個分頁有效」。
+import { useCcpReadOnly } from '@/lib/ccp/access';
 
 export type TooltipKey = 'web_call' | 'customize_workflow';
 export type OnboardingActionKey = 'web_call_started';
@@ -67,6 +72,11 @@ export const OnboardingProvider = ({ children }: { children: React.ReactNode }) 
     const auth = useAuth();
     const authRef = useRef(auth);
     authRef.current = auth;
+    // 與 authRef 同一個理由：`persist` 是 deps 為空的 useCallback，
+    // 訊號解析後要讀得到新值。
+    const ccpReadOnly = useCcpReadOnly();
+    const ccpReadOnlyRef = useRef(ccpReadOnly);
+    ccpReadOnlyRef.current = ccpReadOnly;
     const hasFetched = useRef(false);
 
     useEffect(() => {
@@ -98,6 +108,7 @@ export const OnboardingProvider = ({ children }: { children: React.ReactNode }) 
     // updates. The response is the merged state — use it to reconcile.
     const persist = useCallback((update: OnboardingStateUpdate) => {
         if (!authRef.current.isAuthenticated) return;
+        if (ccpReadOnlyRef.current) return;
         void updateUserOnboardingStateApiV1UserOnboardingStatePut({ body: update })
             .then((res) => {
                 if (res.error) {

@@ -42,6 +42,11 @@ import {
     DropdownMenuItem,
     DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
+// customer-center-platform fork（母 repo W2d task 3.1）：`PUT`／`DELETE /folder/{id}`
+// 皆帶 `roles: [implementer]` ⇒ 對主管 403。整顆「資料夾操作」選單停用即可
+// ——選單內兩項都是寫入，沒有主管可用的項目。
+import { useCcpReadOnly } from '@/lib/ccp/access';
+import { ccpDisabledProps } from '@/lib/ccp/notice-bar';
 import logger from '@/lib/logger';
 import { cn } from '@/lib/utils';
 
@@ -78,6 +83,7 @@ export function FolderSection({
     const [isRenaming, setIsRenaming] = useState(false);
     const [confirmDelete, setConfirmDelete] = useState(false);
     const [isDeleting, setIsDeleting] = useState(false);
+    const readOnly = useCcpReadOnly();
 
     const isFolder = kind === 'folder';
     const isArchived = kind === 'archived';
@@ -168,6 +174,7 @@ export function FolderSection({
                                     size="icon"
                                     className="h-8 w-8 text-muted-foreground"
                                     aria-label="Folder actions"
+                                    {...ccpDisabledProps(readOnly)}
                                 >
                                     <MoreVertical size={16} />
                                 </Button>

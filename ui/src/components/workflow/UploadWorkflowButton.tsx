@@ -8,6 +8,12 @@ import { createWorkflowApiV1WorkflowCreateDefinitionPost } from '@/client/sdk.ge
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { useAuth } from '@/lib/auth';
+// customer-center-platform fork（母 repo W2d task 3.1）：`POST /workflow/create/definition`
+// 對主管 403；且 catch 的**頁內**文案原本無條件說「請檢查檔案是否有效」——
+// 主管上傳一份完全正確的檔案會被告知一個錯的原因，比沒有原因更糟（gate T-21）。
+import { useCcpReadOnly } from '@/lib/ccp/access';
+import { ccpErrorText } from '@/lib/ccp/denial';
+import { ccpDisabledProps } from '@/lib/ccp/notice-bar';
 import logger from '@/lib/logger';
 import { getRandomId } from '@/lib/utils';
 
@@ -19,6 +25,7 @@ export function UploadWorkflowButton() {
     const [isDragging, setIsDragging] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const { user, getAccessToken } = useAuth();
+    const readOnly = useCcpReadOnly();
 
     const handleFileUpload = useCallback(async (file: File) => {
         try {
@@ -43,12 +50,18 @@ export function UploadWorkflowButton() {
                 },
             });
 
+            if (response.error) {
+                // 閘門有話說就用閘門的話（拒絕的理由由閘門給，見 task 3.0b）；
+                // 只有真的不是拒絕時，才輪得到「檔案可能有問題」這個猜測。
+                setError(ccpErrorText(response.error, '上傳失敗，請確認檔案內容是否為有效的工作流 JSON。'));
+                return;
+            }
             if (response.data?.id) {
                 router.push(`/workflow/${response.data.id}`);
                 setIsOpen(false);
             }
         } catch (err) {
-            setError('Failed to upload workflow. Please check if the file is valid.');
+            setError(ccpErrorText(err, '上傳失敗，請確認檔案內容是否為有效的工作流 JSON。'));
             logger.error(`Error uploading workflow: ${err}`);
         }
     }, [router, user, getAccessToken]);
@@ -88,6 +101,7 @@ export function UploadWorkflowButton() {
             <Button
                 onClick={() => setIsOpen(true)}
                 variant="outline"
+                {...ccpDisabledProps(readOnly)}
             >
                 <Upload className="w-4 h-4 mr-2" />
                 Upload Agent Definition

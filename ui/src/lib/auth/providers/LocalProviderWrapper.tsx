@@ -57,15 +57,19 @@ export function LocalProviderWrapper({ children }: { children: React.ReactNode }
     window.location.href = '/auth/login';
   }, []);
 
+  // customer-center-platform fork（母 repo W2d 覆蓋面表的 raw fetch 軸）：
+  //
+  // 上游打 `POST /api/auth/logout`（dograh-ui 自己的 route），在本平台是
+  // `default-deny` ⇒ 403 被 catch 吞掉，接著無條件跳 `/auth/login`，而閘門對
+  // `/auth/*` 302 回 `/` ⇒ **閘門的 session 完全沒清**：一顆看起來登出、
+  // 其實沒登出的按鈕，比沒有登出鈕更糟。
+  //
+  // 本平台的登出在閘門：`/__gateway/logout` 是一個**導航**目標（帶確認表單，
+  // 且 CSRF 檢查要求同源導航），故這裡改為整頁導過去，不再發 XHR。
   const logout = React.useCallback(async () => {
-    try {
-      await fetch('/api/auth/logout', { method: 'POST' });
-    } catch (error) {
-      logger.error('Error during logout', error);
-    }
     setUser(null);
     tokenRef.current = null;
-    window.location.href = '/auth/login';
+    window.location.href = '/__gateway/logout';
   }, []);
 
   const contextValue = useMemo(() => ({

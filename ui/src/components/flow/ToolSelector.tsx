@@ -12,6 +12,9 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Label } from "@/components/ui/label";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { TOOLS_INTRODUCTION_DOC_URL } from "@/constants/documentation";
+// customer-center-platform fork（母 repo W2d task 3.4d）：
+// `POST /tools/{uuid}/mcp/refresh`（server-generated-no-body）對**兩個角色皆 deny**。
+import { ccpDisabledProps } from "@/lib/ccp/notice-bar";
 
 import { type McpDiscoveredTool, refreshMcpTools } from "./mcpRefresh";
 
@@ -268,6 +271,8 @@ export function ToolSelector({
                                                     size="sm"
                                                     disabled={busy}
                                                     onClick={() => doRefresh(tool.tool_uuid)}
+                                                    title="本部署未開放自編輯器重整 MCP 工具清單"
+                                                    {...ccpDisabledProps(true, { describedBy: null })}
                                                 >
                                                     <RefreshCw
                                                         className={`h-3 w-3 mr-2 ${busy ? "animate-spin" : ""}`}

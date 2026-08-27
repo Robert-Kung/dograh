@@ -294,8 +294,19 @@ export const useWorkflowState = ({
     );
 
     // Validate workflow function
+    //
+    // customer-center-platform fork（母 repo W2d task 3.9）：
+    // `POST /workflow/{id}/validate` 帶 `roles: [implementer]` ⇒ 對主管 403，而
+    // `extractWorkflowErrors` 對閘門的 403 body 回 `[]` ⇒ **主管看到的編輯器永遠
+    // 顯示零驗證錯誤**，不論話術實際上有沒有問題。那是「靜默假訊息」不是錯誤，
+    // 3.0 的兜底也接不住（它接得住的是「有人按了什麼」）。
+    // 故：唯讀身分不發起這個請求，並讓畫面**說出**驗證結果不可得
+    // （`ccpValidationUnavailable`），MUST NOT 以零錯誤呈現。
+    // `ccpReadOnly` 進 deps：訊號抵達前一律唯讀（2.1b），不進 deps 的話
+    // **實施方會永久失去驗證**——把主管的假訊息換成實施方的假訊息。
     const validateWorkflow = useCallback(async () => {
         if (!user?.id) return;
+        if (ccpReadOnly) return;
         try {
             const response = await validateWorkflowApiV1WorkflowWorkflowIdValidatePost({
                 path: {
@@ -311,7 +322,7 @@ export const useWorkflowState = ({
         } catch (error: unknown) {
             logger.error(`Unexpected validation error: ${error}`);
         }
-    }, [workflowId, user, applyWorkflowErrors]);
+    }, [workflowId, user, applyWorkflowErrors, ccpReadOnly]);
 
     // Save workflow function. Returns version info from the API response.
     const saveWorkflow = useCallback(async (updateWorkflowDefinition: boolean = true): Promise<{ versionNumber?: number; versionStatus?: string } | undefined> => {
@@ -620,6 +631,9 @@ export const useWorkflowState = ({
         workflowName,
         isDirty,
         workflowValidationErrors,
+        // customer-center-platform fork（母 repo W2d task 3.9）：驗證結果對這個
+        // 身分不可得。畫面 SHALL 說出它不可得，MUST NOT 以「零錯誤」呈現。
+        ccpValidationUnavailable: ccpReadOnly,
         templateContextVariables,
         workflowConfigurations,
         dictionary,

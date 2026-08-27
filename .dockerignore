@@ -8,9 +8,19 @@ api/.env*
 .env
 **/.env
 **/.env.*
-# 範本檔不含實值，且 1.2j 的權限檢查明文排除它們——保留。
-!**/.env.example
-!**/.env.test.example
+# **兩條 `!` 反排除已移除（母 repo W2d task 7.4 從零演練實測，2026-08-26）。**
+# `.dockerignore` 是後匹配優先：這兩行把第 3 行 `api/.env*` 已排掉的
+# `api/.env.example`／`api/.env.test.example` **又放回 build context**，於是
+# 它們進了 `ccp-dograh-api:local` 的層，被母 repo `deploy/bin/scan-image-secrets.sh`
+# 的檔名規則（`(^|/)\.env(\..*)?$`，task 11.7）擋下，`platform-up.sh` 直接失敗。
+# 第一趟演練（本 commit 之前的指標）掃描是綠的——回歸由 1.2d 這兩行引入。
+#
+# 選擇「不讓範本進映像」而不是「放寬 11.7 的檔名規則」：範本在交付映像內
+# **零用途**（`api/Dockerfile`／`ui/Dockerfile` 皆不提及；引用它們的
+# `scripts/setup_fork.sh`、`.devcontainer/scripts/post-create.sh` 與文件都跑在
+# checkout 上，不在映像裡），而 11.7 的價值正是它是不需判斷的形狀規則。
+# `.dockerignore` 只影響 build context，不動工作副本——開發者的 checkout 照舊有這兩個檔。
+# 1.2j 的權限檢查仍明文排除範本檔，與本項無關。
 .git
 .github
 .claude
@@ -21,6 +31,26 @@ api/.env*
 **/node_modules
 .mypy_cache
 .pytest_cache
+# **測試樹不進交付映像**（母 repo W2d archive 前 security review S-3，2026-08-27）。
+#
+# 為什麼要寫在**這一檔**：override 的 api 與 ui **兩個 build 都用 `context: .`**
+# （`deploy/overrides/dograh.override.yml` 的 `:54` 與 `:215`，基準是 compose 專案目錄
+# ＝`dograh/`），而 Docker **只讀 build context 根的 `.dockerignore`** ⇒
+# `api/.dockerignore`（其 `tests/`／`test_*.py`／`.env*` 等 20 餘行）與 `ui/.dockerignore`
+# **完全不生效，是死設定**。實測：`ccp-dograh-api:local` 內 `/app/api/tests` 有 167 個檔。
+#
+# 出貨測試樹的代價：`api/Dockerfile:143` 是 `COPY ./api ./api`，於是 fixture、conftest、
+# integrations 全隨映像走——取得映像的人拿到的是內部端點與認證路徑的地圖。本次 review
+# 實測到的具體一例：`api/tests/test_platform_scope_enforcement.py` 斷言了部署期
+# `DOGRAH_TRANSFER_DESTINATION` 的字面值（已於同批修掉，見 S-4）。
+#
+# **不影響測試工作流**：測試跑在 `dograh-test` sidecar，做法是 `docker cp dograh/api`
+# 把**主機上的**原始碼灌進去（見專案 RUNBOOK／dograh-container-test-recipe），
+# 不依賴映像內的 tests。`.dockerignore` 也不動工作副本，開發者 checkout 照舊。
+api/tests/
+api/conftest.py
+**/test_*.py
+**/*_test.py
 .ruff_cache
 .venv
 evals/

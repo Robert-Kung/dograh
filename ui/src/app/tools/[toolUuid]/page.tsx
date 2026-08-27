@@ -42,6 +42,13 @@ import { Textarea } from "@/components/ui/textarea";
 import { TOOL_DOCUMENTATION_URLS } from "@/constants/documentation";
 import { detailFromError } from "@/lib/apiError";
 import { useAuth } from "@/lib/auth";
+// customer-center-platform fork（母 repo W2d task 3.1／3.7）：
+// `PUT /tools/{uuid}` 帶 `roles: [implementer]` ⇒ 對主管 403（② 桶）。
+// **transfer_call 工具另外一級**（task 3.7）：它的設定分屬部署層，
+// 內容判準在 admission（`required_keys` 與白名單），對兩個角色皆唯讀，
+// 且說明**分角色**——RUNBOOK 是工程單位文件，客戶不該有存取。
+import { useCcpReadOnly } from "@/lib/ccp/access";
+import { ccpDisabledProps, useCcpPageNotice } from "@/lib/ccp/notice-bar";
 
 import {
     createMcpDefinition,
@@ -75,9 +82,46 @@ export default function ToolDetailPage() {
     const [tool, setTool] = useState<ToolResponse | null>(null);
     const [isLoading, setIsLoading] = useState(true);
     const [isSaving, setIsSaving] = useState(false);
+    const readOnly = useCcpReadOnly();
     const [error, setError] = useState<string | null>(null);
     const [saveSuccess, setSaveSuccess] = useState(false);
     const [showCodeDialog, setShowCodeDialog] = useState(false);
+
+    // task 3.7：transfer_call 的設定分屬部署層 ⇒ 兩個角色皆唯讀，說明分角色。
+    // 其餘工具走 ② 桶（主管唯讀、實施方可寫）。
+    const isTransferCallCategory = tool?.category === "transfer_call";
+    // `!tool` 那一項是 §6 review F-9 補的：`tool` 未載入時 `tool?.category` 是
+    // undefined ⇒ `isTransferCallCategory` 為 false ⇒ 對實施方 `saveDisabled` 為
+    // false，而該頁若是 transfer_call 工具，資料到齊後才翻成停用。那個窗口內按下去
+    // 就是欄位層 403——AC5 的形狀，只是窗口很短。
+    // 這條紀律與 `resolveAccess`「訊號未到一律唯讀」是同一條，只是那裡套的是**角色**
+    // 訊號，這裡套的是這一格依賴的**第二個**訊號（工具類型）。
+    const saveDisabled = readOnly || !tool || isTransferCallCategory;
+    useCcpPageNotice(
+        isTransferCallCategory
+            ? {
+                supervisor: {
+                    title: '轉接設定不在編輯器內變更',
+                    message:
+                        '轉接目的地與佇列參數屬於部署層設定，兩種帳號在這個頁面都是唯讀。'
+                        + '需要調整轉接對象或門檻時，請與您的專案窗口提出，由建置單位在部署層變更。',
+                },
+                implementer: {
+                    title: '轉接設定的變更程序在部署層',
+                    message:
+                        '轉接工具的目的地白名單與佇列健康參數由部署層正本管理，'
+                        + '經編輯器寫入會被內容檢查擋下。請依 deploy/RUNBOOK.md 的轉接設定程序變更後重新部署。',
+                },
+            }
+            : {
+                supervisor: {
+                    title: '工具設定對您是唯讀的',
+                    message:
+                        '您可以檢視這個工具的完整設定，但變更由負責建置的實施方進行。'
+                        + '需要調整時，請與您的專案窗口提出。',
+                },
+            },
+    );
 
     // Common form state
     const [name, setName] = useState("");
@@ -779,7 +823,11 @@ const data = await response.json();`;
                     )}
 
                     <div className="flex justify-end mt-6">
-                        <Button onClick={handleSave} disabled={isSaving}>
+                        <Button
+                            onClick={handleSave}
+                            disabled={isSaving}
+                            {...ccpDisabledProps(saveDisabled)}
+                        >
                             {isSaving ? (
                                 <>
                                     <Loader2 className="w-4 h-4 mr-2 animate-spin" />

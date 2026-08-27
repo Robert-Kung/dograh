@@ -30,6 +30,9 @@ import { PostHogEvent } from '@/constants/posthog-events';
 import { WORKFLOW_RUN_MODES } from '@/constants/workflowRunModes';
 import { useOnboarding } from '@/context/OnboardingContext';
 import { useAuth } from '@/lib/auth';
+// customer-center-platform fork（母 repo W2d task 3.4c）：單筆通話紀錄的資料面
+// 同樣對兩個角色皆 deny。
+import { useCcpPageNotice } from '@/lib/ccp/notice-bar';
 import { downloadFile, getSignedUrl } from '@/lib/files';
 import { cn } from '@/lib/utils';
 
@@ -466,6 +469,20 @@ export default function WorkflowRunPage() {
     const [workflowRun, setWorkflowRun] = useState<WorkflowRunResponse | null>(null);
     const { hasSeenTooltip, markTooltipSeen } = useOnboarding();
     const customizeButtonRef = useRef<HTMLButtonElement>(null);
+    useCcpPageNotice({
+        supervisor: {
+            title: '本部署未開放通話紀錄',
+            message:
+                '單筆通話的紀錄與錄音在本部署不經編輯器提供，這個頁面會載入失敗。'
+                + '需要查閱時，請與您的專案窗口提出。',
+        },
+        implementer: {
+            title: '本部署未開放通話紀錄',
+            message:
+                '`GET /workflow/{id}/runs/{run_id}` 在本部署是拒絕的（call-plane）。'
+                + '通話紀錄請走部署層的稽核與紀錄面。',
+        },
+    });
 
     // Redirect if not authenticated
     useEffect(() => {

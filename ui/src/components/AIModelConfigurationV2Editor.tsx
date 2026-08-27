@@ -18,6 +18,8 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { VoiceSelectorModal } from "@/components/VoiceSelectorModal";
 import { LANGUAGE_DISPLAY_NAMES } from "@/constants/languages";
+// customer-center-platform fork（母 repo W2d task 3.3／3.5）
+import { ccpDisabledProps, ccpReadOnlyFieldProps } from "@/lib/ccp/notice-bar";
 
 type ModelMode = "realtime" | "dograh" | "byok";
 
@@ -69,6 +71,11 @@ interface AIModelConfigurationV2EditorProps {
     effectiveConfiguration?: Record<string, unknown> | null;
     onSave: (configuration: OrganizationAiModelConfigurationV2) => Promise<void>;
     submitLabel?: string;
+    /**
+     * customer-center-platform fork（母 repo W2d task 3.3／3.5）：停用存檔。
+     * 由呼叫端決定——Models 頁是兩角色皆 deny，工作流覆寫是主管 deny／實施方 allow。
+     */
+    ccpDisabled?: boolean;
 }
 
 function firstApiKey(value: unknown): string {
@@ -271,6 +278,7 @@ export function AIModelConfigurationV2Editor({
     effectiveConfiguration,
     onSave,
     submitLabel = "Save Configuration",
+    ccpDisabled = false,
 }: AIModelConfigurationV2EditorProps) {
     const defaultsForByok = useMemo(() => byokDefaults(defaults), [defaults]);
     const [mode, setMode] = useState<ModelMode>("dograh");
@@ -390,6 +398,7 @@ export function AIModelConfigurationV2Editor({
                         configurationDefaults={defaultsForByok}
                         initialConfig={realtimeInitialConfig}
                         submitLabel={submitLabel}
+                        ccpDisabled={ccpDisabled}
                         onSave={saveByokConfiguration}
                     />
                 </TabsContent>
@@ -410,7 +419,7 @@ export function AIModelConfigurationV2Editor({
 
                                 <div className="space-y-2 sm:col-span-2">
                                     <Label>Language</Label>
-                                    <Select value={dograh.language} onValueChange={(language) => setDograh({ ...dograh, language })}>
+                                    <Select value={dograh.language} onValueChange={(language) => setDograh({ ...dograh, language })} disabled={ccpDisabled}>
                                         <SelectTrigger className="w-full">
                                             <SelectValue placeholder="Select language" />
                                         </SelectTrigger>
@@ -445,6 +454,7 @@ export function AIModelConfigurationV2Editor({
                                                 speed: Number.isFinite(speed) ? speed : defaults.dograh.defaults.speed,
                                             });
                                         }}
+                                        {...ccpReadOnlyFieldProps(ccpDisabled)}
                                     />
                                 </div>
 
@@ -458,12 +468,19 @@ export function AIModelConfigurationV2Editor({
                                             value={dograh.api_key}
                                             onChange={(event) => setDograh({ ...dograh, api_key: event.target.value })}
                                             placeholder="Enter API key"
+                                            {...ccpReadOnlyFieldProps(ccpDisabled)}
                                         />
                                     </div>
                                 </div>
                             </div>
 
-                            <Button type="button" className="mt-6 w-full" onClick={saveDograhConfiguration} disabled={isSavingDograh}>
+                            <Button
+                                type="button"
+                                className="mt-6 w-full"
+                                onClick={saveDograhConfiguration}
+                                disabled={isSavingDograh}
+                                {...ccpDisabledProps(ccpDisabled)}
+                            >
                                 <Save className="mr-2 h-4 w-4" />
                                 {isSavingDograh ? "Saving..." : submitLabel}
                             </Button>
@@ -479,6 +496,7 @@ export function AIModelConfigurationV2Editor({
                         configurationDefaults={defaultsForByok}
                         initialConfig={pipelineInitialConfig}
                         submitLabel={submitLabel}
+                        ccpDisabled={ccpDisabled}
                         onSave={saveByokConfiguration}
                     />
                 </TabsContent>

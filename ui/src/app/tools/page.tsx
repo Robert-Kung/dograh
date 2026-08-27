@@ -40,6 +40,17 @@ import {
 } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useAuth } from "@/lib/auth";
+// customer-center-platform fork（母 repo W2d task 3.1／3.4b）：
+// `POST /tools/` 帶 `roles: [implementer]` ⇒ 對主管 403（② 桶）；
+// `DELETE /tools/{uuid}`（no-restore-path）與 `POST /tools/{uuid}/unarchive`
+// （no-admission-object-on-restore）**對兩個角色皆 deny**（③ 桶）——原本
+// 實施方按下 Archive 得到的是 `Failed to archive tool`。
+import { useCcpReadOnly } from "@/lib/ccp/access";
+import {
+    CCP_DEFAULT_TOOL_CATEGORY,
+    ccpToolTypeAdmission,
+} from "@/lib/ccp/feature-scope";
+import { ccpDisabledProps, useCcpPageNotice } from "@/lib/ccp/notice-bar";
 
 import {
     createMcpDefinition,
@@ -61,8 +72,31 @@ export default function ToolsPage() {
     const [isCreateDialogOpen, setIsCreateDialogOpen] = useState(false);
     const [newToolName, setNewToolName] = useState("");
     const [newToolDescription, setNewToolDescription] = useState("");
-    const [newToolCategory, setNewToolCategory] = useState<ToolCategory>("http_api");
+    // task 4.1b：上游預設是 `http_api`，而它在 `blocked_tool_types` 內——
+    // 只做「不可選」會留下一個**當前值即為 disabled 項**的 Select。
+    const [newToolCategory, setNewToolCategory] = useState<ToolCategory>(CCP_DEFAULT_TOOL_CATEGORY);
     const [isCreating, setIsCreating] = useState(false);
+    const readOnly = useCcpReadOnly();
+    useCcpPageNotice({
+        supervisor: {
+            title: '工具設定對您是唯讀的',
+            message:
+                '您可以檢視這裡的工具與其設定，但新增與修改由負責建置的實施方進行。'
+                + '封存與還原在本部署對所有帳號都不開放，需要時請與您的專案窗口提出。',
+        },
+        implementer: {
+            // task 4.1：新建面在本部署**只剩一個類型**，而那不是靠「五種／三種」
+            // 這類計數敘述表達的——判準是 `ccpToolTypeAdmission()`。文案只說
+            // 「哪些選不了、為什麼」，數字留給選單自己呈現。
+            title: '工具的新建面在本部署是收窄的',
+            message:
+                '建立對話框裡不在啟用集合內的類型一律不可選（選單上會寫原因）；'
+                + '轉接工具雖然是啟用類型，但它的必要欄位由部署層管理，'
+                + '新建時湊不齊，所以也不從這裡建。'
+                + '封存與還原則對所有帳號都未開放（還原沒有內容檢查的對象）。'
+                + '需要調整工具清單時，請依 RUNBOOK 的部署層程序處理。',
+        },
+    });
     const [error, setError] = useState<string | null>(null);
     const [createError, setCreateError] = useState<string | null>(null);
 
@@ -163,7 +197,7 @@ export default function ToolsPage() {
                 setIsCreateDialogOpen(false);
                 setNewToolName("");
                 setNewToolDescription("");
-                setNewToolCategory("http_api");
+                setNewToolCategory(CCP_DEFAULT_TOOL_CATEGORY);
                 setMcpUrl("");
                 setMcpCredentialUuid("");
                 setMcpToolsFilter("");
@@ -321,7 +355,10 @@ export default function ToolsPage() {
                                         Create and manage tools for your organization
                                     </CardDescription>
                                 </div>
-                                <Button onClick={() => setIsCreateDialogOpen(true)}>
+                                <Button
+                                    onClick={() => setIsCreateDialogOpen(true)}
+                                    {...ccpDisabledProps(readOnly)}
+                                >
                                     <Plus className="w-4 h-4 mr-2" />
                                     Create Tool
                                 </Button>
@@ -363,7 +400,10 @@ export default function ToolsPage() {
                                             : "No tools found"}
                                     </p>
                                     {!searchQuery && (
-                                        <Button onClick={() => setIsCreateDialogOpen(true)}>
+                                        <Button
+                                            onClick={() => setIsCreateDialogOpen(true)}
+                                            {...ccpDisabledProps(readOnly)}
+                                        >
                                             Create Your First Tool
                                         </Button>
                                     )}
@@ -412,6 +452,8 @@ export default function ToolsPage() {
                                                             handleDeleteTool(tool.tool_uuid, e)
                                                         }
                                                         className="text-destructive hover:text-destructive/90"
+                                                        title="本部署未開放經編輯器封存工具"
+                                                        {...ccpDisabledProps(true)}
                                                     >
                                                         <Trash2 className="w-4 h-4" />
                                                     </Button>
@@ -423,7 +465,10 @@ export default function ToolsPage() {
                                             <p className="text-muted-foreground mb-4">
                                                 No active tools
                                             </p>
-                                            <Button onClick={() => setIsCreateDialogOpen(true)}>
+                                            <Button
+                                                onClick={() => setIsCreateDialogOpen(true)}
+                                                {...ccpDisabledProps(readOnly)}
+                                            >
                                                 Create Your First Tool
                                             </Button>
                                         </div>
@@ -476,7 +521,8 @@ export default function ToolsPage() {
                                                                 handleUnarchiveTool(tool.tool_uuid, e)
                                                             }
                                                             className="text-primary hover:text-primary/90"
-                                                            title="Restore tool"
+                                                            title="本部署未開放經編輯器還原工具"
+                                                            {...ccpDisabledProps(true)}
                                                         >
                                                             <RotateCcw className="w-4 h-4" />
                                                         </Button>
@@ -531,15 +577,34 @@ export default function ToolsPage() {
                                     <SelectValue />
                                 </SelectTrigger>
                                 <SelectContent>
-                                    {TOOL_CATEGORIES.map((category) => (
-                                        <SelectItem
-                                            key={category.value}
-                                            value={category.value}
-                                            disabled={category.disabled}
-                                        >
-                                            {category.label}
-                                        </SelectItem>
-                                    ))}
+                                    {/* task 4.1：啟用集合外者一律不可選**並附原因**。
+                                        判準是 `ccpToolTypeAdmission()` 的集合運算，
+                                        不是「五種／三種」這類會過期的計數。
+                                        `category.disabled` 是上游自己的
+                                        Coming Soon 旗標，兩者取聯集。 */}
+                                    {TOOL_CATEGORIES.map((category) => {
+                                        const admission = ccpToolTypeAdmission(category.value);
+                                        return (
+                                            <SelectItem
+                                                key={category.value}
+                                                value={category.value}
+                                                disabled={category.disabled || !admission.selectable}
+                                                title={admission.reason || undefined}
+                                            >
+                                                {/* `max-w-` 不是裝飾：沒有上限時 Radix 的 popper 會撐到最長
+                                                    那一行的寬度，`transfer_call` 那句話會把整個選單拉得比對話框還寬
+                                                    （實測 1030px）。用 trigger 寬度當基準，選單就跟著欄位對齊。 */}
+                                                <span className="flex max-w-[var(--radix-select-trigger-width)] flex-col items-start gap-0.5">
+                                                    <span>{category.label}</span>
+                                                    {!admission.selectable && admission.reason && (
+                                                        <span className="text-xs text-muted-foreground whitespace-normal">
+                                                            {admission.reason}
+                                                        </span>
+                                                    )}
+                                                </span>
+                                            </SelectItem>
+                                        );
+                                    })}
                                 </SelectContent>
                             </Select>
                             <p className="text-xs text-muted-foreground">
@@ -623,7 +688,11 @@ export default function ToolsPage() {
                         >
                             Cancel
                         </Button>
-                        <Button onClick={handleCreateTool} disabled={isCreating}>
+                        <Button
+                            onClick={handleCreateTool}
+                            disabled={isCreating}
+                            {...ccpDisabledProps(readOnly)}
+                        >
                             {isCreating ? "Creating..." : "Create Tool"}
                         </Button>
                     </DialogFooter>

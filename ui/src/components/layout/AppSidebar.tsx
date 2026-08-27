@@ -19,7 +19,6 @@ import {
   Phone,
   Settings,
   TrendingUp,
-  UserRound,
   Workflow,
   Wrench,
 } from "lucide-react";
@@ -54,7 +53,6 @@ import {
 } from "@/components/ui/sidebar";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useAppConfig } from "@/context/AppConfigContext";
-import { useLeadForms } from "@/context/LeadFormsContext";
 import { useTelephonyConfigWarnings } from "@/context/TelephonyConfigWarningsContext";
 import { useLatestReleaseVersion } from "@/hooks/useLatestReleaseVersion";
 import type { LocalUser } from "@/lib/auth";
@@ -166,7 +164,6 @@ export function AppSidebar() {
   const { state, isMobile, setOpenMobile } = useSidebar();
   const { provider, getSelectedTeam, logout, user } = useAuth();
   const { config } = useAppConfig();
-  const { openHireExpert } = useLeadForms();
   const { telnyxMissingWebhookPublicKeyCount } = useTelephonyConfigWarnings();
   const hasTelephonyWarning = telnyxMissingWebhookPublicKeyCount > 0;
   const isCollapsed = !isMobile && state === "collapsed";
@@ -300,34 +297,14 @@ export function AppSidebar() {
     </Button>
   );
 
-  // "Hire an Expert" CTA, rendered INSIDE the shared footer pill next to the
-  // profile icon. Expanded: label pill filling the row. Collapsed: icon-only.
-  const hireExpertButton = isCollapsed ? (
-    <Tooltip>
-      <TooltipTrigger asChild>
-        <Button
-          size="icon"
-          className="h-7 w-7 rounded-full"
-          onClick={() => openHireExpert("sidebar")}
-          aria-label="Hire an Expert"
-        >
-          <UserRound className="h-3.5 w-3.5" />
-        </Button>
-      </TooltipTrigger>
-      <TooltipContent side="right">
-        <p>Hire an Expert</p>
-      </TooltipContent>
-    </Tooltip>
-  ) : (
-    <Button
-      size="sm"
-      className="h-7 gap-1.5 rounded-full px-3 text-xs"
-      onClick={() => openHireExpert("sidebar")}
-    >
-      <UserRound className="h-3.5 w-3.5" />
-      Hire an Expert
-    </Button>
-  );
+  // customer-center-platform fork（母 repo W2d task 3.4e）：上游的
+  // 「Hire an Expert」CTA 已移除（原本是釘在側欄 footer 的實心主要按鈕，
+  // 交付態的每一頁都看得到）。表單送 `api-leads.dograh.com`——外部 host、
+  // 無 auth、identity 就是使用者自己填的 email，而 client 端把 4xx／5xx 與
+  // 網路錯誤全部吞掉；閘門的 CSP `connect-src 'self'` 會擋掉那個跨源 POST
+  // ⇒ 使用者填完按送出，畫面表現為成功、資料哪裡都沒到（AC3c 的假成功）。
+  // 採移除而非停用：它是上游廠商的招攬入口，於本交付態無對應流程。
+  const hireExpertButton = null;
 
   return (
     <Sidebar collapsible="icon" variant="floating" className="app-sidebar-dock py-4">

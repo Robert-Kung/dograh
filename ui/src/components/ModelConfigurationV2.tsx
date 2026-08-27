@@ -30,6 +30,12 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { useUserConfig } from "@/context/UserConfigContext";
 import { detailFromError } from "@/lib/apiError";
 import { useAuth } from "@/lib/auth";
+// customer-center-platform fork（母 repo W2d task 3.3／3.3c）：
+// Models 頁的**三條**寫入路徑對兩個角色皆 deny——
+// `PUT /organizations/model-configurations/v2`、`PUT /user/configurations/user`
+// （legacy 存檔）、`POST /organizations/model-configurations/v2/migrate`。
+// 模型與語音供應商的憑證由平台管理，不經編輯器變更。
+import { ccpDisabledProps, useCcpPageNotice } from "@/lib/ccp/notice-bar";
 
 export default function ModelConfigurationV2({
     docsUrl,
@@ -47,6 +53,20 @@ export default function ModelConfigurationV2({
     const [response, setResponse] = useState<OrganizationAiModelConfigurationResponse | null>(null);
     const [loading, setLoading] = useState(true);
     const [migrating, setMigrating] = useState(false);
+    useCcpPageNotice({
+        supervisor: {
+            title: '模型與語音設定對您是唯讀的',
+            message:
+                '這裡的模型、語音與轉寫設定由平台統一管理（含供應商憑證），'
+                + '兩種帳號在編輯器內都不能變更。需要調整時，請與您的專案窗口提出。',
+        },
+        implementer: {
+            title: '模型設定的變更程序在部署層',
+            message:
+                '模型與供應商憑證由部署層正本管理，經編輯器寫入會被閘門拒絕。'
+                + '請依 deploy/RUNBOOK.md 的模型設定程序變更後重新部署。',
+        },
+    });
     const [migrationDialogOpen, setMigrationDialogOpen] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [notice, setNotice] = useState<string | null>(null);
@@ -153,7 +173,13 @@ export default function ModelConfigurationV2({
                 </AlertDialogHeader>
                 <AlertDialogFooter>
                     <AlertDialogCancel disabled={migrating}>Cancel</AlertDialogCancel>
-                    <Button type="button" onClick={migrateConfiguration} disabled={migrating}>
+                    <Button
+                        type="button"
+                        onClick={migrateConfiguration}
+                        disabled={migrating}
+                        title="本部署未開放模型設定遷移"
+                        {...ccpDisabledProps(true)}
+                    >
                         {migrating ? "Migrating..." : "Migrate to v2"}
                     </Button>
                 </AlertDialogFooter>
@@ -194,7 +220,14 @@ export default function ModelConfigurationV2({
                         </p>
                     </div>
                     {source === "legacy_user_v1" && (
-                        <Button type="button" variant="outline" onClick={() => setMigrationDialogOpen(true)} disabled={migrating}>
+                        <Button
+                            type="button"
+                            variant="outline"
+                            onClick={() => setMigrationDialogOpen(true)}
+                            disabled={migrating}
+                            title="本部署未開放模型設定遷移"
+                            {...ccpDisabledProps(true)}
+                        >
                             <RefreshCw className="mr-2 h-4 w-4" />
                             {migrating ? "Migrating..." : "Migrate to v2"}
                         </Button>
@@ -214,6 +247,7 @@ export default function ModelConfigurationV2({
 
                 <ServiceConfigurationForm
                     mode="global"
+                    ccpDisabled
                     onSave={async (config) => {
                         setError(null);
                         setNotice(null);
@@ -262,6 +296,7 @@ export default function ModelConfigurationV2({
 
             {defaults && response && (
                 <AIModelConfigurationV2Editor
+                    ccpDisabled
                     defaults={defaults}
                     configuration={response.configuration}
                     effectiveConfiguration={response.effective_configuration}

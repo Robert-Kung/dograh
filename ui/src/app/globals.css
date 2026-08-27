@@ -323,3 +323,38 @@
   box-shadow: none;
   border-bottom-color: var(--cta);
 }
+
+/* customer-center-platform fork（母 repo W2d task 3.2c）：以 `aria-disabled` 停用的
+   入口。原生 `disabled` 不進 tab 序，鍵盤與螢幕閱讀器使用者遇不到那顆按鈕，也就
+   遇不到「為什麼不能按」——`ccpDisabledProps()`（`src/lib/ccp/notice-bar.tsx`）因此
+   保留可聚焦性，視覺上的停用態由這裡統一給，呼叫端不必各自記得帶 className。 */
+[data-ccp-disabled="true"] {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+/* customer-center-platform fork（母 repo §6 review F-2）：唯讀**欄位**。
+   3.3／F5 刻意選 `readOnly` 而不是 `disabled`（要看得到現值、要選得起來複製），
+   但那只論證了「不要用 disabled 的灰化」，沒有論證「不需要任何 affordance」。
+   原本 `ccpReadOnlyFieldProps` 只給 `readOnly`／`aria-readonly`／`data-ccp-readonly`
+   ——前者只服務 AT、後者只服務巡檢探針，**視覺使用者兩份都拿不到**：欄位長得
+   跟可編輯的一模一樣，點進去有 caret，打字被靜默吞掉。那是把 F5 要修的形狀
+   換個位置重新長出來（從「改完存不了」變成「連改都改不了、而且看不出來」）。
+
+   刻意只動底色與游標：**不降對比、不擋選取複製**，那是選 `readOnly` 的理由。 */
+[data-ccp-readonly="true"] {
+  background-color: var(--muted);
+  cursor: default;
+}
+
+/* customer-center-platform fork（母 repo §6 review F-5）：節點編輯對話框用的是
+   原生 `fieldset[disabled]`（理由見該檔：children 由十幾種節點型別傳進來，逐一改
+   是十幾個檔的 rebase 衝突面）。原生停用會掉對比，而那個 fieldset 裡放的是
+   **話術本文**——主管唯讀存取最想看清楚的東西。這裡把對比補回來。
+   **可選取複製補不回**（瀏覽器對 disabled 控制項的行為），登記為已知例外。 */
+[data-ccp-node-readonly="true"] :disabled {
+  opacity: 1;
+  color: inherit;
+  -webkit-text-fill-color: currentColor;
+  cursor: default;
+}

@@ -34,78 +34,65 @@
  * （訊號不可得），兩者 MUST NOT 共用同一段說明文案。
  */
 
-import React, { createContext, useContext, useMemo } from 'react';
+import React, { createContext, useContext, useEffect, useMemo } from 'react';
 
 import { useAuth } from '@/lib/auth';
 import type { AuthUser } from '@/lib/auth/types';
 
+import type { CcpAccess } from './access-rules';
+import {
+    CCP_ACCESS_FALLBACK as FALLBACK,
+    resolveAccess as resolveAccessUntyped,
+} from './access-rules';
+import { installCcpDenialFallback } from './denial-fallback';
 import { CCP_FORK_MARKER } from './fork-marker';
 
-/** 閘門 `allowlist.py` 的 `KNOWN_ROLES`。這裡刻意列舉而非接受任何字串——
- *  未知角色值（含閘門日後新增而前端沒同步的）落 `signal-unavailable`，不是可寫。 */
-export const CCP_KNOWN_ROLES = ['supervisor', 'implementer'] as const;
-export type CcpRole = (typeof CCP_KNOWN_ROLES)[number];
-
-/** 可寫的角色。目前只有實施方；主管是唯讀角色。 */
-const WRITABLE_ROLES: readonly string[] = ['implementer'];
-
-export type CcpAccessState =
-    /** 還在取訊號。**視為唯讀**——這正是舊慣例開出可寫窗口的那一格。 */
-    | 'loading'
-    /** 已確認是可寫角色（實施方）。 */
-    | 'writable'
-    /** 已確認是唯讀角色（主管）。文案講「這個平台的話術由實施方維護」。 */
-    | 'readonly-role'
-    /** 訊號不可得（未認證／fetch 失敗／`role` 缺失／未知角色值）。
-     *  文案 SHALL 講「取不到權限訊號」，MUST NOT 講成「你是唯讀角色」。 */
-    | 'signal-unavailable';
-
-export interface CcpAccess {
-    state: CcpAccessState;
-    /** 唯一的消費點：只有 `writable` 是 false。 */
-    readOnly: boolean;
-    /** 已確認的角色；`loading`／`signal-unavailable` 時為 null。 */
-    role: CcpRole | null;
-}
-
-const FALLBACK: CcpAccess = { state: 'signal-unavailable', readOnly: true, role: null };
+/**
+ * **判定邏輯住在 `./access-rules`**（W2d task 7.1）：那個檔不 import React，
+ * 因此四條 fail-safe 分支可以用上游既有的 `.mts` 慣例直接測
+ * （`scripts/ccp-access-rules.test.mts`，零依賴）。本檔原樣 re-export，
+ * 呼叫端的 import 不必改。
+ */
+export {
+    CCP_ACCESS_FALLBACK,
+    CCP_KNOWN_ROLES,
+    localRole,
+    WRITABLE_ROLES,
+} from './access-rules';
+// `resolveAccess` **不自 `./access-rules` re-export**：本檔上方那層薄包裝才是
+// 帶型別的版本（§6 review M-8）。純判定要測時直接 import `./access-rules`。
+export { resolveAccess };
+export type { CcpAccess, CcpAccessState, CcpRole } from './access-rules';
 
 const CcpAccessContext = createContext<CcpAccess>(FALLBACK);
 
 /**
- * `AuthUser = CurrentUser | LocalUser`，而 `CurrentUser` 自 `@stackframe/stack`
- * import ⇒ 我方擴不了它。故 `role` 補在 `BaseUser`／`LocalUser` 上，讀取點以
- * provider 窄化到 `LocalUser`（W2d task 2.3）。`as any` 會讓型別擋不住任何東西，
- * 而「TS 會擋」正是那條 task 存在的理由。
+ * **型別護欄回到 fork 邊界上**（§6 review M-8）。
+ *
+ * `access-rules.ts` 的參數是 `unknown`，那是它保持零依賴（＝可用上游的 `.mts`
+ * 慣例測）的代價：`AuthUser` 的型別鏈會把 `@stackframe/stack` 拉進來。
+ * 但 task 2.3 的整個理由是「**TS 會擋**」——上游 rebase 後 `LocalUser` 的欄位
+ * 改名時要在 build 期就紅，而不是靜默讓每個人落 `signal-unavailable`
+ * （方向是 fail-closed，但那是一次沒人會在 build 期發現的**功能全失**：
+ * 實施方的整個編輯器變唯讀，而畫面說的是「取不到權限訊號」）。
  */
-function localRole(user: AuthUser | null): string | null {
-    if (!user) return null;
-    const provider = (user as { provider?: unknown }).provider;
-    if (provider !== 'local') return null;
-    const role = (user as { role?: unknown }).role;
-    return typeof role === 'string' ? role : null;
-}
-
-export function resolveAccess(args: {
+function resolveAccess(args: {
     loading: boolean;
     isAuthenticated: boolean;
     user: AuthUser | null;
 }): CcpAccess {
-    if (args.loading) return { state: 'loading', readOnly: true, role: null };
-    if (!args.isAuthenticated) return FALLBACK;
-
-    const role = localRole(args.user);
-    if (!role) return FALLBACK;
-    if (!(CCP_KNOWN_ROLES as readonly string[]).includes(role)) return FALLBACK;
-
-    const known = role as CcpRole;
-    return WRITABLE_ROLES.includes(known)
-        ? { state: 'writable', readOnly: false, role: known }
-        : { state: 'readonly-role', readOnly: true, role: known };
+    return resolveAccessUntyped(args);
 }
 
 export function CcpAccessProvider({ children }: { children: React.ReactNode }) {
     const { user, isAuthenticated, loading } = useAuth();
+
+    // 全域 403 兜底（W2d task 3.0）。掛在這裡是因為這是 fork 在 root layout
+    // 上唯一的接點——多一個 provider 就多一段 rebase 衝突面。安裝本身冪等，
+    // strict mode 跑兩次不會疊出兩張 toast。
+    useEffect(() => {
+        installCcpDenialFallback();
+    }, []);
 
     const value = useMemo(
         () => resolveAccess({ loading, isAuthenticated, user }),

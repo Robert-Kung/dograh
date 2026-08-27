@@ -1,16 +1,12 @@
 "use client";
 
 import posthog from "posthog-js";
-import { createContext, type ReactNode,useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
+import { createContext, type ReactNode,useCallback, useContext, useMemo, useRef, useState } from "react";
 
-import { getWorkflowCountApiV1WorkflowCountGet } from "@/client/sdk.gen";
 import { EnterpriseModal } from "@/components/lead-forms/EnterpriseModal";
 import { HireExpertModal } from "@/components/lead-forms/HireExpertModal";
 import type { LeadSource } from "@/components/lead-forms/leadFieldOptions";
-import { OnboardingModal } from "@/components/lead-forms/OnboardingModal";
 import { PostHogEvent } from "@/constants/posthog-events";
-import { useOnboarding } from "@/context/OnboardingContext";
-import { useAuth } from "@/lib/auth";
 
 interface LeadFormsContextValue {
   openHireExpert: (source: LeadSource) => void;
@@ -30,62 +26,14 @@ export function LeadFormsProvider({ children }: { children: ReactNode }) {
   const [enterprisePrefill, setEnterprisePrefill] = useState<{ company?: string } | undefined>(undefined);
   const hasOpenedHireRef = useRef(false);
 
-  // ---- Post-signup onboarding gate ----
-  // Show the onboarding form ONCE per user, and ONLY to genuinely new users:
-  //   (a) the completion/skip flag is unset (server-backed onboarding state,
-  //       cross-device), AND
-  //   (b) the user has zero workflows (grandfathers out all existing users —
-  //       they already have workflows, so they never see this modal).
-  const { user, loading: authLoading } = useAuth();
-  const {
-    loading: onboardingLoading,
-    onboardingCompletedAt,
-    onboardingSkipped,
-    markOnboardingCompleted,
-  } = useOnboarding();
-  const [onboardingOpen, setOnboardingOpen] = useState(false);
-  // Guard so the one-time workflow-count check runs at most once per mount.
-  const onboardingCheckedRef = useRef(false);
-  // Live view of the gate for the post-await re-check below.
-  const onboardingDoneRef = useRef(false);
-  onboardingDoneRef.current = Boolean(onboardingCompletedAt) || onboardingSkipped;
-
-  useEffect(() => {
-    if (authLoading || onboardingLoading || !user || onboardingCheckedRef.current) {
-      return;
-    }
-
-    onboardingCheckedRef.current = true;
-    if (onboardingDoneRef.current) return; // already done — never show
-
-    // Only brand-new users (no workflows yet) see the form. The count is
-    // org-scoped (the user's selected organization), so a new user joining an
-    // org that already has workflows is correctly grandfathered out. This costs
-    // one lightweight count query per session for users whose flag is still
-    // unset — an accepted trade for a server-authoritative, cross-device gate.
-    (async () => {
-      try {
-        const res = await getWorkflowCountApiV1WorkflowCountGet();
-        // Re-check the flag after the await: a completion elsewhere (another
-        // tab) may have stamped it while the count was in flight.
-        if (res.data?.total === 0 && !onboardingDoneRef.current) {
-          setOnboardingOpen(true);
-          posthog.capture(PostHogEvent.ONBOARDING_SHOWN);
-        }
-      } catch {
-        // If the count can't be fetched, do NOT show the modal — fail closed so
-        // existing users are never disrupted.
-      }
-    })();
-  }, [authLoading, onboardingLoading, user]);
-
-  const completeOnboarding = useCallback((skipped: boolean) => {
-    // Dismiss immediately, then persist the flag through OnboardingContext
-    // (optimistic local state closes the gate even if the server write lags;
-    // the write itself is best-effort and cross-device).
-    setOnboardingOpen(false);
-    markOnboardingCompleted({ skipped });
-  }, [markOnboardingCompleted]);
+  // ---- Post-signup onboarding gate（**本 fork 已移除**）----
+  // 上游在這裡做的是：完成/略過旗標未設 **且** 使用者的 workflow 數為 0 時，
+  // 自動彈出一次性的 onboarding 表單。
+  // customer-center-platform fork（母 repo §6 review F-4）：`OnboardingModal`、
+  // 自動開啟它的 effect（觸發鏈是 `getWorkflowCount() === 0`＝全新交付的第一次登入）、
+  // 兩個守門 ref 與 `completeOnboarding` **一併移除，不留死碼**——留一個只會
+  // `setOnboardingOpen` 而沒有消費者的 effect，下一輪 rebase 會有人把它接回去。
+  // 移除理由見下方 Provider 內的註解。`useOnboarding()` 因此在本檔已無讀取點。
 
   const openHireExpert = useCallback((source: LeadSource) => {
     hasOpenedHireRef.current = true;
@@ -121,10 +69,24 @@ export function LeadFormsProvider({ children }: { children: ReactNode }) {
         source={enterpriseSource}
         prefill={enterprisePrefill}
       />
-      <OnboardingModal
-        open={onboardingOpen}
-        onComplete={completeOnboarding}
-      />
+      {/* customer-center-platform fork（母 repo §6 review F-4）：
+          上游的 `OnboardingModal` 已移除，理由與 `HireExpertNudge`（task 3.4e）
+          **完全同型**——同一支 `onboardingServiceClient`、同一個外部 host
+          `api-leads.dograh.com`（無 auth、identity 就是使用者填的 email）、同一套
+          把 4xx／5xx 與網路錯誤全吞進 `console.error` 的 best-effort；閘門的 CSP
+          `connect-src 'self'` 會擋掉那個跨源 POST ⇒ **假成功**（AC3c 的類別）。
+
+          它比那一顆更該移除的地方有兩點：
+          ① 它**自動開啟且擋住畫面**（不是角落的 nudge）；
+          ② 觸發條件是 `getWorkflowCount() === 0`，也就是**全新交付的第一次登入**
+             ——客戶主管看到的第一個畫面會是一份英文的阻斷式表單。
+
+          **今天它不會觸發，但那是巧合不是設計**：`GET /user/onboarding-state` 對
+          兩個角色皆 deny ⇒ `OnboardingContext` 走「fetch 失敗就停在 loading」⇒
+          上方那個 effect 的 `onboardingLoading` 永遠為 true ⇒ 永不執行。
+          那條 fail-closed 沒有寫在任何一份正本裡，而它的守門條件恰好與
+          R-X（主管新取得的讀取面）的收斂方向相反——哪天把 onboarding-state 開給
+          主管，這份表單就會跳出來。移掉它，這條隱式相依就不必被記住。 */}
     </LeadFormsContext.Provider>
   );
 }

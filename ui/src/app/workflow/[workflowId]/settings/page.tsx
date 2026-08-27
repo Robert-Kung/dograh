@@ -42,6 +42,35 @@ import { UnsavedChangesProvider, useUnsavedChanges, useUnsavedChangesContext } f
 import { useAudioPlayback } from "@/hooks/useAudioPlayback";
 import { detailFromError } from "@/lib/apiError";
 import { useAuth } from "@/lib/auth";
+// customer-center-platform fork（母 repo W2d task 3.5）：這一頁**橫跨兩桶**。
+// (a) 兩角色皆 deny：環境音上傳（`POST /workflow/ambient-noise/upload-url`）、
+//     嵌入小工具（`embed-token` POST／DELETE）。
+// (b) 主管 deny／實施方 allow：四個寫入入口——三處 `saveWorkflowConfigurations`
+//     與模型覆寫的 `saveV2Override`／`removeV2Override`，全部走
+//     `PUT /workflow/{id}`（`roles: [implementer]`）。
+// **這頁不在 `WorkflowProvider` 之內**（唯一掛載點是 `RenderWorkflow`），
+// 所以 2.2 的 context 機制對它零作用。§3 巡檢 F3 之後這頁的停用**與角色無關**
+// （欄位層 deny 對兩個角色都成立），所以連 `useCcpReadOnly()` 都不需要了；
+// 角色分流只留在說明條的文案上（`useCcpPageNotice` 自己讀訊號）。
+import { ccpDisabledProps, useCcpPageNotice } from "@/lib/ccp/notice-bar";
+// §3 巡檢 F3（2026-08-25 實機）：這一頁上面那段註解把五個寫入入口判成 (b) ②桶
+// （實施方可寫），依據是 `decide(method, path, role)`——`PUT /workflow/{id}` 的
+// `roles:` 確實是 `[implementer]`。**但授權面還有欄位層那一軸**：
+// `deploy/feature-scope.json` 的 `forbidden_keys` 含 `workflow_configurations`
+// 與 `template_context_variables`，而這頁**五個入口全部帶其中之一**
+// （`saveWorkflowConfigurations` ×3、`saveTemplateContextVariables`、`saveDictionary`）。
+//
+// 實測（實施方 session）：改 Max Call Duration 後按 Save General Settings
+// → `PUT /api/v1/workflow/1` 403 `content-not-permitted`
+// （「定義含排除清單上的欄位：workflow_configurations」）。
+// 只帶 `name` 的 PUT 則 200 ⇒ 擋的是欄位不是路徑。
+//
+// 故實際判定是**兩個角色皆 deny**。這與 task 4.1c 替 `transfer_call` 認出的
+// 是同一軸（「deny 來自 `required_keys` ＋ 遮罩哨兵，不是 `allowed_tool_types`」），
+// 只是當時沒有回頭套用到 `PUT /workflow/{id}`。
+const CCP_SETTINGS_FIELD_DENY =
+    '本部署未開放經編輯器變更這一節：內容含部署層管理的欄位，閘門會擋下';
+
 import logger from "@/lib/logger";
 import {
     type AmbientNoiseConfiguration,
@@ -512,6 +541,8 @@ function GeneralSection({
                                             className="text-sm font-normal"
                                             onClick={() => ambientFileInputRef.current?.click()}
                                             disabled={isUploadingAudio}
+                                            title="環境音檔的上傳在本部署未開放（其設定面在部署層）"
+                                            {...ccpDisabledProps(true)}
                                         >
                                             {isUploadingAudio ? (
                                                 <Loader2 className="w-4 h-4 mr-2 animate-spin" />
@@ -659,7 +690,12 @@ function GeneralSection({
             </CardContent>
             <CardFooter className="justify-end gap-3 border-t pt-6">
                 {isDirty && <span className="text-xs text-muted-foreground">Unsaved changes</span>}
-                <Button onClick={handleSave} disabled={isSaving || !isDirty}>
+                <Button
+                    onClick={handleSave}
+                    disabled={isSaving || !isDirty}
+                    title={CCP_SETTINGS_FIELD_DENY}
+                    {...ccpDisabledProps(true)}
+                >
                     {isSaving ? "Saving..." : "Save General Settings"}
                 </Button>
             </CardFooter>
@@ -782,7 +818,12 @@ function TemplateVariablesSection({
             </CardContent>
             <CardFooter className="justify-end gap-3 border-t pt-6">
                 {isDirty && <span className="text-xs text-muted-foreground">Unsaved changes</span>}
-                <Button onClick={handleSave} disabled={isSaving || !isDirty}>
+                <Button
+                    onClick={handleSave}
+                    disabled={isSaving || !isDirty}
+                    title={CCP_SETTINGS_FIELD_DENY}
+                    {...ccpDisabledProps(true)}
+                >
                     {isSaving ? "Saving..." : "Save Variables"}
                 </Button>
             </CardFooter>
@@ -842,7 +883,12 @@ function DictionarySection({
             </CardContent>
             <CardFooter className="justify-end gap-3 border-t pt-6">
                 {isDirty && <span className="text-xs text-muted-foreground">Unsaved changes</span>}
-                <Button onClick={handleSave} disabled={isSaving || !isDirty}>
+                <Button
+                    onClick={handleSave}
+                    disabled={isSaving || !isDirty}
+                    title={CCP_SETTINGS_FIELD_DENY}
+                    {...ccpDisabledProps(true)}
+                >
                     {isSaving ? "Saving..." : "Save Dictionary"}
                 </Button>
             </CardFooter>
@@ -1000,7 +1046,12 @@ function VoicemailSection({
             </CardContent>
             <CardFooter className="justify-end gap-3 border-t pt-6">
                 {isDirty && <span className="text-xs text-muted-foreground">Unsaved changes</span>}
-                <Button onClick={handleSave} disabled={isSaving || !isDirty}>
+                <Button
+                    onClick={handleSave}
+                    disabled={isSaving || !isDirty}
+                    title={CCP_SETTINGS_FIELD_DENY}
+                    {...ccpDisabledProps(true)}
+                >
                     {isSaving ? "Saving..." : "Save Voicemail Settings"}
                 </Button>
             </CardFooter>
@@ -1204,6 +1255,7 @@ function WorkflowModelOverridesSection({
                                         : organizationModelConfiguration.effective_configuration
                                 }
                                 submitLabel="Save Model Override"
+                                ccpDisabled={true}
                                 onSave={saveV2Override}
                             />
                         ) : (
@@ -1218,6 +1270,8 @@ function WorkflowModelOverridesSection({
                                         className="mt-3"
                                         onClick={removeV2Override}
                                         disabled={isRemovingOverride}
+                                        title={CCP_SETTINGS_FIELD_DENY}
+                                        {...ccpDisabledProps(true)}
                                     >
                                         {isRemovingOverride ? "Saving..." : "Save Organization Configuration"}
                                     </Button>
@@ -1318,6 +1372,29 @@ function WorkflowSettingsInner({
 
     const [isEmbedDialogOpen, setIsEmbedDialogOpen] = useState(false);
     const [activeSection, setActiveSection] = useState("general");
+    // task 3.5 ＋ §3 巡檢 F3。**原文對實施方是錯的**：它寫「這頁其餘設定您可以
+    // 直接存檔」，而實測五個入口全部 403（見 `CCP_SETTINGS_FIELD_DENY` 上方）。
+    // 那正是 AC5 要消滅的「按下去才失敗」，只是失敗的承諾這次寫在我方的說明條上。
+    // 改寫後兩個角色講同一件事，差別只在「下一步找誰」。
+    useCcpPageNotice({
+        supervisor: {
+            title: '工作流設定對您是唯讀的',
+            message:
+                '這頁的設定在本部署都不經編輯器變更——一般設定、模型覆寫、'
+                + '語音信箱、變數與發音詞典的內容含部署層管理的欄位，'
+                + '環境音檔上傳與網站嵌入小工具則未開放。'
+                + '需要調整時，請與您的專案窗口提出。',
+        },
+        implementer: {
+            title: '這頁的設定不經編輯器變更',
+            message:
+                '一般設定、模型覆寫、語音信箱、變數與發音詞典都會被內容檢查擋下'
+                + '（`workflow_configurations` 與 `template_context_variables` 在排除清單上，'
+                + '見 deploy/feature-scope.json）；環境音檔上傳與網站嵌入小工具亦未開放。'
+                + '請依 RUNBOOK 的部署層程序變更後重新部署。'
+                + '話術本身（節點圖）仍可在編輯器直接存檔。',
+        },
+    });
     const [modelConfigurationDefaults, setModelConfigurationDefaults] = useState<ModelConfigurationDefaultsV2 | null>(null);
     const [organizationModelConfiguration, setOrganizationModelConfiguration] = useState<OrganizationAiModelConfigurationResponse | null>(null);
     const [modelConfigurationLoading, setModelConfigurationLoading] = useState(true);
@@ -1507,7 +1584,12 @@ function WorkflowSettingsInner({
                                     </CardDescription>
                                 </CardHeader>
                                 <CardFooter className="border-t pt-6">
-                                    <Button variant="outline" onClick={() => setIsEmbedDialogOpen(true)}>
+                                    <Button
+                                        variant="outline"
+                                        onClick={() => setIsEmbedDialogOpen(true)}
+                                        title="本部署未開放嵌入式小工具"
+                                        {...ccpDisabledProps(true)}
+                                    >
                                         Configure Widget
                                     </Button>
                                 </CardFooter>

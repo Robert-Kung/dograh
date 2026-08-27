@@ -7,6 +7,11 @@ import { WorkflowValidationError } from "@/components/flow/types";
 import type { ConversationNodeTransitionItem, RealtimeFeedbackMessage as FeedbackMessage } from "@/components/workflow/conversation";
 import { useAppConfig } from "@/context/AppConfigContext";
 import { resolveBrowserBackendUrl } from '@/lib/apiClient';
+// customer-center-platform fork（母 repo W2d task 3.9）：這支在連線流程中自動
+// 打 `POST /workflow/{id}/validate`（對主管 deny）與 side-effecting 的
+// `GET /user/configurations/user/validate`。唯讀身分不發起，且**說出**結果不可得
+// ——原本的失敗會被歸因成「設定有問題」，那是給了錯的原因。
+import { useCcpReadOnly } from '@/lib/ccp/access';
 import logger from '@/lib/logger';
 
 import { sdpFilterCodec } from "../utils";
@@ -51,6 +56,7 @@ export const useWebSocketRTC = ({ workflowId, workflowRunId, accessToken, initia
     const [feedbackMessages, setFeedbackMessages] = useState<FeedbackMessage[]>([]);
     const initialContext = initialContextVariables || {};
     const { config: appConfig } = useAppConfig();
+    const ccpReadOnly = useCcpReadOnly();
 
     const {
         audioInputs,
@@ -716,6 +722,15 @@ export const useWebSocketRTC = ({ workflowId, workflowRunId, accessToken, initia
             }
 
             // Validate workflow
+            if (ccpReadOnly) {
+                setWorkflowConfigModalOpen(true);
+                setWorkflowConfigError(
+                    '此身分看不到驗證結果：本部署的話術驗證需要實施方帳號，'
+                    + '這裡無法判斷這份話術是否可用。',
+                );
+                setConnectionStatus('failed');
+                return;
+            }
             const workflowResponse = await validateWorkflowApiV1WorkflowWorkflowIdValidatePost({
                 path: {
                     workflow_id: workflowId,
