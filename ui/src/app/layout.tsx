@@ -1,7 +1,7 @@
 import "./globals.css";
 
 import type { Metadata } from "next";
-import { Geist, Geist_Mono } from "next/font/google";
+import localFont from "next/font/local";
 import { Suspense } from "react";
 
 import ChatwootWidget from "@/components/ChatwootWidget";
@@ -21,14 +21,32 @@ import { AuthProvider } from "@/lib/auth";
 import { CcpAccessProvider } from "@/lib/ccp/access";
 
 
-const geistSans = Geist({
+// 字型 self-host（母 repo W2d，2026-08-27）。
+//
+// 原本是 `next/font/google` 的 `Geist`／`Geist_Mono`——那會讓 **build 期**去 Google
+// Fonts 取檔，於是「能不能建出 ui 映像」相依於一個外部服務。2026-08-27 的重灌演練
+// 實際被它擋下一次：`[AggregateError] { code: 'ETIMEDOUT' }` → `Failed to fetch
+// `Geist` from Google Fonts` → ui build 失敗；而首次部署沒有可降級的舊映像，
+// `platform-up.sh` 只能拒絕啟動 ⇒ 一次網路抖動就能讓全新機器裝不起來。
+//
+// **執行期行為不變**：`next/font/google` 本來就是在 build 期抓檔並內聯進 bundle，
+// 瀏覽器從不連 Google。改成 `local` 只是把「檔案從哪來」由網路換成版控。
+//
+// 檔案是 Google Fonts 對 `subsets: ["latin"]` 實際供應的那一份 woff2（variable，
+// wght 100–900），與改動前 bundle 內的位元組相同。授權 SIL OFL 1.1，
+// 全文與版權宣告見 `fonts/OFL.txt`（OFL 要求隨字型散布）。
+const geistSans = localFont({
+  src: "./fonts/Geist-latin.woff2",
   variable: "--font-geist-sans",
-  subsets: ["latin"],
+  weight: "100 900",
+  display: "swap",
 });
 
-const geistMono = Geist_Mono({
+const geistMono = localFont({
+  src: "./fonts/GeistMono-latin.woff2",
   variable: "--font-geist-mono",
-  subsets: ["latin"],
+  weight: "100 900",
+  display: "swap",
 });
 
 export const metadata: Metadata = {
