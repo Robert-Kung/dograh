@@ -5,12 +5,6 @@ import { ExternalLink } from "lucide-react";
 import { MCPSection } from "@/components/MCPSection";
 import { OrganizationPreferencesSection } from "@/components/OrganizationPreferencesSection";
 import { TelemetrySection } from "@/components/TelemetrySection";
-// customer-center-platform fork（母 repo W2d task 3.3b）：
-// 平台設定頁三個 section 的寫入**對兩個角色皆 deny**——
-// `PUT /organizations/preferences`、`POST`／`DELETE /organizations/langfuse-credentials`
-// （皆 `non-editor-ops`），連對應的 GET 也 deny（頁面本身會渲染錯誤態）。
-// 這頁與 Models 頁同列在閘門「刻意保留」的可達頁清單裡，故不是死碼。
-import { useCcpPageNotice } from "@/lib/ccp/notice-bar";
 import {
   Card,
   CardContent,
@@ -18,6 +12,12 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+// customer-center-platform fork（母 repo W2d task 3.3b）：
+// 平台設定頁三個 section 的寫入**對兩個角色皆 deny**——
+// `PUT /organizations/preferences`、`POST`／`DELETE /organizations/langfuse-credentials`
+// （皆 `non-editor-ops`），連對應的 GET 也 deny（頁面本身會渲染錯誤態）。
+// 這頁與 Models 頁同列在閘門「刻意保留」的可達頁清單裡，故不是死碼。
+import { useCcpPageNotice } from "@/lib/ccp/notice-bar";
 
 export default function SettingsPage() {
   useCcpPageNotice({

@@ -15,8 +15,8 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useUserConfig } from "@/context/UserConfigContext";
 import { detailFromError } from "@/lib/apiError";
-import { ccpDenialFromError } from "@/lib/ccp/denial";
 import { useAuth } from "@/lib/auth";
+import { ccpDenialFromError } from "@/lib/ccp/denial";
 // customer-center-platform fork（母 repo W2d task 3.3b）
 import { CCP_ACCESS_NOTICE_ID, ccpDisabledProps, ccpReadOnlyFieldProps } from "@/lib/ccp/notice-bar";
 

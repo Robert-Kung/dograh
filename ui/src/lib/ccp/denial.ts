@@ -50,7 +50,6 @@ const MAX_DETAIL = 200;
  */
 function plainText(value: unknown, max: number): string {
     if (typeof value !== 'string') return '';
-    // eslint-disable-next-line no-control-regex
     const flattened = value.replace(/[\u0000-\u001F\u007F-\u009F]+/g, ' ');
     const collapsed = flattened.replace(/\s+/g, ' ').trim();
     return collapsed.length > max ? `${collapsed.slice(0, max - 1)}…` : collapsed;

@@ -28,11 +28,11 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { ConversationRailFrame, RealtimeFeedback, WorkflowRunLogs } from '@/components/workflow/conversation';
 import { PostHogEvent } from '@/constants/posthog-events';
 import { WORKFLOW_RUN_MODES } from '@/constants/workflowRunModes';
+import { useOnboarding } from '@/context/OnboardingContext';
+import { useAuth } from '@/lib/auth';
 // customer-center-platform fork（母 repo W2d task 3.4c）：單筆通話紀錄的資料面
 // 同樣對兩個角色皆 deny。
 import { useCcpPageNotice } from '@/lib/ccp/notice-bar';
-import { useOnboarding } from '@/context/OnboardingContext';
-import { useAuth } from '@/lib/auth';
 import { downloadFile, getSignedUrl } from '@/lib/files';
 import { cn } from '@/lib/utils';
 

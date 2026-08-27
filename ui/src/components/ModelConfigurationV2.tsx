@@ -14,12 +14,6 @@ import type {
     OrganizationAiModelConfigurationV2,
 } from "@/client/types.gen";
 import { AIModelConfigurationV2Editor, type ModelConfigurationDefaultsV2 } from "@/components/AIModelConfigurationV2Editor";
-// customer-center-platform fork（母 repo W2d task 3.3／3.3c）：
-// Models 頁的**三條**寫入路徑對兩個角色皆 deny——
-// `PUT /organizations/model-configurations/v2`、`PUT /user/configurations/user`
-// （legacy 存檔）、`POST /organizations/model-configurations/v2/migrate`。
-// 模型與語音供應商的憑證由平台管理，不經編輯器變更。
-import { ccpDisabledProps, useCcpPageNotice } from "@/lib/ccp/notice-bar";
 import { ServiceConfigurationForm } from "@/components/ServiceConfigurationForm";
 import {
     AlertDialog,
@@ -36,6 +30,12 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { useUserConfig } from "@/context/UserConfigContext";
 import { detailFromError } from "@/lib/apiError";
 import { useAuth } from "@/lib/auth";
+// customer-center-platform fork（母 repo W2d task 3.3／3.3c）：
+// Models 頁的**三條**寫入路徑對兩個角色皆 deny——
+// `PUT /organizations/model-configurations/v2`、`PUT /user/configurations/user`
+// （legacy 存檔）、`POST /organizations/model-configurations/v2/migrate`。
+// 模型與語音供應商的憑證由平台管理，不經編輯器變更。
+import { ccpDisabledProps, useCcpPageNotice } from "@/lib/ccp/notice-bar";
 
 export default function ModelConfigurationV2({
     docsUrl,

@@ -39,11 +39,11 @@ import React, { createContext, useContext, useEffect, useMemo } from 'react';
 import { useAuth } from '@/lib/auth';
 import type { AuthUser } from '@/lib/auth/types';
 
+import type { CcpAccess } from './access-rules';
 import {
     CCP_ACCESS_FALLBACK as FALLBACK,
     resolveAccess as resolveAccessUntyped,
 } from './access-rules';
-import type { CcpAccess } from './access-rules';
 import { installCcpDenialFallback } from './denial-fallback';
 import { CCP_FORK_MARKER } from './fork-marker';
 
@@ -54,8 +54,8 @@ import { CCP_FORK_MARKER } from './fork-marker';
  * 呼叫端的 import 不必改。
  */
 export {
-    CCP_KNOWN_ROLES,
     CCP_ACCESS_FALLBACK,
+    CCP_KNOWN_ROLES,
     localRole,
     WRITABLE_ROLES,
 } from './access-rules';

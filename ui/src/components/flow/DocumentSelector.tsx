@@ -4,7 +4,6 @@ import { FileText } from "lucide-react";
 import { useMemo } from "react";
 
 import type { DocumentResponseSchema } from "@/client/types.gen";
-import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Label } from "@/components/ui/label";
 import { KNOWLEDGE_BASE_DOC_URL } from "@/constants/documentation";

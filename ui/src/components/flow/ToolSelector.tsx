@@ -12,7 +12,6 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Label } from "@/components/ui/label";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { TOOLS_INTRODUCTION_DOC_URL } from "@/constants/documentation";
-
 // customer-center-platform fork（母 repo W2d task 3.4d）：
 // `POST /tools/{uuid}/mcp/refresh`（server-generated-no-body）對**兩個角色皆 deny**。
 import { ccpDisabledProps } from "@/lib/ccp/notice-bar";
