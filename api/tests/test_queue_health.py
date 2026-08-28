@@ -170,3 +170,69 @@ async def test_timeout_is_a_total_budget():
 
     cfg = {"queueHealthUrl": "http://q/h", "queueHealthTimeoutSeconds": 0.05}
     assert await queue_is_healthy(cfg, probe=stalling_probe) is False  # M2: wall clock
+
+
+# ── W3a §1.6：探測失敗的日誌只印 host:port ──────────────────────────────
+
+
+async def _probe_log_lines(config, probe):
+    """跑一次 queue_is_healthy，回傳它寫出的 WARNING 行。"""
+    from loguru import logger
+
+    from api.services.pipecat import queue_health as qh
+
+    captured: list[str] = []
+    handler_id = logger.add(lambda m: captured.append(str(m)), level="WARNING")
+    try:
+        qh.reset_cache()
+        await queue_is_healthy(config, probe=probe)
+    finally:
+        logger.remove(handler_id)
+        qh.reset_cache()
+    return captured
+
+
+async def test_probe_failure_log_omits_path_and_query():
+    """完整 URL 進日誌是 S16／F-14 的同型教訓（稽核記錄含 query string）。
+
+    這條線正好在**失敗時**觸發，也就是有人在讀日誌的時候。
+    """
+
+    async def failing_probe(url, token, timeout):
+        raise RuntimeError("boom")
+
+    url = "http://queue:8080/internal/health?tenant=acme&k=secret-ish"
+    lines = "\n".join(await _probe_log_lines({"queueHealthUrl": url}, failing_probe))
+    assert "queue:8080" in lines
+    assert "/internal/health" not in lines
+    assert "secret-ish" not in lines
+    # 例外只印類型名——``RuntimeError`` 的訊息可能含上游回應內容。
+    assert "RuntimeError" in lines
+    assert "boom" not in lines
+
+
+async def test_unhealthy_verdict_log_omits_path_and_query():
+    async def unhealthy_probe(url, token, timeout):
+        return False
+
+    url = "http://queue:8080/internal/health?tenant=acme"
+    lines = "\n".join(await _probe_log_lines({"queueHealthUrl": url}, unhealthy_probe))
+    assert "queue:8080" in lines
+    assert "/internal/health" not in lines
+    assert "tenant=acme" not in lines
+
+
+async def test_probe_log_never_leaks_userinfo():
+    """``netloc`` 會帶 userinfo，``hostname``/``port`` 不會。
+
+    通話期的形狀閘在此之前就擋掉 ``@``，但決定「印什麼」的是這個函式，
+    它不該把這件事外包給另一個模組的檢查。
+    """
+
+    async def failing_probe(url, token, timeout):
+        raise RuntimeError("boom")
+
+    url = "http://svc:pa55word@queue:8080/internal/health"
+    lines = "\n".join(await _probe_log_lines({"queueHealthUrl": url}, failing_probe))
+    assert "pa55word" not in lines
+    assert "queue:8080" in lines

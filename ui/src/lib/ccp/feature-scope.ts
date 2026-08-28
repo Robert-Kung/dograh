@@ -64,9 +64,22 @@ export const CCP_BLOCKED_TOOL_TYPES: readonly ToolCategory[] = [
  *
  * 形狀刻意做成 map 而不是兩個平行常數：正本是「這些鍵在**這個**工具類型上必填」，
  * 拆成兩個常數的話，日後正本多一個類型時這裡會靜默只覆蓋第一個。
+ *
+ * ## W3a：改錨，**不是**清空
+ *
+ * 設定分層把 `queueHealthUrl`／`queueHealthToken` 移出工具設定（改由部署層 env
+ * 供給），正本的必要鍵因此**改錨**在留下來的兩條失敗路徑話術上。
+ *
+ * 天真的「同批清空」在這裡有一個具體的壞結局，而它正是本檔 `:84-88` 逐字警告的
+ * 那一格：清空 → `ccpToolTypeAdmission` 回 `selectable: true` → `transfer_call`
+ * 在建立對話框裡變成可選 → 預設 definition 帶 `destination` → 命中正本新增的
+ * `forbidden_keys` → **送出必然 403**。使用者看到的是「UI 說可以建，建了就失敗」。
+ *
+ * 改錨之後 `selectable: false` 與 `CCP_DEFAULT_TOOL_CATEGORY` 都**自動維持不變**
+ * ——兩者都是集合運算而非硬編值（見下方兩處），所以這一格不需要額外的補償邏輯。
  */
 export const CCP_TOOL_TYPE_REQUIRED_KEYS: Readonly<Partial<Record<ToolCategory, readonly string[]>>> = {
-    transfer_call: ['queueHealthUrl', 'queueHealthToken'],
+    transfer_call: ['transferFailedMessage', 'transferUnavailableMessage'],
 };
 
 export interface CcpToolTypeAdmission {
@@ -103,8 +116,8 @@ export function ccpToolTypeAdmission(category: ToolCategory): CcpToolTypeAdmissi
         return {
             selectable: false,
             reason:
-                `${category} 的必要欄位（${requiredKeys.join('、')}）由部署層管理，`
-                + '新建時湊不齊，送出會被內容檢查擋下。'
+                `${category} 的必要欄位（${requiredKeys.join('、')}）新建時湊不齊，`
+                + '送出會被內容檢查擋下。'
                 + '轉接工具已由建置單位配置好，需要調整請與您的專案窗口提出。',
         };
     }

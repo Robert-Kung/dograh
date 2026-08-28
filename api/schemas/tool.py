@@ -182,16 +182,45 @@ class EndCallConfig(BaseModel):
 
 
 class TransferCallConfig(BaseModel):
-    """Configuration for Transfer Call tools."""
+    """Configuration for Transfer Call tools.
 
-    destination: str = Field(
+    **Two layers since W3a.** Six of these keys are *deployment layer* —
+    ``destination``, ``alternateDestination``, ``queueHealthUrl``,
+    ``queueHealthToken``, ``queueHealthTimeoutSeconds``,
+    ``queueHealthCacheTtlSeconds``. Their value is decided by the deployment
+    site, so they are supplied by environment and merged in at read time by
+    ``transfer_call_config.revalidate_transfer_config``; the platform repo's
+    version-controlled template no longer carries them and its enabled-set
+    canon rejects them on any write that reaches the editor gateway. The other
+    ten are *speech layer* and are seeded once.
+
+    **``destination`` had to become optional, and that is not a relaxation.**
+    It was ``str = Field(...)`` — no default, i.e. required. The moment the
+    template stops carrying the key, ``dograh-bootstrap.ensure_tools``'s PUT
+    would be refused by this model with a 422 and the deployment would block
+    itself. What actually guards the field is unchanged and is *not* this
+    annotation: :meth:`validate_destination` below still runs on every write
+    that carries a value, ``revalidate_transfer_config`` re-checks the merged
+    effective value on every read, and ``validate_transfer_config`` checks the
+    environment at boot. What the optionality removes is only "the key must be
+    present in the write body" — and that half moved to the canon's forbidden
+    keys, which is stricter: present is now *rejected*, not merely optional.
+    """
+
+    destination: Optional[str] = Field(
+        default=None,
         description=(
             "Where to transfer the call. A LiveKit REFER target: "
             "tel:+886912345678 or sip:queue@pbx.example. Asterisk dialstrings "
             "(PJSIP/1234, SIP/1001) and bare E.164 are no longer accepted — the "
             "LiveKit executor never dialled them, so accepting them here only "
-            "produced destinations that failed at REFER time."
-        )
+            "produced destinations that failed at REFER time. "
+            "**Deployment layer (W3a): the effective value comes from "
+            "DOGRAH_TRANSFER_DESTINATION, merged in at read time by "
+            "revalidate_transfer_config.** Optional here because the "
+            "version-controlled template no longer carries it — see the note "
+            "on this class."
+        ),
     )
     messageType: Literal["none", "custom", "audio"] = Field(
         default="none", description="Type of message to play before transfer."
@@ -297,15 +326,26 @@ class TransferCallConfig(BaseModel):
         choice, and the reason for it, is documented in
         ``capacity_gate._premium_rate``.
         """
-        if v is None or not v.strip():
-            # Blank means "unset" — legitimate for the optional after-hours
-            # alternate, never for the required target. A stored blank
-            # ``destination`` installs a press-0 gate that dials nothing, which
-            # is the W0 failure shape; reject it at the write instead.
+        if v is None:
+            # Absent. Legitimate for **both** fields since W3a: these are
+            # deployment-layer keys and the version-controlled template no
+            # longer carries them, so "not in the write body" is the normal
+            # shape. The effective value is merged in at read time and checked
+            # at boot; a missing key here is not the failure this validator is
+            # for.
+            return v
+        if not v.strip():
+            # Explicitly blanked, which is a different thing from absent and
+            # still rejected for the main target: a stored blank ``destination``
+            # installs a press-0 gate that dials nothing — the W0 failure shape.
+            # Absent degrades to the deployment layer; blank degrades to a
+            # transfer that silently cannot dial, so only the latter is a write
+            # this model refuses.
             if info.field_name == "destination":
                 raise ValueError(
-                    "Transfer destination must not be empty: a blank target "
-                    "installs a transfer that cannot dial."
+                    "Transfer destination must not be blank: a blank target "
+                    "installs a transfer that cannot dial. Omit the key "
+                    "entirely if the deployment layer supplies it."
                 )
             return v
 

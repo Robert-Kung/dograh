@@ -6,8 +6,22 @@ the in-call engine (voice tool / press-0, via
 ``PipecatEngine.resolve_transfer_call_config``) and the engine-less capacity
 overflow chain (S-L9-SCALE), which has a resolved workflow but no run. One
 lookup so the two can never disagree on where the gate config comes from.
+
+**W3a — the config now has two layers.** Six keys (``destination``,
+``alternateDestination``, ``queueHealthUrl``, ``queueHealthToken``,
+``queueHealthTimeoutSeconds``, ``queueHealthCacheTtlSeconds``) are *deployment
+layer*: their value is decided by the deployment site, not by whoever writes
+the script, so they are supplied by environment and overwrite whatever the tool
+definition carries. The other ten are *speech layer* and stay in the definition.
+:func:`deployment_transfer_config` reads the former; :func:`revalidate_transfer_config`
+merges them in **before** it validates, and :func:`validate_transfer_config`
+checks them once at boot. Why here and not in
+:func:`find_transfer_call_config`: there are **three** readers of this config,
+and only two of them go through that lookup — see the note on
+:func:`revalidate_transfer_config`.
 """
 
+import os
 from urllib.parse import urlsplit
 
 from loguru import logger
@@ -64,8 +78,314 @@ def _health_url_problem(value: str) -> str | None:
     return None
 
 
+# ── 部署層（W3a D1／D2）──────────────────────────────────────────────────
+# 鍵 → env 變數名，依 D1 的六欄順序。``DOGRAH_TRANSFER_DESTINATION`` 與
+# ``QUEUE_HEALTH_TOKEN`` 沿用今日 ``reception.json`` 的 ``${ENV:...}`` 佔位符所
+# 引用的名字（該範本於 W3a §2.1 移除這些鍵，變數名不變），其餘四個為新增。
+_DEPLOYMENT_ENV_KEYS: tuple[tuple[str, str], ...] = (
+    ("destination", "DOGRAH_TRANSFER_DESTINATION"),
+    ("alternateDestination", "DOGRAH_TRANSFER_ALTERNATE_DESTINATION"),
+    ("queueHealthUrl", "QUEUE_HEALTH_URL"),
+    ("queueHealthToken", "QUEUE_HEALTH_TOKEN"),
+    ("queueHealthTimeoutSeconds", "QUEUE_HEALTH_TIMEOUT_SECONDS"),
+    ("queueHealthCacheTtlSeconds", "QUEUE_HEALTH_CACHE_TTL_SECONDS"),
+)
+
+_NUMERIC_DEPLOYMENT_KEYS = frozenset(
+    {"queueHealthTimeoutSeconds", "queueHealthCacheTtlSeconds"}
+)
+
+# ── 過渡態，於 W3a §5.1 移除（D13）──────────────────────────────────────
+# True 時，某個部署層鍵在 env 缺值就**保留資料庫內的值**。這是遷移步驟 1–3 的
+# 向後相容：第 1 步只落地 dograh 側，env 尚未佈線，關掉它會讓每一通轉接當場失去
+# 目的地。
+#
+# **這不是永久行為，spec 逐字寫 MUST NOT。** 留著的後果與開機期驗證疊加：env 未
+# 設定不會大聲失敗，而是靜默回退到資料庫內的殘值——或經寫入路徑塞進去的值，而
+# 「部署層覆蓋一切」正是分層的整個防護論述。
+#
+# §5.1 的動作：把本常數改為 False、刪掉 :func:`_merge_deployment_layer` 內引用它
+# 的分支（缺值即讓該鍵不存在），並把 :func:`validate_transfer_config` 自警告模式
+# 收緊為擋開機（§5.2）。三件事同批，缺一即為「移除了 fallback 卻沒有人守著缺值」。
+_MIGRATION_DB_FALLBACK = True
+
+
+def deployment_transfer_config() -> dict:
+    """部署層供給的轉接設定，只含**實際供給**的鍵。缺值不入結果、不拋例外。
+
+    **每次呼叫都讀 ``os.environ``**（D2）。MUST NOT 在 import 期讀進模組常數：
+    D5 宣稱「憑證輪替只要改 env 就生效、不需要 re-apply」，而 import 期讀會讓輪替
+    需要重啟 ``dograh-api``，那會斷掉進行中的通話——該宣稱就不成立了。
+
+    空字串與純空白視同未供給，與 ``fallback_queue()``／``overflow_transfer_to()``
+    的既有慣例一致（``.env`` 裡一個沒填值的鍵是「沒設定」，不是「設定成空字串」）。
+
+    兩個秒數欄位能轉 float 就轉，轉不動就**原樣保留字串**：下游
+    ``queue_health._bounded_seconds`` 對兩者都寬容（junk → 用預設值，永不拋），
+    而在這裡拋例外會讓一個打錯的 env 值變成每通電話的例外。形狀不合的回報由
+    :func:`validate_transfer_config` 在開機期負責，那才是它該大聲的地方。
+    """
+    supplied: dict = {}
+    for key, env_name in _DEPLOYMENT_ENV_KEYS:
+        raw = os.environ.get(env_name)
+        if raw is None:
+            continue
+        value = raw.strip()
+        if not value:
+            continue
+        if key in _NUMERIC_DEPLOYMENT_KEYS:
+            try:
+                supplied[key] = float(value)
+                continue
+            except ValueError:
+                pass
+        supplied[key] = value
+    return supplied
+
+
+def _merge_deployment_layer(config: dict) -> dict:
+    """部署層無條件勝出；缺值時（限期）保留資料庫值。
+
+    **覆蓋方向不可反轉**：``fallback``（資料庫有值就用資料庫）會讓一次經編輯器的
+    寫入永久壓過部署層，憑證輪替再度失效——那正是分層要消除的失效。
+    """
+    supplied = deployment_transfer_config()
+    merged = dict(config)
+    for key, env_name in _DEPLOYMENT_ENV_KEYS:
+        if key in supplied:
+            merged[key] = supplied[key]
+            continue
+        if _MIGRATION_DB_FALLBACK:
+            # 過渡態（D13）——見 _MIGRATION_DB_FALLBACK 的說明與 §5.1。
+            continue
+        merged.pop(key, None)
+    return merged
+
+
+# ── 開機期驗證（W3a D10）────────────────────────────────────────────────
+# 警告模式，於 W3a §5.2 改為 True（不合格即 RuntimeError 擋開機）。
+#
+# **為什麼分兩段**：D8 的第 1 步只落地 dograh 側，此時 6 個 env 尚未佈線，直接擋
+# 開機會讓 dograh 起不來、整套部署卡在第一步。警告模式在第 1–3 步提供可見性；
+# 第 4 步（§5）與 :data:`_MIGRATION_DB_FALLBACK` 的移除**同批**收緊——只做其中一件
+# 都會留下一個缺口：先收緊而不移 fallback，缺值時擋開機但有值時仍讓 DB 值勝出；
+# 先移 fallback 而不收緊，缺值時靜默無值。
+_VALIDATE_BLOCKS_BOOT = False
+
+# 健康探測秒數的下界。上游 ``queue_health._bounded_seconds`` 只 clamp **上界**
+# （2.0／60.0）並拒負值，於是顯式的 ``0.001`` 會被誠實採用 → 探測必逾時 →
+# 恆判不健康 → **營運時間內的真人轉接全滅**（W2c review M-6）。
+#
+# **這個數字在 ``deploy/preflight.sh`` 有一份刻意的複本**（W3a §2.7）：那一份是
+# 部署期的擋門，這一份是開機期的。兩處都要，理由與 D10 相同——preflight 有已知
+# 繞道且是一次性，而本檔看得到行程實際讀到的值。改一處 SHALL 同批改另一處。
+_MIN_PROBE_SECONDS = 0.2
+
+
+def validate_transfer_config() -> None:
+    """開機期檢查部署層供給的 6 個值（W3a D10）。
+
+    鏡像 ``validate_safetynet_config``（``livekit_safetynet.py``）與
+    ``validate_capacity_config``（``capacity_gate.py``）：同一類「由 env 承載的
+    轉接目的地」，本 repo 已有成熟先例，兩者都是不合格直接 ``RuntimeError``。
+
+    **為什麼非有不可。** 六欄移出 ``definition.config`` 之後，「這些值有沒有被
+    供給」的執行點自三個（preflight／bootstrap prescan／gateway admission）降為
+    **preflight 一個**，而它是部署期一次性、且有已知繞道（RUNBOOK 記載的手動
+    一次性容器、指向他處的 ``DOGRAH_WORKFLOW_DIR``），繞過即零執行點。而未供給的
+    後果不是「功能沒開」而是**控制靜默消失**：``queue_is_healthy`` 在 URL 未設定時
+    ``return True``（fail-open），隊列健康閘整個不見，每位要求真人的來電者被 REFER
+    進一個可能已死的隊列。
+
+    **通話期的 ``revalidate`` 不算等效執行點**：它對不合格值的處置是把
+    ``destination`` 抹白、逐通降級，不是大聲失敗，而且它每通重複一次無人看見的降級。
+
+    檢查四類：存在性、形狀（含高費率號段）、``queueHealthUrl`` 的 scheme／host
+    白名單、兩個秒數的數值合法性與下界。
+
+    **白名單的差額是宣告過的，不是遺漏**：正本的 ``_check_url``（userinfo、IDN、
+    尾隨點、顯式埠）住在 ``deploy/bin/feature_scope_check.py``，**沒有** bind-mount
+    進本容器——掛進來的只有 JSON。故這裡讀同一份 JSON 的規則、套用做得到的子集
+    （scheme ＋ ``host:port``），完整那一份由 ``preflight.sh`` 對同一組 env 值執行
+    （W3a §2.6）。
+
+    警告模式時（:data:`_VALIDATE_BLOCKS_BOOT` 為 False）逐條 log 之後正常返回。
+    """
+    problems: list[str] = []
+    supplied = deployment_transfer_config()
+
+    # ① 存在性。三個鍵的缺席各自關掉一個控制，故逐鍵指名而不是「有幾個沒設」。
+    for key, env_name in _DEPLOYMENT_ENV_KEYS:
+        if key in ("alternateDestination",):
+            # 非營運替代目的地是選填：未設定＝不走 alternate_queue 分支，
+            # 那是一個有效的部署形態，不是缺陷。
+            continue
+        if key in supplied:
+            continue
+        if key in _NUMERIC_DEPLOYMENT_KEYS:
+            # 未設定＝採 queue_health 的預設值（0.5／5.0），是合法形態。
+            continue
+        problems.append(f"{env_name} is not set")
+
+    # ② 目的地形狀與高費率號段。兩個欄位同型、同一份解析器。
+    destinations = [
+        (key, env_name, supplied[key])
+        for key, env_name in _DEPLOYMENT_ENV_KEYS
+        if key in ("destination", "alternateDestination") and key in supplied
+    ]
+    if destinations:
+        from api.services.platform_scope import (
+            PlatformArtifactMissing,
+            log_artifact_missing,
+            parse_refer_uri,
+        )
+
+        try:
+            for key, env_name, value in destinations:
+                parsed = parse_refer_uri(value)
+                if not parsed.ok:
+                    # ``parsed.reason`` 依該模組契約不含輸入的任何片段——這個值
+                    # 可能是客戶號碼或內部 PBX 主機，而本訊息會進啟動日誌。
+                    problems.append(
+                        f"{env_name} is not a valid REFER target: {parsed.reason}"
+                    )
+                    continue
+                from api.services.pipecat.capacity_gate import (
+                    PREMIUM_RATE_PREFIXES,
+                    _premium_rate,
+                )
+
+                if _premium_rate(value):
+                    problems.append(
+                        f"{env_name} matches a premium-rate prefix {PREMIUM_RATE_PREFIXES}"
+                    )
+        except PlatformArtifactMissing as exc:
+            # 缺 mount 不擋開機（D-A5 的既有取捨：一個少掉的 ``-v`` MUST NOT 變成
+            # 「dograh-api 不啟動」＝平台停止接聽電話）。記為一條 problem，讓它照
+            # 本函式的模式處置。
+            log_artifact_missing("validate_transfer_config", exc)
+            problems.append(
+                "transfer destinations could not be shape-checked: the shared "
+                "REFER URI parser is not mounted"
+            )
+
+    # ③ queueHealthUrl 的 scheme／host 白名單。
+    health_url = supplied.get("queueHealthUrl")
+    if health_url:
+        problem = _health_url_problem(str(health_url))
+        if problem:
+            problems.append(f"QUEUE_HEALTH_URL {problem}")
+        else:
+            problems.extend(_allowlist_problems(str(health_url)))
+
+    # ④ 兩個秒數：數值合法性與下界。
+    for key, env_name in _DEPLOYMENT_ENV_KEYS:
+        if key not in _NUMERIC_DEPLOYMENT_KEYS or key not in supplied:
+            continue
+        value = supplied[key]
+        if not isinstance(value, float):
+            # deployment_transfer_config 轉不動就原樣留字串——那就是「不是數字」。
+            problems.append(f"{env_name} is not a number: {value!r}")
+            continue
+        if value < _MIN_PROBE_SECONDS:
+            problems.append(
+                f"{env_name} is {value}, below the {_MIN_PROBE_SECONDS}s floor; "
+                "a probe budget this small times out every time, which pins the "
+                "health verdict to unhealthy and refuses every in-hours transfer"
+            )
+
+    if not problems:
+        return
+
+    if _VALIDATE_BLOCKS_BOOT:
+        raise RuntimeError(
+            "transfer deployment config is not usable: " + "; ".join(problems)
+        )
+    for problem in problems:
+        logger.bind(call_event="transfer.deploy_config_invalid").error(
+            f"transfer.deploy_config_invalid: {problem} "
+            "(W3a migration: warning mode, boot continues — tightened in §5.2)"
+        )
+
+
+def _allowlist_problems(url: str) -> list[str]:
+    """``queueHealthUrl`` vs the canon's ``constrained_values`` entry.
+
+    Returns the subset of ``_check_url``'s verdicts that can be reached from
+    inside this container: the canon JSON is mounted, its Python is not.
+    A canon with no rule for the key yields one explicit problem rather than a
+    silent pass — "the rule is still in the canon" MUST NOT be read as "the
+    control still fires", which is precisely the failure this check exists for.
+    """
+    from api.services.platform_scope import (
+        PlatformArtifactMissing,
+        log_artifact_missing,
+        queue_health_url_constraints,
+    )
+
+    try:
+        rule = queue_health_url_constraints()
+    except PlatformArtifactMissing as exc:
+        log_artifact_missing("validate_transfer_config/allowlist", exc)
+        return [
+            "QUEUE_HEALTH_URL could not be allowlist-checked: the feature scope canon is not mounted"
+        ]
+
+    schemes = rule.get("allowed_schemes")
+    hosts = rule.get("allowed_hosts")
+    if not schemes and not hosts:
+        return [
+            "QUEUE_HEALTH_URL has no allowlist to check against: the canon carries "
+            "no allowed_schemes/allowed_hosts for queueHealthUrl"
+        ]
+
+    parts = urlsplit(url)
+    problems: list[str] = []
+    if schemes and parts.scheme not in schemes:
+        problems.append(
+            f"QUEUE_HEALTH_URL scheme {parts.scheme!r} is not in {list(schemes)}"
+        )
+    if hosts:
+        # ``netloc`` 而非 ``hostname``：正本的 allowed_hosts 逐字是 ``queue:8080``，
+        # 埠是它的一部分。userinfo 已由 _health_url_problem 的 ``@`` 檢查擋掉，
+        # 故此處的 netloc 就是 host[:port]。
+        if parts.netloc not in hosts:
+            problems.append(
+                f"QUEUE_HEALTH_URL host {parts.netloc!r} is not in {list(hosts)}"
+            )
+    return problems
+
+
 def revalidate_transfer_config(config: dict) -> dict | None:
-    """Re-check the shapes this config carries, at read time (issue #3).
+    """Merge the deployment layer in, then re-check every shape (issue #3, W3a).
+
+    **This is also the merge point for the deployment-layer six** (W3a D3), and
+    the merge happens *first*, above every check below — so validation always
+    sees the **effective** value, never the definition's stale copy. The
+    ordering is not a convention this function has to remember: the merge is at
+    the top of the one function that is itself the validator, so "merged before
+    validated" holds by position.
+
+    **Why here and not in :func:`find_transfer_call_config`.** There are three
+    readers of a transfer config, and that lookup is only on two of them:
+
+    ==================================== =========================== ============
+    reader                               trigger                     via lookup?
+    ==================================== =========================== ============
+    ``capacity_gate``                    capacity overflow           yes
+    ``pipecat_engine``                   press-0 / safetynet         yes
+    ``pipecat_engine_custom_tools``      caller asks for a human     **no**
+    ==================================== =========================== ============
+
+    The third reads ``tool.definition["config"]`` straight off the ORM row and
+    calls *this* function directly (see the paragraph below, which predates
+    W3a). Merging in the lookup instead would leave that path — the one its own
+    comment calls "the highest-volume trigger" — with **no destination at all**
+    once the version-controlled template stops carrying one, and, worse, with
+    the *database* value still winning: a ``destination`` or ``queueHealthToken``
+    written through the editor, or restored from an old backup, would go on
+    being dialled on the busiest path while the layering claims deployment
+    overrides everything.
 
     **Public because this lookup is not the only reader.** The AI-initiated
     transfer tool handler (``pipecat_engine_custom_tools`` /
@@ -123,6 +443,13 @@ def revalidate_transfer_config(config: dict) -> dict | None:
         log_artifact_missing,
         parse_refer_uri,
     )
+
+    # Deployment layer first (W3a D3) — everything below validates the merged,
+    # effective value. "It came from the deployment env" is **not** a licence to
+    # skip the shape gate or the premium-rate guard: that is this change's
+    # single most likely failure mode, so the merge deliberately lands above
+    # the checks rather than beside them.
+    config = _merge_deployment_layer(config)
 
     destination = config.get("destination")
     try:

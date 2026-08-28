@@ -193,6 +193,40 @@ def allowed_tool_categories() -> frozenset[str]:
     return frozenset(str(item) for item in allowed)
 
 
+def queue_health_url_constraints() -> dict:
+    """``field_rules.constrained_values.queueHealthUrl`` from the canon.
+
+    W3a D10/D11: the deployment-layer six moved out of ``definition.config``,
+    so ``feature_scope_check.check_definition`` no longer has a ``queueHealthUrl``
+    key to match — the ``allowed_hosts`` rule (the **only** egress destination
+    allowlist that actually fires anywhere in this system, CS-19/R-E) would
+    become dead code with no alarm. The platform repo re-points it at the
+    deployment env in ``preflight.sh``; this accessor is the *boot-time* half,
+    so the value the app will actually dial is checked against the same canon
+    rather than against a second hand-maintained copy inside this repo.
+
+    ``_check_url`` itself (the richer implementation: userinfo, IDN, trailing
+    dot, explicit ports) lives in ``deploy/bin/feature_scope_check.py`` and is
+    **not** mounted here — only the JSON is. So this returns the *rule*, and
+    :func:`~api.services.pipecat.transfer_call_config.validate_transfer_config`
+    applies the subset it can: scheme and ``host:port``. The difference is a
+    declared delta, not an oversight.
+
+    Returns ``{}`` when the canon carries no rule for the key — the caller
+    treats that as "no allowlist to enforce" and says so, rather than inventing
+    one.
+    """
+    scope = load_feature_scope()
+    rules = scope.get("field_rules")
+    if not isinstance(rules, dict):
+        return {}
+    constrained = rules.get("constrained_values")
+    if not isinstance(constrained, dict):
+        return {}
+    entry = constrained.get("queueHealthUrl")
+    return entry if isinstance(entry, dict) else {}
+
+
 def log_artifact_missing(where: str, exc: PlatformArtifactMissing) -> None:
     """One high-signal line, shaped like ``tool_trust.log_denied_tool``.
 
