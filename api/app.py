@@ -87,6 +87,17 @@ async def lifespan(app: FastAPI):
 
         validate_capacity_config()
 
+        # W3a: the transfer gate's six deployment-layer values now come from
+        # the environment, so "were they supplied, and are they usable" has to
+        # be answered here — the write-time required-key rule that used to
+        # answer it no longer sees these fields, and the deployment preflight
+        # is a one-shot with documented bypasses. Warning mode during the
+        # migration; tightened to a boot-blocking raise in §5.2 together with
+        # the removal of the transitional database fallback.
+        from api.services.pipecat.transfer_call_config import validate_transfer_config
+
+        validate_transfer_config()
+
         # S-L7-OBS: say once whether call alerting is active.
         from api.services.observability.alerts import log_alert_startup_status
 

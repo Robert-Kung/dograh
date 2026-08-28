@@ -55,6 +55,30 @@ def _text(raw) -> str:
     return raw.strip() if isinstance(raw, str) else ""
 
 
+def _log_target(url: str) -> str:
+    """``host:port`` for logs. Never raises, never returns any other part.
+
+    ``urlsplit`` and ``.port`` both raise on some inputs, and a raise here would
+    escape into the probe's caller — so an unparseable URL degrades to a fixed
+    string rather than to the value itself.
+    """
+    from urllib.parse import urlsplit
+
+    try:
+        parts = urlsplit(url)
+        host, port = parts.hostname, parts.port
+    except ValueError:
+        return "(unparseable URL)"
+    if not host:
+        return "(no host)"
+    # ``hostname``/``port``, not ``netloc``: netloc still carries userinfo, and
+    # ``user:password@`` is exactly the kind of thing that must not reach a log
+    # line. The call-time shape check rejects ``@`` before we get here, but this
+    # function is the one that decides what gets printed, so it does not lean on
+    # a check in another module for that.
+    return f"{host}:{port}" if port else host
+
+
 async def _http_health(url: str, token: str, timeout: float) -> bool:
     import httpx
 
@@ -97,6 +121,12 @@ async def queue_is_healthy(
     if cached is not None and cached[0] > now:
         return cached[1]
 
+    # Only ``host:port`` reaches the log, never the URL. The full value carries
+    # a path and can carry a query string, and this line fires on a *failure*,
+    # i.e. exactly when someone is reading logs (S16 / F-14: "audit record
+    # contains the query string" — same lesson, different file). The identity
+    # the operator needs in order to act is which host was probed.
+    where = _log_target(url)
     try:
         # wait_for makes the timeout a TOTAL budget — the httpx timeout alone
         # is per-phase (connect/read/write each), up to ~4x in the worst case
@@ -105,10 +135,13 @@ async def queue_is_healthy(
             (probe or _http_health)(url, token, timeout), timeout=timeout
         )
     except Exception as e:
-        logger.warning(f"queue health probe failed ({url}): {e}; treating as unhealthy")
+        logger.warning(
+            f"queue health probe failed ({where}): {type(e).__name__}; "
+            "treating as unhealthy"
+        )
         healthy = False
     if not healthy:
-        logger.warning(f"queue service unhealthy ({url}); transfer gate will hold")
+        logger.warning(f"queue service unhealthy ({where}); transfer gate will hold")
     _cache[url] = (now + ttl, healthy)
     return healthy
 

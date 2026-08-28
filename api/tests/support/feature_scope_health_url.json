@@ -1,0 +1,23 @@
+{
+  "_readme": [
+    "TEST FIXTURE mirroring the SHAPE of the delivered canon's constrained_values",
+    "entry for queueHealthUrl (W3a). It is not the canon itself and is not kept",
+    "in sync automatically: it exists so validate_transfer_config's allowlist",
+    "check can be exercised without the platform repo being checked out.",
+    "",
+    "The real canon is deploy/feature-scope.json in the platform repo. Tests that",
+    "must assert against the real thing point PLATFORM_FEATURE_SCOPE at it."
+  ],
+  "version": 0,
+  "allowed_tool_types": ["transfer_call", "end_call"],
+  "blocked_tool_types": ["calculator", "http_api", "mcp", "native", "integration"],
+  "field_rules": {
+    "constrained_values": {
+      "queueHealthUrl": {
+        "kind": "url",
+        "allowed_schemes": ["http"],
+        "allowed_hosts": ["queue:8080"]
+      }
+    }
+  }
+}

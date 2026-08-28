@@ -104,3 +104,64 @@ def test_unavailable_announce_limit_must_be_positive():
     # an unmounted parser fails this request before the limit is ever looked at.
     with pytest.raises(ValidationError, match="unavailableAnnounceLimit"):
         _create_request(dict(GATE_CONFIG, unavailableAnnounceLimit=0))
+
+
+# ── W3a §1.3：``destination`` 由必填改選填 ──────────────────────────────
+
+
+@requires_sip_uri
+def test_speech_layer_only_config_validates():
+    """本 change 的整條遷移鏈掛在這一條上。
+
+    版控範本移除部署層六欄之後，``ensure_tools`` 送出的 PUT 就長這個樣子。
+    ``destination`` 若仍是 ``str = Field(...)``（無 default ＝ 必填），這個 body
+    會被上游 pydantic 以 **422** 擋下——bootstrap 自我阻擋，整套部署卡在第 2 步，
+    而症狀（「部署跑不起來」）與病因（一個 schema 註記）隔了三個檔案。
+    """
+    speech_only = {
+        "messageType": "custom",
+        "customMessage": "正在為您轉接真人客服，請稍候。",
+        "timeout": 30,
+        "afterHoursAction": "back_to_ai",
+        "afterHoursMessage": "目前是非營業時間。",
+        "transferFailedMessage": "轉接暫時沒有成功。",
+        "transferUnavailableMessage": "真人客服目前無法接聽。",
+        "unavailableAnnounceLimit": 2,
+    }
+    dumped = _create_request(speech_only).definition.model_dump()["config"]
+    for key, want in speech_only.items():
+        assert dumped[key] == want
+    # 六欄全部以 None 落庫（``model_dump`` 預設 ``exclude_none=False``）——
+    # 這正是 §3 要清的殘留形狀，這裡先把它釘住。
+    for key in (
+        "destination",
+        "alternateDestination",
+        "queueHealthUrl",
+        "queueHealthToken",
+        "queueHealthTimeoutSeconds",
+        "queueHealthCacheTtlSeconds",
+    ):
+        assert dumped[key] is None
+
+
+@requires_sip_uri
+def test_blank_destination_is_still_refused():
+    """選填 ≠ 可以是空字串。
+
+    缺席會退到部署層；**空字串會裝上一個撥不出去的轉接**（W0 的失效形狀），
+    而它形狀上是「有值」，所以不會落進任何「未設定」分支。兩者不是同一件事，
+    只有後者是這個模型該拒的寫入。
+    """
+    with pytest.raises(ValidationError, match="must not be blank"):
+        _create_request(dict(GATE_CONFIG, destination="   "))
+
+
+@requires_sip_uri
+def test_absent_destination_is_not_confused_with_blank():
+    """對照組：上一條的訊息 MUST NOT 在「缺席」時也出現。
+
+    沒有這條對照，上一條在「兩種都拒」的實作下**照樣綠**，而那個實作就是
+    422 自我阻擋本身。
+    """
+    request = _create_request({"messageType": "none"})
+    assert request.definition.config.destination is None
