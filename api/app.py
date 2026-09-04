@@ -91,9 +91,17 @@ async def lifespan(app: FastAPI):
         # the environment, so "were they supplied, and are they usable" has to
         # be answered here — the write-time required-key rule that used to
         # answer it no longer sees these fields, and the deployment preflight
-        # is a one-shot with documented bypasses. Warning mode during the
-        # migration; tightened to a boot-blocking raise in §5.2 together with
-        # the removal of the transitional database fallback.
+        # is a one-shot with documented bypasses.
+        #
+        # **This raises and blocks boot** (W3a §5.2; the migration's warning
+        # mode is over, and the transitional database fallback is gone with
+        # it). A refusal to start is the loud end of the trade: the quiet end
+        # is `queue_is_healthy` returning True on a missing URL — the health
+        # gate silently absent while every caller asking for a human is
+        # REFERed into a queue that may be dead.
+        #
+        # A *missing bind mount* does not block boot; the validator keeps that
+        # class separate and logs it as unverified (see its docstring).
         from api.services.pipecat.transfer_call_config import validate_transfer_config
 
         validate_transfer_config()
