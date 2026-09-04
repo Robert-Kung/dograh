@@ -95,21 +95,6 @@ _NUMERIC_DEPLOYMENT_KEYS = frozenset(
     {"queueHealthTimeoutSeconds", "queueHealthCacheTtlSeconds"}
 )
 
-# ── 過渡態，於 W3a §5.1 移除（D13）──────────────────────────────────────
-# True 時，某個部署層鍵在 env 缺值就**保留資料庫內的值**。這是遷移步驟 1–3 的
-# 向後相容：第 1 步只落地 dograh 側，env 尚未佈線，關掉它會讓每一通轉接當場失去
-# 目的地。
-#
-# **這不是永久行為，spec 逐字寫 MUST NOT。** 留著的後果與開機期驗證疊加：env 未
-# 設定不會大聲失敗，而是靜默回退到資料庫內的殘值——或經寫入路徑塞進去的值，而
-# 「部署層覆蓋一切」正是分層的整個防護論述。
-#
-# §5.1 的動作：把本常數改為 False、刪掉 :func:`_merge_deployment_layer` 內引用它
-# 的分支（缺值即讓該鍵不存在），並把 :func:`validate_transfer_config` 自警告模式
-# 收緊為擋開機（§5.2）。三件事同批，缺一即為「移除了 fallback 卻沒有人守著缺值」。
-_MIGRATION_DB_FALLBACK = True
-
-
 def deployment_transfer_config() -> dict:
     """部署層供給的轉接設定，只含**實際供給**的鍵。缺值不入結果、不拋例外。
 
@@ -144,34 +129,29 @@ def deployment_transfer_config() -> dict:
 
 
 def _merge_deployment_layer(config: dict) -> dict:
-    """部署層無條件勝出；缺值時（限期）保留資料庫值。
+    """部署層**無條件**勝出：供給即覆蓋，未供給即讓該鍵不存在。
 
     **覆蓋方向不可反轉**：``fallback``（資料庫有值就用資料庫）會讓一次經編輯器的
     寫入永久壓過部署層，憑證輪替再度失效——那正是分層要消除的失效。
+
+    **遷移期的 DB fallback 已於 W3a §5.1 移除**（D13 的限期例外到期）。移除之後
+    未供給的鍵**不會**留下資料庫內的殘值：那個殘值可能是分層之前的舊憑證、也可能
+    是經某條寫入路徑塞進來的目的地，而「部署層覆蓋一切」正是分層的整個防護論述。
+    缺值的可見性由 :func:`validate_transfer_config` 在開機期擋下——**兩者同批**，
+    只做其中一件都會留下缺口：只移 fallback 而不擋開機，缺值時靜默無值
+    （``queue_is_healthy`` 的 URL 缺席是 fail-open，健康閘整個消失）。
     """
     supplied = deployment_transfer_config()
     merged = dict(config)
-    for key, env_name in _DEPLOYMENT_ENV_KEYS:
+    for key, _env_name in _DEPLOYMENT_ENV_KEYS:
         if key in supplied:
             merged[key] = supplied[key]
-            continue
-        if _MIGRATION_DB_FALLBACK:
-            # 過渡態（D13）——見 _MIGRATION_DB_FALLBACK 的說明與 §5.1。
-            continue
-        merged.pop(key, None)
+        else:
+            merged.pop(key, None)
     return merged
 
 
 # ── 開機期驗證（W3a D10）────────────────────────────────────────────────
-# 警告模式，於 W3a §5.2 改為 True（不合格即 RuntimeError 擋開機）。
-#
-# **為什麼分兩段**：D8 的第 1 步只落地 dograh 側，此時 6 個 env 尚未佈線，直接擋
-# 開機會讓 dograh 起不來、整套部署卡在第一步。警告模式在第 1–3 步提供可見性；
-# 第 4 步（§5）與 :data:`_MIGRATION_DB_FALLBACK` 的移除**同批**收緊——只做其中一件
-# 都會留下一個缺口：先收緊而不移 fallback，缺值時擋開機但有值時仍讓 DB 值勝出；
-# 先移 fallback 而不收緊，缺值時靜默無值。
-_VALIDATE_BLOCKS_BOOT = False
-
 # 健康探測秒數的下界。上游 ``queue_health._bounded_seconds`` 只 clamp **上界**
 # （2.0／60.0）並拒負值，於是顯式的 ``0.001`` 會被誠實採用 → 探測必逾時 →
 # 恆判不健康 → **營運時間內的真人轉接全滅**（W2c review M-6）。
@@ -209,9 +189,22 @@ def validate_transfer_config() -> None:
     （scheme ＋ ``host:port``），完整那一份由 ``preflight.sh`` 對同一組 env 值執行
     （W3a §2.6）。
 
-    警告模式時（:data:`_VALIDATE_BLOCKS_BOOT` 為 False）逐條 log 之後正常返回。
+    **不合格即 ``RuntimeError``**（W3a §5.2；遷移期的警告模式已到期）。
+
+    **但「檢查跑不成」與「值不合格」分開處置**（§5.2 落地時發現的缺口）。本函式有
+    兩條「跑不成」的路徑，兩者都是少掉一個 ``-v``：共用的 REFER URI 解析器沒掛進來、
+    啟用集合正本沒掛進來。收緊之後若把它們一併算成不合格，一個漏掛的掛載就會讓
+    ``dograh-api`` 起不來——**平台整個停止接聽電話**，而 D-A5 對這一取捨已有明確
+    結論：一個少掉的 ``-v`` MUST NOT 變成「不啟動」。故：
+
+    - **值不合格 → 擋開機**（缺值、形狀不合、命中高費率、不在白名單、秒數越界）。
+    - **檢查不可用 → 大聲 log、不擋開機**，並在訊息裡說明它**沒有**被驗過。
+      這不是「缺檔當成沒東西要檢查」的翻版：掛載本身在部署期有執行點
+      （``preflight.sh`` 讀 compose 渲染結果驗掛載），而值本身也已被 preflight
+      對同一組 env 驗過一次。這裡失去的是開機期的第二道，不是唯一一道。
     """
     problems: list[str] = []
+    unverifiable: list[str] = []
     supplied = deployment_transfer_config()
 
     # ① 存在性。三個鍵的缺席各自關掉一個控制，故逐鍵指名而不是「有幾個沒設」。
@@ -264,7 +257,7 @@ def validate_transfer_config() -> None:
             # 「dograh-api 不啟動」＝平台停止接聽電話）。記為一條 problem，讓它照
             # 本函式的模式處置。
             log_artifact_missing("validate_transfer_config", exc)
-            problems.append(
+            unverifiable.append(
                 "transfer destinations could not be shape-checked: the shared "
                 "REFER URI parser is not mounted"
             )
@@ -276,7 +269,9 @@ def validate_transfer_config() -> None:
         if problem:
             problems.append(f"QUEUE_HEALTH_URL {problem}")
         else:
-            problems.extend(_allowlist_problems(str(health_url)))
+            verdicts, unchecked = _allowlist_problems(str(health_url))
+            problems.extend(verdicts)
+            unverifiable.extend(unchecked)
 
     # ④ 兩個秒數：數值合法性與下界。
     for key, env_name in _DEPLOYMENT_ENV_KEYS:
@@ -294,28 +289,37 @@ def validate_transfer_config() -> None:
                 "health verdict to unhealthy and refuses every in-hours transfer"
             )
 
+    # 「沒驗成」永遠說出來，**且在拋例外之前說**：不合格與沒驗成可能同時發生，
+    # 而 RuntimeError 只帶得走前者。先 log 才不會讓後者被前者吃掉。
+    for item in unverifiable:
+        logger.bind(call_event="transfer.deploy_config_unverified").error(
+            f"transfer.deploy_config_unverified: {item} "
+            "(boot continues by design — a missing bind mount must not take the "
+            "platform off the air; this value was NOT checked at boot)"
+        )
+
     if not problems:
         return
 
-    if _VALIDATE_BLOCKS_BOOT:
-        raise RuntimeError(
-            "transfer deployment config is not usable: " + "; ".join(problems)
-        )
-    for problem in problems:
-        logger.bind(call_event="transfer.deploy_config_invalid").error(
-            f"transfer.deploy_config_invalid: {problem} "
-            "(W3a migration: warning mode, boot continues — tightened in §5.2)"
-        )
+    raise RuntimeError(
+        "transfer deployment config is not usable: " + "; ".join(problems)
+    )
 
 
-def _allowlist_problems(url: str) -> list[str]:
+def _allowlist_problems(url: str) -> tuple[list[str], list[str]]:
     """``queueHealthUrl`` vs the canon's ``constrained_values`` entry.
 
-    Returns the subset of ``_check_url``'s verdicts that can be reached from
-    inside this container: the canon JSON is mounted, its Python is not.
-    A canon with no rule for the key yields one explicit problem rather than a
-    silent pass — "the rule is still in the canon" MUST NOT be read as "the
-    control still fires", which is precisely the failure this check exists for.
+    Returns ``(verdicts, unchecked)``: the subset of ``_check_url``'s verdicts
+    that can be reached from inside this container (the canon JSON is mounted,
+    its Python is not), and separately the reasons the check could not run at
+    all. **The split matters after W3a §5.2**: verdicts block boot, "could not
+    run" does not — a missing bind mount must not take the platform off the air
+    (D-A5).
+
+    A canon that *is* mounted but carries no rule for the key is a **verdict**,
+    not "could not run": "the rule is still in the canon" MUST NOT be read as
+    "the control still fires", and that one is a version-controlled mistake
+    someone can fix, not a deployment-time mount slip.
     """
     from api.services.platform_scope import (
         PlatformArtifactMissing,
@@ -327,7 +331,7 @@ def _allowlist_problems(url: str) -> list[str]:
         rule = queue_health_url_constraints()
     except PlatformArtifactMissing as exc:
         log_artifact_missing("validate_transfer_config/allowlist", exc)
-        return [
+        return [], [
             "QUEUE_HEALTH_URL could not be allowlist-checked: the feature scope canon is not mounted"
         ]
 
@@ -337,7 +341,7 @@ def _allowlist_problems(url: str) -> list[str]:
         return [
             "QUEUE_HEALTH_URL has no allowlist to check against: the canon carries "
             "no allowed_schemes/allowed_hosts for queueHealthUrl"
-        ]
+        ], []
 
     parts = urlsplit(url)
     problems: list[str] = []
@@ -353,7 +357,7 @@ def _allowlist_problems(url: str) -> list[str]:
             problems.append(
                 f"QUEUE_HEALTH_URL host {parts.netloc!r} is not in {list(hosts)}"
             )
-    return problems
+    return problems, []
 
 
 def revalidate_transfer_config(config: dict) -> dict | None:

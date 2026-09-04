@@ -267,6 +267,29 @@ def _workflow_with_transfer_tool():
     return workflow
 
 
+#: 部署層六欄 → env 變數名（W3a）。**這一組值不再能經資料庫供給**：
+#: `_merge_deployment_layer` 在 env 未供給時讓該鍵不存在（§5.1 移除了限期 fallback），
+#: 所以本檔原本把 destination／health 鍵塞進 tool config 的做法，測到的會是
+#: 「值被丟掉」而不是它想測的讀取路徑判斷。改由 env 供給。
+_TRANSFER_ENV = {
+    "destination": "DOGRAH_TRANSFER_DESTINATION",
+    "alternateDestination": "DOGRAH_TRANSFER_ALTERNATE_DESTINATION",
+    "queueHealthUrl": "QUEUE_HEALTH_URL",
+    "queueHealthToken": "QUEUE_HEALTH_TOKEN",
+    "queueHealthTimeoutSeconds": "QUEUE_HEALTH_TIMEOUT_SECONDS",
+    "queueHealthCacheTtlSeconds": "QUEUE_HEALTH_CACHE_TTL_SECONDS",
+}
+
+
+def _deploy(monkeypatch, **values):
+    """由部署層供給六欄；未列出的一律清掉，避免宿主環境滲進來。"""
+    for key, env_name in _TRANSFER_ENV.items():
+        if key in values:
+            monkeypatch.setenv(env_name, str(values[key]))
+        else:
+            monkeypatch.delenv(env_name, raising=False)
+
+
 async def _resolve(config, monkeypatch):
     from api.db import db_client
     from api.services.pipecat.transfer_call_config import find_transfer_call_config
@@ -286,14 +309,18 @@ async def test_read_path_rejects_a_destination_the_write_path_would_have(monkeyp
     destination" — only the latter reaches the alert branch W0 added.
     """
     for bad in ("sip:a@b@evil.com", "SIP/human-queue@10.0.0.1"):
-        config = await _resolve({"destination": bad}, monkeypatch)
+        # W3a：目的地改由部署層供給，故壞值也自那裡進來。塞進 tool config 測不到
+        # 這條——那個值會先被 merge 丟掉，斷言會因為錯的理由通過。
+        _deploy(monkeypatch, destination=bad)
+        config = await _resolve({}, monkeypatch)
         assert config is not None and config["destination"] == ""
 
 
 @requires_sip_uri
 @pytest.mark.asyncio
 async def test_read_path_keeps_a_valid_destination(monkeypatch):
-    config = await _resolve({"destination": "tel:+886223456789"}, monkeypatch)
+    _deploy(monkeypatch, destination="tel:+886223456789")
+    config = await _resolve({}, monkeypatch)
     assert config["destination"] == "tel:+886223456789"
 
 
@@ -301,10 +328,12 @@ async def test_read_path_keeps_a_valid_destination(monkeypatch):
 @pytest.mark.asyncio
 async def test_bad_alternate_is_dropped_without_killing_the_main_path(monkeypatch):
     """Blast radius per field: the after-hours branch dies, the transfer lives."""
-    config = await _resolve(
-        {"destination": "tel:+886223456789", "alternateDestination": "SIP/x"},
+    _deploy(
         monkeypatch,
+        destination="tel:+886223456789",
+        alternateDestination="SIP/x",
     )
+    config = await _resolve({}, monkeypatch)
     assert config["destination"] == "tel:+886223456789"
     assert "alternateDestination" not in config
 
@@ -312,14 +341,13 @@ async def test_bad_alternate_is_dropped_without_killing_the_main_path(monkeypatc
 @requires_sip_uri
 @pytest.mark.asyncio
 async def test_bad_health_url_drops_the_health_keys_only(monkeypatch):
-    config = await _resolve(
-        {
-            "destination": "tel:+886223456789",
-            "queueHealthUrl": "http://user:pw@queue:8080/health",
-            "queueHealthToken": "t",
-        },
+    _deploy(
         monkeypatch,
+        destination="tel:+886223456789",
+        queueHealthUrl="http://user:pw@queue:8080/health",
+        queueHealthToken="t",
     )
+    config = await _resolve({}, monkeypatch)
     assert config["destination"] == "tel:+886223456789"
     assert "queueHealthUrl" not in config
     assert "queueHealthToken" not in config
@@ -328,14 +356,13 @@ async def test_bad_health_url_drops_the_health_keys_only(monkeypatch):
 @requires_sip_uri
 @pytest.mark.asyncio
 async def test_good_health_url_survives(monkeypatch):
-    config = await _resolve(
-        {
-            "destination": "tel:+886223456789",
-            "queueHealthUrl": "http://queue:8080/health",
-            "queueHealthToken": "t",
-        },
+    _deploy(
         monkeypatch,
+        destination="tel:+886223456789",
+        queueHealthUrl="http://queue:8080/health",
+        queueHealthToken="t",
     )
+    config = await _resolve({}, monkeypatch)
     assert config["queueHealthUrl"] == "http://queue:8080/health"
     assert config["queueHealthToken"] == "t"
 
@@ -344,7 +371,8 @@ async def test_good_health_url_survives(monkeypatch):
 async def test_read_path_fails_closed_when_the_parser_is_unmounted(monkeypatch):
     monkeypatch.setenv("PLATFORM_SIP_URI", "/nonexistent/sip_uri.py")
     platform_scope.reset_cache()
-    config = await _resolve({"destination": "tel:+886223456789"}, monkeypatch)
+    _deploy(monkeypatch, destination="tel:+886223456789")
+    config = await _resolve({}, monkeypatch)
     assert config is not None and config["destination"] == "", (
         "fail-closed 是「撥不出去」，不是「這個工作流沒有轉接工具」——後者會連"
         "營運時段閘與隊列健康閘一起靜默關掉（B-1／M-5）"
@@ -376,7 +404,7 @@ def test_parser_is_a_subset_of_the_executor(vector):
 
 
 @requires_sip_uri
-def test_ai_initiated_transfer_revalidates_its_own_config():
+def test_ai_initiated_transfer_revalidates_its_own_config(monkeypatch):
     """M-8：AI 主動觸發的轉接讀的是**這一支工具**的 config，不走 find_transfer_call_config。
 
     它因此需要自己呼叫 `revalidate_transfer_config`。這條釘的是那個函式對該路徑
@@ -388,11 +416,13 @@ def test_ai_initiated_transfer_revalidates_its_own_config():
     # 沒有轉接工具」無法區分，而 press-0 的告警分支與容量閘的排程／隊列健康閘都以
     # `if config` 為條件——回 None 會把它們一起靜默關掉，而那正是 W0 修過的失效。
     for bad in ("sip:a@b@evil.com", "SIP/human-queue@10.0.0.1", "tel:+19005551212"):
-        out = revalidate_transfer_config({"destination": bad, "schedule": {"tz": "X"}})
+        _deploy(monkeypatch, destination=bad)
+        out = revalidate_transfer_config({"schedule": {"tz": "X"}})
         assert out is not None, "回 None 會讓呼叫端誤判成「這個工作流沒有轉接工具」"
         assert out["destination"] == ""
         assert out["schedule"] == {"tz": "X"}, "其餘設定必須留著，閘才不會被一併關掉"
-    ok = revalidate_transfer_config({"destination": "tel:+886223456789"})
+    _deploy(monkeypatch, destination="tel:+886223456789")
+    ok = revalidate_transfer_config({})
     assert ok and ok["destination"] == "tel:+886223456789"
 
 
@@ -574,14 +604,13 @@ async def test_unparseable_health_url_drops_only_the_probe_keys(monkeypatch, bad
     `execution_error`，容量閘的 `except` 則降級成**空 config**——排程閘與隊列
     健康閘一起靜默關掉。那正是 B-1／M-5 關掉的失效形狀換一扇門進來。
     """
-    config = await _resolve(
-        {
-            "destination": "tel:+886223456789",
-            "queueHealthUrl": bad_url,
-            "queueHealthToken": "t",
-        },
+    _deploy(
         monkeypatch,
+        destination="tel:+886223456789",
+        queueHealthUrl=bad_url,
+        queueHealthToken="t",
     )
+    config = await _resolve({}, monkeypatch)
     assert config is not None, "整條 config 不得因為一個壞健康 URL 而消失"
     assert config["destination"] == "tel:+886223456789", "轉接目標必須活著"
     assert "queueHealthUrl" not in config

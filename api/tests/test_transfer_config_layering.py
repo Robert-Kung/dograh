@@ -31,6 +31,11 @@ from api.tests.support.platform_artifacts import (
 
 HEALTH_URL_SCOPE = SUPPORT_DIR / "feature_scope_health_url.json"
 
+#: 指向一個不存在的正本＝模擬「少掛了一個 `-v`」。用不存在的路徑而不是空檔：
+#: 空檔會走「正本裡沒有這條規則」那條（那是版控錯誤，**擋開機**），
+#: 而這裡要測的是「檔案根本不在」（那是掛載失誤，**不擋開機**）。
+MISSING_SCOPE_PATH = SUPPORT_DIR / "does-not-exist-feature-scope.json"
+
 GOOD_DESTINATION = "tel:+886912345678"
 DB_DESTINATION = "tel:+886900000001"
 GOOD_HEALTH_URL = "http://queue:8080/internal/health"
@@ -156,20 +161,55 @@ def test_db_residue_must_not_win(monkeypatch):
 
 
 @requires_sip_uri
-def test_missing_env_falls_back_to_db_during_migration(monkeypatch):
-    """D13 的限期 fallback。**本測試於 §5.1 SHALL 被改寫為「缺值即無此鍵」**。
+def test_missing_env_leaves_the_key_absent_and_never_falls_back_to_db(monkeypatch):
+    """§5.1：限期 fallback 已移除。缺值 → **該鍵不存在**，MUST NOT 用資料庫值。
 
-    它在這裡是為了讓遷移第 1–3 步的中間狀態有一條釘子；留到 §5 之後就變成
-    「靜默回退到殘值」這個被 spec 逐字禁止的行為的守護者。
+    資料庫裡那個值可能是分層之前的舊憑證，也可能是經某條寫入路徑塞進來的目的地。
+    「部署層覆蓋一切」是分層的整個防護論述——退回讀它就是把論述取消掉。
     """
-    assert tcc._MIGRATION_DB_FALLBACK is True, (
-        "§5.1 flipped the flag but left this test asserting the transitional "
-        "behaviour — rewrite it to assert the key is absent"
-    )
     _clear_deployment_env(monkeypatch)
-    merged = revalidate_transfer_config(_db_config())
-    assert merged["destination"] == DB_DESTINATION
-    assert merged["queueHealthToken"] == "db-residue-token"
+
+    # merge 這一層：六個鍵**一個都不留**。
+    merged = tcc._merge_deployment_layer(_db_config())
+    for key, _env in _DEPLOYMENT_ENV_KEYS:
+        assert key not in merged, f"{key} 在 env 缺值時仍留著資料庫的值"
+
+    # revalidate 這一層：它會把 `destination` 補成 `""`（那是 C4 的
+    # no_destination 分支，`valid_destination("")` 為 False，不會撥出去）。
+    # **重點是它不是資料庫那個值**——「鍵不見了」與「鍵被抹白」對來電者是同一件事，
+    # 「鍵還帶著上一版的憑證」才是要防的那件事。
+    effective = revalidate_transfer_config(_db_config())
+    assert effective["destination"] == ""
+    assert DB_DESTINATION not in effective.values()
+    assert "db-residue-token" not in effective.values()
+    for key, _env in _DEPLOYMENT_ENV_KEYS:
+        if key == "destination":
+            continue
+        assert key not in effective, f"{key} 在 env 缺值時仍留著資料庫的值"
+
+
+@requires_sip_uri
+def test_partially_supplied_env_does_not_resurrect_the_other_keys(monkeypatch):
+    """只供給一個鍵時，**其餘五個仍然不得退回資料庫**。
+
+    這是移除 fallback 之後最容易漏掉的形狀：整組缺值會被開機期驗證擋下，
+    而「五個有值、一個沒有」開得起來（那一個若是選填的 alternateDestination），
+    於是只有它會靜默拿到殘值。
+    """
+    _clear_deployment_env(monkeypatch)
+    monkeypatch.setenv("DOGRAH_TRANSFER_DESTINATION", GOOD_DESTINATION)
+    merged = tcc._merge_deployment_layer(_db_config())
+    assert merged["destination"] == GOOD_DESTINATION
+    for key, _env in _DEPLOYMENT_ENV_KEYS:
+        if key == "destination":
+            continue
+        assert key not in merged, f"{key} 未供給卻拿到了資料庫的值"
+
+
+def test_the_transitional_flags_are_gone(monkeypatch):
+    """兩個過渡態常數 SHALL 不再存在（不是設成 False——那是死碼）。"""
+    assert not hasattr(tcc, "_MIGRATION_DB_FALLBACK")
+    assert not hasattr(tcc, "_VALIDATE_BLOCKS_BOOT")
 
 
 def test_speech_layer_keys_are_never_touched(monkeypatch):
@@ -343,10 +383,12 @@ def test_every_reader_reaches_the_convergence_point():
 
 
 def _boot_problems() -> list[str]:
-    """跑一次 validate_transfer_config，回傳它報出的 problem 字串。
+    """跑一次 validate_transfer_config，回傳它報出的問題字串。
 
-    警告模式下它不拋，所以「有沒有報」只能自 log 讀。用 loguru 的 sink 而不是
-    caplog：本 repo 用 loguru，caplog 抓不到。
+    §5.2 之後**不合格即 RuntimeError**，所以 problem 自例外訊息讀；同時仍收
+    ERROR log——「檢查跑不成」（缺 bind mount）那一類刻意不擋開機，只留在 log 裡。
+    兩邊都收，測試才驗得到「拋的是不合格、log 的是沒驗成」這個分工。
+    用 loguru 的 sink 而不是 caplog：本 repo 用 loguru，caplog 抓不到。
     """
     captured: list[str] = []
     handler_id = tcc.logger.add(
@@ -354,6 +396,8 @@ def _boot_problems() -> list[str]:
     )
     try:
         validate_transfer_config()
+    except RuntimeError as exc:
+        captured.append(str(exc))
     finally:
         tcc.logger.remove(handler_id)
     return captured
@@ -376,14 +420,70 @@ def test_boot_validation_reports_missing_values(monkeypatch):
     )
 
 
-def test_boot_validation_does_not_block_boot_during_migration(monkeypatch):
-    """§1.5 是警告模式。**§5.2 SHALL 翻掉這條並改為斷言 RuntimeError。**"""
-    assert tcc._VALIDATE_BLOCKS_BOOT is False, (
-        "§5.2 tightened the validator but left this test asserting warning mode"
-    )
+def test_boot_validation_blocks_boot_when_values_are_missing(monkeypatch):
+    """§5.2：缺值即擋開機，且**逐項指名**哪個 env 沒設。
+
+    安靜的那一端是 `queue_is_healthy` 對缺席 URL `return True`——健康閘整個消失，
+    每位要求真人的來電者被 REFER 進一個可能已死的隊列。拒絕啟動是大聲的那一端。
+    """
     monkeypatch.setenv("PLATFORM_FEATURE_SCOPE", str(HEALTH_URL_SCOPE))
     _clear_deployment_env(monkeypatch)
+    with pytest.raises(RuntimeError) as excinfo:
+        validate_transfer_config()
+    message = str(excinfo.value)
+    for env_name in (
+        "DOGRAH_TRANSFER_DESTINATION",
+        "QUEUE_HEALTH_URL",
+        "QUEUE_HEALTH_TOKEN",
+    ):
+        assert env_name in message, f"{env_name} 缺值未被指名"
+
+
+def test_boot_validation_never_silently_falls_back_to_db(monkeypatch):
+    """§5.3 逐字：MUST NOT 靜默退回讀 DB。
+
+    兩件事一起驗才算數——開機**擋下**，而且 merge 出來的結果裡**沒有**資料庫的值。
+    只驗其中一件都留得下一條路：擋開機但仍 fallback（開不起來時沒人看得到 merge），
+    或不 fallback 但不擋（靜默無值）。
+    """
+    monkeypatch.setenv("PLATFORM_FEATURE_SCOPE", str(HEALTH_URL_SCOPE))
+    _clear_deployment_env(monkeypatch)
+    with pytest.raises(RuntimeError):
+        validate_transfer_config()
+    merged = tcc._merge_deployment_layer(_db_config())
+    assert DB_DESTINATION not in merged.values()
+    assert "db-residue-token" not in merged.values()
+
+
+def test_a_fully_supplied_deployment_boots(monkeypatch):
+    """收緊之後正常部署仍要起得來——否則這條收緊就是一次全面停機。"""
+    monkeypatch.setenv("PLATFORM_FEATURE_SCOPE", str(HEALTH_URL_SCOPE))
+    _set_deployment_env(
+        monkeypatch,
+        destination=GOOD_DESTINATION,
+        queueHealthUrl=GOOD_HEALTH_URL,
+        queueHealthToken="env-token",
+    )
     validate_transfer_config()  # 不得拋
+
+
+def test_a_missing_bind_mount_does_not_block_boot(monkeypatch):
+    """D-A5：一個少掉的 `-v` MUST NOT 變成「平台停止接聽電話」。
+
+    但它 SHALL 大聲說**這個值沒有被驗過**——「沒驗成」被靜默吞掉才是本 change
+    一路在防的形狀。
+    """
+    monkeypatch.setenv("PLATFORM_FEATURE_SCOPE", str(MISSING_SCOPE_PATH))
+    _set_deployment_env(
+        monkeypatch,
+        destination=GOOD_DESTINATION,
+        queueHealthUrl=GOOD_HEALTH_URL,
+        queueHealthToken="env-token",
+    )
+    problems = _boot_problems()          # 不得拋 RuntimeError
+    joined = "\n".join(problems)
+    assert "deploy_config_unverified" in joined
+    assert "NOT checked at boot" in joined
 
 
 @requires_sip_uri
