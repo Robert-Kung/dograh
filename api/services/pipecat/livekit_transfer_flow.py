@@ -381,6 +381,26 @@ async def execute_cold_transfer(
                 )
             # Configured for alternate queue but no valid target — fall back to
             # keeping the caller with the AI rather than dropping them (C4).
+            #
+            # **This is a deployment defect, not a workflow choice** (platform
+            # review gate F-5), and it used to leave nothing but this one
+            # logger.warning: no emit, no outcome marker. After the config
+            # layering split, ``afterHoursAction`` lives in the prompt layer
+            # (seed-once, in the definition) while ``alternateDestination`` lives
+            # in the deployment layer and is *optional* -- so "alternate_queue
+            # selected, deployment supplied no alternate destination" is a state
+            # **no execution point sees**: preflight skips it (optional), boot
+            # validation skips it explicitly, and here it degraded silently.
+            # The symptom is the whole after-hours route to a human disappearing
+            # while the reports read as a pile of clean AI-completed calls.
+            from api.services.observability.call_events import emit
+
+            emit(
+                "transfer.failed",
+                room_name=room_name,
+                reason="alternate_queue_without_destination",
+                transfer_reason=transfer_reason,
+            )
             logger.warning(
                 "alternate_queue selected but alternate_destination invalid; back_to_ai"
             )

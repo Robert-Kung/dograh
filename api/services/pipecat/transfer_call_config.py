@@ -679,6 +679,46 @@ def revalidate_transfer_config(config: dict) -> dict | None:
     return checked
 
 
+def _deployment_only_config(why: str) -> dict | None:
+    """兩個早退點的共用處置（platform review gate F-11）。
+
+    **問題**：這兩個 ``return None`` 都在 merge **之前**。持編輯器寫入權者把
+    ``transfer_call`` 自節點圖的 ``tool_uuids`` 移除——那是一次不宣告受管型別的
+    ``workflow_definition`` 寫入，依 ``workflow-editor-access`` 的判準
+    **admission 正常放行**——於是：
+
+    - ``capacity_gate._gate_allows`` 走 ``config or {}`` → ``queue_is_healthy({})``
+      在 ``queue_health`` 的 ``if not url: return True`` **fail-open** ⇒ 滿線溢流把
+      每一位被拒的來電者 REFER 進一個可能已死的隊列，且排程閘同時失效（恆「營業中」）；
+    - ``press0_gate`` 走安靜分支（``transfer.failed`` 的守衛是
+      ``if transfer_config and ...``，而它是 ``None``），press-0 只留一行 info 就消失。
+
+    開機期驗證與 preflight 都是綠的——它們驗的是 env，而這條路徑根本走不到讀 env
+    的那個函式。「部署層覆蓋一切」被一次 DB 寫入**從下游繞開**。
+
+    **判準**：部署層有沒有宣告目的地。有 ⇒ 這個平台的意圖就是「轉真人」，
+    而節點圖沒有轉接工具是**缺陷**（引用掉了），不是工作流的選擇 ⇒ 回傳部署層
+    自己就足以支撐兩張安全網的設定，並大聲說出來。沒有 ⇒ ``None`` 仍然正確，
+    press-0 的安靜分支（「這個工作流本來就不轉真人」）原封不動。
+
+    話術層會缺席，那是這個降級的已知代價：``transferFailedMessage`` 有內建預設，
+    ``transferUnavailableMessage`` 沒有。相對於 fail-open 地 REFER 進死隊列、
+    或整條轉真人路徑無聲消失，少一句客製話術是可接受的那一邊。
+    """
+    supplied = deployment_transfer_config()
+    if not str(supplied.get("destination") or "").strip():
+        return None
+    _config_event(
+        "transfer.failed",
+        f"transfer.failed field=tool_uuids: {why}, but the deployment layer "
+        f"declares a transfer destination; falling back to the deployment-layer "
+        f"config so press-0 and capacity overflow keep a route to a human "
+        f"(review gate F-11). Prompt-layer messages are unavailable for this call.",
+        field="tool_uuids",
+    )
+    return revalidate_transfer_config({})
+
+
 async def find_transfer_call_config(workflow, organization_id: int) -> dict | None:
     """Return the workflow's ``transfer_call`` tool config, or None if absent.
 
@@ -700,14 +740,16 @@ async def find_transfer_call_config(workflow, organization_id: int) -> dict | No
         for tu in getattr(node, "tool_uuids", None) or []:
             tool_uuids.add(tu)
     if not tool_uuids:
-        return None
+        return _deployment_only_config("the node graph declares no tool_uuids")
 
     tools = await db_client.get_tools_by_uuids(list(tool_uuids), organization_id)
     transfer_tools = [
         tool for tool in tools if tool.category == ToolCategory.TRANSFER_CALL.value
     ]
     if not transfer_tools:
-        return None
+        return _deployment_only_config(
+            "no transfer_call tool among the node graph's tool_uuids"
+        )
 
     if len(transfer_tools) > 1:
         # Deterministic by construction (get_tools_by_uuids orders by id), but the

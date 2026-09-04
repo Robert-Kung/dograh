@@ -878,3 +878,58 @@ def test_alert_dispatch_failure_never_breaks_call_handling(monkeypatch):
     merged = revalidate_transfer_config(_db_config())
     assert "queueHealthToken" not in merged
     assert merged["destination"] == GOOD_DESTINATION
+
+
+# ── 節點圖掉了工具引用（platform review gate F-11）────────────────────────
+class _FakeNode:
+    def __init__(self, tool_uuids=None):
+        self.tool_uuids = tool_uuids or []
+
+
+class _FakeWorkflow:
+    def __init__(self, nodes):
+        self.nodes = {str(i): n for i, n in enumerate(nodes)}
+
+
+@pytest.mark.asyncio
+@requires_sip_uri
+async def test_a_node_graph_without_tool_uuids_still_gets_the_deployment_layer(
+    monkeypatch,
+):
+    """移除 `tool_uuids` 是 admission **會放行**的一次寫入，而它從下游繞開分層。
+
+    早退在 merge **之前**，於是 `capacity_gate` 走 `config or {}` →
+    `queue_is_healthy({})` 的 fail-open（滿線溢流 REFER 進可能已死的隊列，排程閘
+    同時失效），`press0_gate` 走安靜分支（`transfer.failed` 的守衛是
+    `if transfer_config and ...`）。開機期與 preflight 都是綠的——它們驗的是 env，
+    而這條路徑根本走不到讀 env 的那個函式。
+    """
+    monkeypatch.setenv("PLATFORM_FEATURE_SCOPE", str(HEALTH_URL_SCOPE))
+    _set_deployment_env(
+        monkeypatch,
+        destination=GOOD_DESTINATION,
+        queueHealthUrl=GOOD_HEALTH_URL,
+        queueHealthToken="env-token",
+    )
+    config = await tcc.find_transfer_call_config(_FakeWorkflow([_FakeNode()]), 1)
+    assert config is not None, "節點圖掉了引用就整條轉真人路徑消失"
+    assert config["destination"] == GOOD_DESTINATION
+    assert config["queueHealthUrl"] == GOOD_HEALTH_URL, "健康閘 SHALL NOT fail-open"
+
+
+@pytest.mark.asyncio
+async def test_a_workflow_that_never_transfers_still_returns_none(monkeypatch):
+    """對照組：部署層沒有宣告目的地時 `None` 仍然正確。
+
+    「這個工作流本來就不轉真人」是合法選擇，press-0 的安靜分支正是為它存在的。
+    沒有這條，一個「一律回傳設定」的實作會把每個工作流都變成有 press-0 的。
+    """
+    for name in (
+        "DOGRAH_TRANSFER_DESTINATION",
+        "DOGRAH_TRANSFER_ALTERNATE_DESTINATION",
+        "QUEUE_HEALTH_URL",
+        "QUEUE_HEALTH_TOKEN",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    config = await tcc.find_transfer_call_config(_FakeWorkflow([_FakeNode()]), 1)
+    assert config is None
