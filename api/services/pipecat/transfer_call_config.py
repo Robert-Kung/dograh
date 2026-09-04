@@ -96,13 +96,28 @@ _NUMERIC_DEPLOYMENT_KEYS = frozenset(
     {"queueHealthTimeoutSeconds", "queueHealthCacheTtlSeconds"}
 )
 
+#: The floor applies to the **probe budget only** (platform review gate M2).
+#: ``queueHealthCacheTtlSeconds`` is a cache lifetime, not a probe budget:
+#: setting it to 0 disables the cache, it cannot cause a timeout, and upstream
+#: ``queue_health._bounded_seconds`` documents that explicitly -- "An explicit 0
+#: is honored (TTL 0 disables the cache)". Applying the 0.2s floor to it made a
+#: supported input block boot, with a message about probe budgets that does not
+#: describe what the field does. The platform side mirrors this split in
+#: ``feature_scope_check._FLOORED_SECONDS_FIELDS`` -- CHANGE BOTH TOGETHER.
+_FLOORED_SECONDS_KEYS = frozenset({"queueHealthTimeoutSeconds"})
+
 
 def deployment_transfer_config() -> dict:
     """部署層供給的轉接設定，只含**實際供給**的鍵。缺值不入結果、不拋例外。
 
     **每次呼叫都讀 ``os.environ``**（D2）。MUST NOT 在 import 期讀進模組常數：
-    D5 宣稱「憑證輪替只要改 env 就生效、不需要 re-apply」，而 import 期讀會讓輪替
-    需要重啟 ``dograh-api``，那會斷掉進行中的通話——該宣稱就不成立了。
+    D5 宣稱「憑證輪替只要改 env 就生效、**不需要 re-apply 話術**」，而 import 期讀
+    會讓一個已經起來的行程再也看不到新值。
+
+    **這買到的不是「不必重建容器」**（platform review gate F-8 更正）：行程的
+    environ 在容器建立時就固定，``docker restart`` 沿用同一個容器帶著舊值起來，
+    所以套用新的 ``.env`` 一定要 ``up -d --force-recreate``。per-call 讀 environ
+    的收益是**工作流定義完全不必碰**，以及同一個行程內先後兩次解析看得到新值。
 
     空字串與純空白視同未供給，與 ``fallback_queue()``／``overflow_transfer_to()``
     的既有慣例一致（``.env`` 裡一個沒填值的鍵是「沒設定」，不是「設定成空字串」）。
@@ -229,15 +244,35 @@ def validate_transfer_config() -> None:
         if key in ("destination", "alternateDestination") and key in supplied
     ]
     if destinations:
+        from api.services.pipecat.capacity_gate import (
+            PREMIUM_RATE_PREFIXES,
+            _premium_rate,
+        )
         from api.services.platform_scope import (
             PlatformArtifactMissing,
             log_artifact_missing,
             parse_refer_uri,
         )
 
-        try:
-            for key, env_name, value in destinations:
+        for key, env_name, value in destinations:
+            # **``try`` 只包解析那一句**（platform review gate F-6）。原本它包住
+            # 整個迴圈，於是第一個目的地拋 ``PlatformArtifactMissing`` 就讓迴圈
+            # 整個中止——連 ``_premium_rate`` 都沒跑，而那個檢查刻意做了
+            # ``_legacy_premium_candidates`` 兜底、**不需要解析器也能跑**、且不會拋。
+            # 結果是 ``sip_uri.py`` 漏掛時 ``tel:+19005551212`` 開機全綠。通話期
+            # 有兜底所以不會真的撥出去，但**運維據以行動的那份開機報告是錯的**，
+            # 而它同時代表所有轉接都失效。
+            try:
                 parsed = parse_refer_uri(value)
+            except PlatformArtifactMissing as exc:
+                # 缺 mount 不擋開機（D-A5 的既有取捨：一個少掉的 ``-v`` MUST NOT
+                # 變成「dograh-api 不啟動」＝平台停止接聽電話）。
+                log_artifact_missing("validate_transfer_config", exc)
+                unverifiable.append(
+                    f"{env_name} could not be shape-checked: the shared REFER URI "
+                    "parser is not mounted"
+                )
+            else:
                 if not parsed.ok:
                     # ``parsed.reason`` 依該模組契約不含輸入的任何片段——這個值
                     # 可能是客戶號碼或內部 PBX 主機，而本訊息會進啟動日誌。
@@ -245,24 +280,12 @@ def validate_transfer_config() -> None:
                         f"{env_name} is not a valid REFER target: {parsed.reason}"
                     )
                     continue
-                from api.services.pipecat.capacity_gate import (
-                    PREMIUM_RATE_PREFIXES,
-                    _premium_rate,
-                )
 
-                if _premium_rate(value):
-                    problems.append(
-                        f"{env_name} matches a premium-rate prefix {PREMIUM_RATE_PREFIXES}"
-                    )
-        except PlatformArtifactMissing as exc:
-            # 缺 mount 不擋開機（D-A5 的既有取捨：一個少掉的 ``-v`` MUST NOT 變成
-            # 「dograh-api 不啟動」＝平台停止接聽電話）。記為一條 problem，讓它照
-            # 本函式的模式處置。
-            log_artifact_missing("validate_transfer_config", exc)
-            unverifiable.append(
-                "transfer destinations could not be shape-checked: the shared "
-                "REFER URI parser is not mounted"
-            )
+            # 高費率判定**無條件執行**：它不依賴解析器，而它擋的是最貴的失效。
+            if _premium_rate(value):
+                problems.append(
+                    f"{env_name} matches a premium-rate prefix {PREMIUM_RATE_PREFIXES}"
+                )
 
     # ③ queueHealthUrl 的 scheme／host 白名單。
     health_url = supplied.get("queueHealthUrl")
@@ -303,7 +326,13 @@ def validate_transfer_config() -> None:
                 "in-hours transfer"
             )
             continue
-        if value < _MIN_PROBE_SECONDS:
+        if value < 0:
+            problems.append(
+                f"{env_name} is {value}, negative; upstream _bounded_seconds "
+                "silently falls back to its default, so the configured value and "
+                "the effective value disagree with nothing saying so"
+            )
+        elif key in _FLOORED_SECONDS_KEYS and value < _MIN_PROBE_SECONDS:
             problems.append(
                 f"{env_name} is {value}, below the {_MIN_PROBE_SECONDS}s floor; "
                 "a probe budget this small times out every time, which pins the "
@@ -313,10 +342,11 @@ def validate_transfer_config() -> None:
     # 「沒驗成」永遠說出來，**且在拋例外之前說**：不合格與沒驗成可能同時發生，
     # 而 RuntimeError 只帶得走前者。先 log 才不會讓後者被前者吃掉。
     for item in unverifiable:
-        logger.bind(call_event="transfer.deploy_config_unverified").error(
+        _config_event(
+            "transfer.deploy_config_unverified",
             f"transfer.deploy_config_unverified: {item} "
             "(boot continues by design — a missing bind mount must not take the "
-            "platform off the air; this value was NOT checked at boot)"
+            "platform off the air; this value was NOT checked at boot)",
         )
 
     if not problems:
@@ -325,6 +355,45 @@ def validate_transfer_config() -> None:
     raise RuntimeError(
         "transfer deployment config is not usable: " + "; ".join(problems)
     )
+
+
+def _config_event(
+    event: str, message: str, *, field: str = "", level: str = "error"
+) -> None:
+    """記結構化事件**並**送進告警通道（platform review gate F-12）。
+
+    ``logger.bind(call_event=...)`` 只給了事件的**形狀**，沒有給它的**路徑**：
+    告警只走 ``call_events.emit() -> alerts.notify()``，而本模組從來沒有呼叫過
+    它們。於是 docstring 承諾的「大聲失敗」只對正在 grep 容器日誌的人成立——
+    這一點是承重的，因為 ``deploy_config_unverified`` 正是「正本讀不到時不擋開機」
+    這個取捨的**全部**補償控制。
+
+    不走 ``call_events.emit()`` 的理由：那個介面要求 ``room_name``，而設定層的
+    事件沒有房間（開機期根本還沒有通話）。造一個假的房名去滿足簽章會讓
+    ``[event] room_name=...`` 這行告警說謊。這裡直接呼叫 ``notify``，
+    事件名的分流（immediate／windowed）在 ``alerts`` 那一側裁決。
+    """
+    fields = {"room_name": None, "field": field or None, "reason": message}
+    getattr(logger.bind(call_event=event, **fields), level)(message)
+    try:
+        from api.services.observability import alerts
+
+        alerts.notify(event, fields)
+    except Exception as exc:  # noqa: BLE001 - 告警 MUST NOT 影響通話處理（C4）
+        logger.warning(f"transfer config alert dispatch failed: {exc!r}")
+
+
+#: 正本掛得到、但它對 ``queueHealthUrl`` 沒有任何 host/scheme 規則。
+#:
+#: **開機期是 verdict，通話期不是**（platform review gate F-1）：開機期擋下去是對的
+#: ——「規則還在正本裡」MUST NOT 被讀成「控制仍生效」，而這是一個版控裡的錯誤，
+#: 有人改得掉。通話期照 verdict 處置卻會把健康閘關掉，而正本**刻意**留空是一個
+#: 合法狀態（CS-19／R-E 對 ``destination`` 的 ``allowed_hosts`` 就是空的）——
+#: 沒有規則要執行不等於「這個值可疑」。故通話期只記一行，不停用探測。
+_NO_ALLOWLIST_VERDICT = (
+    "QUEUE_HEALTH_URL has no allowlist to check against: the canon carries "
+    "no allowed_schemes/allowed_hosts for queueHealthUrl"
+)
 
 
 def _allowlist_problems(url: str) -> tuple[list[str], list[str]]:
@@ -359,25 +428,33 @@ def _allowlist_problems(url: str) -> tuple[list[str], list[str]]:
     schemes = rule.get("allowed_schemes")
     hosts = rule.get("allowed_hosts")
     if not schemes and not hosts:
-        return [
-            "QUEUE_HEALTH_URL has no allowlist to check against: the canon carries "
-            "no allowed_schemes/allowed_hosts for queueHealthUrl"
-        ], []
+        return [_NO_ALLOWLIST_VERDICT], []
 
     parts = urlsplit(url)
     problems: list[str] = []
-    if schemes and parts.scheme not in schemes:
+    scheme = (parts.scheme or "").casefold()
+    if schemes and scheme not in {str(x).casefold() for x in schemes}:
         problems.append(
             f"QUEUE_HEALTH_URL scheme {parts.scheme!r} is not in {list(schemes)}"
         )
     if hosts:
-        # ``netloc`` 而非 ``hostname``：正本的 allowed_hosts 逐字是 ``queue:8080``，
-        # 埠是它的一部分。userinfo 已由 _health_url_problem 的 ``@`` 檢查擋掉，
-        # 故此處的 netloc 就是 host[:port]。
-        if parts.netloc not in hosts:
-            problems.append(
-                f"QUEUE_HEALTH_URL host {parts.netloc!r} is not in {list(hosts)}"
-            )
+        # **與正本 ``_check_url`` 逐字一致的正規化**（platform review gate F-7）。
+        # 正本比對的是 casefold 後、補上 scheme 預設埠的 ``hostname:port``；這裡
+        # 原本比的是 raw ``netloc``（``urlsplit`` 不會小寫化它），於是
+        # ``http://QUEUE:8080/…`` **通過 preflight**（正規化為 ``queue:8080``）
+        # 卻**擋下 dograh 開機**——部署檢查全綠之後平台拒絕接聽電話，訊息還讀起來
+        # 像真的白名單違規。差額方向是 fail-closed（不會誤放行），但兩份實作對
+        # 同一組規則給出不同答案本身就是缺陷。
+        #
+        # userinfo 已由 ``_health_url_problem`` 的 ``@`` 檢查擋掉，所以到這裡的
+        # netloc 就是 host[:port]；仍改用 ``hostname``/``port`` 重組，不倚賴那個前提。
+        default_port = {"http": 80, "https": 443}.get(scheme)
+        host = (parts.hostname or "").casefold()
+        port = parts.port or default_port
+        where = f"{host}:{port}" if port is not None else host
+        allowed = {str(x).casefold() for x in hosts}
+        if where not in allowed and host not in allowed:
+            problems.append(f"QUEUE_HEALTH_URL host {where!r} is not in {list(hosts)}")
     return problems, []
 
 
@@ -485,17 +562,21 @@ def revalidate_transfer_config(config: dict) -> dict | None:
         # artifacts are mounted together, so the tool itself is about to be
         # dropped by the enabled-set filter anyway.
         log_artifact_missing("revalidate_transfer_config", exc)
-        logger.bind(call_event="transfer.config_unvalidatable").error(
+        _config_event(
+            "transfer.config_unvalidatable",
             "transfer.config_unvalidatable: shared REFER URI parser unavailable; "
-            "blanking the destination (fail-closed, W2a)"
+            "blanking the destination (fail-closed, W2a)",
+            field="destination",
         )
         return dict(config, destination="")
 
     if not parsed.ok:
-        logger.bind(call_event="transfer.config_rejected").error(
+        _config_event(
+            "transfer.config_rejected",
             f"transfer.config_rejected field=destination: {parsed.reason}; "
             f"destination blanked — the configured-but-malformed path takes over "
-            f"(W2a issue #3)"
+            f"(W2a issue #3)",
+            field="destination",
         )
         return dict(config, destination="")
 
@@ -507,9 +588,11 @@ def revalidate_transfer_config(config: dict) -> dict | None:
     from api.services.pipecat.capacity_gate import PREMIUM_RATE_PREFIXES, _premium_rate
 
     if _premium_rate(destination):
-        logger.bind(call_event="transfer.config_rejected").error(
+        _config_event(
+            "transfer.config_rejected",
             f"transfer.config_rejected field=destination: matches a premium-rate "
-            f"prefix {PREMIUM_RATE_PREFIXES}; destination blanked (review M-1)"
+            f"prefix {PREMIUM_RATE_PREFIXES}; destination blanked (review M-1)",
+            field="destination",
         )
         return dict(config, destination="")
 
@@ -519,16 +602,20 @@ def revalidate_transfer_config(config: dict) -> dict | None:
     if alternate is not None and str(alternate).strip():
         alt_parsed = parse_refer_uri(alternate)
         if alt_parsed.ok and _premium_rate(alternate):
-            logger.bind(call_event="transfer.config_rejected").error(
+            _config_event(
+                "transfer.config_rejected",
                 "transfer.config_rejected field=alternateDestination: premium-rate "
-                "prefix; after-hours alternate branch disabled (review M-1)"
+                "prefix; after-hours alternate branch disabled (review M-1)",
+                field="alternateDestination",
             )
             checked.pop("alternateDestination", None)
         elif not alt_parsed.ok:
-            logger.bind(call_event="transfer.config_rejected").error(
+            _config_event(
+                "transfer.config_rejected",
                 f"transfer.config_rejected field=alternateDestination: "
                 f"{alt_parsed.reason}; after-hours alternate branch disabled for "
-                f"this call (W2a issue #3)"
+                f"this call (W2a issue #3)",
+                field="alternateDestination",
             )
             checked.pop("alternateDestination", None)
 
@@ -536,12 +623,58 @@ def revalidate_transfer_config(config: dict) -> dict | None:
     if health_url is not None and str(health_url).strip():
         problem = _health_url_problem(str(health_url))
         if problem:
-            logger.bind(call_event="transfer.config_rejected").error(
+            _config_event(
+                "transfer.config_rejected",
                 f"transfer.config_rejected field=queueHealthUrl: {problem}; "
-                f"queue health probe disabled for this call (W2a issue #3)"
+                f"queue health probe disabled for this call (W2a issue #3)",
+                field="queueHealthUrl",
             )
             for key in ("queueHealthUrl", "queueHealthToken"):
                 checked.pop(key, None)
+        else:
+            # **白名單也要有通話期執行點**（platform review gate F-1／H3）。
+            # 在此之前它只有兩個執行點：preflight §7（部署期一次性，有已知繞道）
+            # 與開機期步驟③——而③在正本讀不到時降級為 ``unverifiable``、**不擋開機**
+            # （D-A5 的取捨，本身是對的）。於是「掛載存在但檔案讀不動／半寫入／
+            # 編碼壞掉」這幾種狀態下，一個被改壞的 ``QUEUE_HEALTH_URL`` 會讓每一次
+            # 健康探測把 ``Authorization: Bearer <QUEUE_HEALTH_TOKEN>`` 送去該主機。
+            # egress 圍堵把可達面縮到內網（``FilterDefaultDeny`` ＋ internal network），
+            # 但那是**另一道控制**，不是這一格自己的。
+            #
+            # **「檢查跑不成」與「值不合格」在這裡採同一個處置**，理由與開機期相反：
+            # 開機期擋下去等於平台停止接聽電話（不可接受）；通話期只是**停用探測**，
+            # 而那是 ``queue_health`` 已經明文當成可接受降級的處置（未設定即
+            # ``return True``）。代價是失去健康閘，收益是憑證不外送到未驗證的主機——
+            # 前者有 C4 的其他出口兜著，後者沒有。
+            verdicts, unchecked = _allowlist_problems(str(health_url))
+            # 「正本沒有規則」不在通話期停用探測——見 _NO_ALLOWLIST_VERDICT。
+            no_rule = [v for v in verdicts if v == _NO_ALLOWLIST_VERDICT]
+            verdicts = [v for v in verdicts if v != _NO_ALLOWLIST_VERDICT]
+            if no_rule and not (verdicts or unchecked):
+                _config_event(
+                    "transfer.deploy_config_unverified",
+                    "transfer.deploy_config_unverified field=queueHealthUrl: "
+                    + _NO_ALLOWLIST_VERDICT
+                    + "; probe continues (an empty allowlist is a legal canon state)",
+                    field="queueHealthUrl",
+                    level="warning",
+                )
+            if verdicts or unchecked:
+                reason = "; ".join(verdicts or unchecked)
+                event = (
+                    "transfer.config_rejected"
+                    if verdicts
+                    else "transfer.deploy_config_unverified"
+                )
+                _config_event(
+                    event,
+                    f"{event} field=queueHealthUrl: {reason}; queue health probe "
+                    f"disabled for this call and the bearer token is NOT sent "
+                    f"(review gate F-1)",
+                    field="queueHealthUrl",
+                )
+                for key in ("queueHealthUrl", "queueHealthToken"):
+                    checked.pop(key, None)
 
     return checked
 

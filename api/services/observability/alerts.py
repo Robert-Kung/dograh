@@ -21,6 +21,15 @@ IMMEDIATE_EVENTS = {
     "safetynet.transfer_failed",
     "safetynet.terminated",
     "transfer.failed",
+    # Boot-time transfer config verdicts (platform review gate F-12). These fire
+    # once per process start, so "immediate" cannot storm. They were previously
+    # only ``logger.bind(call_event=...)`` -- which is the event's *shape*, not
+    # its *path*: nothing outside IMMEDIATE/WINDOWED ever reaches notify(), so
+    # "we log loudly" meant "loudly, to a container log nobody is grepping".
+    # That is load-bearing here: ``deploy_config_unverified`` is the whole
+    # compensation for not blocking boot when the canon cannot be read.
+    "transfer.deploy_config_unverified",
+    "transfer.config_unvalidatable",
 }
 # trust.violation is windowed, not immediate: one occurrence may be a benign
 # LLM formatting slip; repetition is the attack signal (S-L8-TRUST).
@@ -28,11 +37,15 @@ IMMEDIATE_EVENTS = {
 # so an outage should page as one summary, not a storm (S-L5-QUEUE M3).
 # capacity.rejected: full-capacity rejections arrive in batches by nature,
 # so per-call alerts would storm (S-L9-SCALE D4).
+# transfer.config_rejected is windowed, not immediate: a bad deployment value
+# is re-detected on *every* call, so per-call alerts would storm exactly when
+# the operator is least able to read them (platform review gate F-12).
 WINDOWED_EVENTS = {
     "provider.error",
     "trust.violation",
     "transfer.unavailable",
     "capacity.rejected",
+    "transfer.config_rejected",
 }
 
 _redis = None
@@ -73,6 +86,7 @@ def _format(event: str, fields: dict) -> str:
     parts = [f"[{event}]"]
     for key in (
         "room_name",
+        "field",
         "reason",
         "transfer_reason",
         "workflow_run_id",
