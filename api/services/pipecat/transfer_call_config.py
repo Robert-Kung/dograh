@@ -21,6 +21,7 @@ and only two of them go through that lookup — see the note on
 :func:`revalidate_transfer_config`.
 """
 
+import math
 import os
 from urllib.parse import urlsplit
 
@@ -94,6 +95,7 @@ _DEPLOYMENT_ENV_KEYS: tuple[tuple[str, str], ...] = (
 _NUMERIC_DEPLOYMENT_KEYS = frozenset(
     {"queueHealthTimeoutSeconds", "queueHealthCacheTtlSeconds"}
 )
+
 
 def deployment_transfer_config() -> dict:
     """部署層供給的轉接設定，只含**實際供給**的鍵。缺值不入結果、不拋例外。
@@ -281,6 +283,25 @@ def validate_transfer_config() -> None:
         if not isinstance(value, float):
             # deployment_transfer_config 轉不動就原樣留字串——那就是「不是數字」。
             problems.append(f"{env_name} is not a number: {value!r}")
+            continue
+        # Non-finite first (platform review gate F-3). ``float("nan")`` parses
+        # fine and NaN compares False against *every* operator, so ``nan`` slips
+        # past the floor below without a word -- and then
+        # ``asyncio.wait_for(timeout=nan)`` raises TimeoutError immediately,
+        # which is exactly the failure this floor exists to prevent, in its most
+        # complete form. ``inf`` is only clamped upstream, never rejected.
+        #
+        # The platform side carries the same check in
+        # ``feature_scope_check.check_deployment_env``; that copy is deliberate
+        # (no shared carrier across the two repos) -- CHANGE BOTH TOGETHER.
+        if not math.isfinite(value):
+            problems.append(
+                f"{env_name} is {value!r}, not a finite number; nan slips past "
+                "both the floor and the upstream cap because every comparison "
+                "against NaN is False, and a nan timeout fails instantly -- "
+                "pinning the health verdict to unhealthy and refusing every "
+                "in-hours transfer"
+            )
             continue
         if value < _MIN_PROBE_SECONDS:
             problems.append(

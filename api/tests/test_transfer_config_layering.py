@@ -480,7 +480,7 @@ def test_a_missing_bind_mount_does_not_block_boot(monkeypatch):
         queueHealthUrl=GOOD_HEALTH_URL,
         queueHealthToken="env-token",
     )
-    problems = _boot_problems()          # 不得拋 RuntimeError
+    problems = _boot_problems()  # 不得拋 RuntimeError
     joined = "\n".join(problems)
     assert "deploy_config_unverified" in joined
     assert "NOT checked at boot" in joined
@@ -565,6 +565,42 @@ def test_boot_validation_reports_probe_seconds_below_floor(monkeypatch):
     joined = "\n".join(_boot_problems())
     assert "QUEUE_HEALTH_TIMEOUT_SECONDS" in joined
     assert "floor" in joined
+
+
+@pytest.mark.parametrize("raw", ["nan", "NaN", "inf", "-inf", "1e400"])
+def test_boot_validation_rejects_non_finite_seconds(monkeypatch, raw):
+    """F-3：``nan`` 對每個比較運算子都回 False，所以它從下界底下穿過去。
+
+    這一組是 :func:`test_boot_validation_reports_probe_seconds_below_floor` 的
+    對照組——那條證明「太小會被擋」，而在補上 ``math.isfinite`` 之前，**比太小更糟的
+    值反而通過**：``nan`` 生效後 ``asyncio.wait_for(timeout=nan)`` 立即逾時，
+    也就是那個下界存在的理由以最徹底的形式發生。``1e400`` 收在這裡是因為
+    ``float()`` 把它變成 ``inf`` 而不是拋錯。
+    """
+    monkeypatch.setenv("PLATFORM_FEATURE_SCOPE", str(HEALTH_URL_SCOPE))
+    _set_deployment_env(
+        monkeypatch,
+        destination=GOOD_DESTINATION,
+        queueHealthUrl=GOOD_HEALTH_URL,
+        queueHealthToken="env-token",
+        queueHealthTimeoutSeconds=raw,
+    )
+    joined = "\n".join(_boot_problems())
+    assert "QUEUE_HEALTH_TIMEOUT_SECONDS" in joined
+    assert "not a finite number" in joined
+
+
+def test_a_finite_in_range_value_still_boots(monkeypatch):
+    """非有限值那條擋門 MUST NOT 連正常值一起擋——沒有這條，`return` 掉整個迴圈也會綠。"""
+    monkeypatch.setenv("PLATFORM_FEATURE_SCOPE", str(HEALTH_URL_SCOPE))
+    _set_deployment_env(
+        monkeypatch,
+        destination=GOOD_DESTINATION,
+        queueHealthUrl=GOOD_HEALTH_URL,
+        queueHealthToken="env-token",
+        queueHealthTimeoutSeconds="1.5",
+    )
+    assert _boot_problems() == []
 
 
 def test_boot_validation_reports_non_numeric_seconds(monkeypatch):
