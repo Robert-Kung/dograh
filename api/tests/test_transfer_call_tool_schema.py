@@ -165,3 +165,40 @@ def test_absent_destination_is_not_confused_with_blank():
     """
     request = _create_request({"messageType": "none"})
     assert request.definition.config.destination is None
+
+
+def test_the_case_variant_assumption_the_platform_canon_relies_on():
+    """Platform review gate F-18: the canon's ``forbidden_keys`` is an **exact**
+    match, so ``{"Destination": ...}`` / ``{"queuehealthurl": ...}`` sail past
+    the gateway. That is not exploitable today for one reason only: this model
+    declares no field ``alias`` and no ``populate_by_name``, and pydantic v2
+    defaults to ``extra="ignore"`` -- so a case variant lands in extras and is
+    dropped rather than populating the real field.
+
+    "Not exploitable today" is an assumption about **this model**, and the
+    finding asked for it to be re-verified at the next dograh pointer bump.
+    A test is how that gets re-verified without anyone remembering to.
+    """
+    config = TransferCallConfig.model_config
+    assert not config.get("populate_by_name"), (
+        "populate_by_name would let an alias populate the field, and the "
+        "platform canon's forbidden_keys is an exact-match list"
+    )
+    assert config.get("extra", "ignore") == "ignore", (
+        "extra must stay ignore: with extra='allow' a case variant survives "
+        "into the stored config"
+    )
+    aliased = {
+        name: field.alias
+        for name, field in TransferCallConfig.model_fields.items()
+        if field.alias and field.alias != name
+    }
+    assert not aliased, (
+        f"fields gained aliases {aliased}; each alias is a second spelling the "
+        f"platform canon does not forbid"
+    )
+    # Behavioural half: a case variant must not become the real value.
+    parsed = TransferCallConfig.model_validate(
+        {**GATE_CONFIG, "Destination": "sip:evil@attacker.example"}
+    )
+    assert parsed.destination == GATE_CONFIG["destination"]

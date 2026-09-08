@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import inspect
 import types
+from pathlib import Path
 
 import pytest
 
@@ -27,6 +28,7 @@ from api.services.pipecat.transfer_call_config import (
 from api.tests.support.platform_artifacts import (
     SUPPORT_DIR,
     requires_sip_uri,
+    sip_uri_available,
 )
 
 HEALTH_URL_SCOPE = SUPPORT_DIR / "feature_scope_health_url.json"
@@ -380,6 +382,88 @@ def test_every_reader_reaches_the_convergence_point():
     )
 
 
+#: Every non-test module allowed to name a deployment-layer env var. The point
+#: of the layering is that exactly one function reads these; ``schemas/tool.py``
+#: is on the list only because its field docstrings name them.
+_ENV_READERS = {
+    "api/schemas/tool.py",
+    "api/services/pipecat/transfer_call_config.py",
+}
+
+#: Every non-test module allowed to reach the transfer config at all -- the
+#: three consumers the behaviour tests cover, the convergence point itself, and
+#: the two schema/route modules that only reference it by name.
+_CONFIG_CONSUMERS = {
+    "api/routes/tool.py",
+    "api/schemas/tool.py",
+    "api/services/pipecat/capacity_gate.py",
+    "api/services/pipecat/transfer_call_config.py",
+    "api/services/workflow/pipecat_engine.py",
+    "api/services/workflow/pipecat_engine_custom_tools.py",
+}
+
+_DEPLOYMENT_ENV_NAMES = (
+    "DOGRAH_TRANSFER_DESTINATION",
+    "DOGRAH_TRANSFER_ALTERNATE_DESTINATION",
+    "QUEUE_HEALTH_URL",
+    "QUEUE_HEALTH_TOKEN",
+    "QUEUE_HEALTH_TIMEOUT_SECONDS",
+    "QUEUE_HEALTH_CACHE_TTL_SECONDS",
+)
+
+
+def _api_sources():
+    root = Path(__file__).resolve().parents[1]
+    for path in sorted(root.rglob("*.py")):
+        rel = path.relative_to(root.parent).as_posix()
+        if "/tests/" in rel or rel.startswith("api/tests"):
+            continue
+        yield rel, path.read_text(encoding="utf-8", errors="replace")
+
+
+@pytest.mark.parametrize(
+    ("what", "needles", "allowed"),
+    [
+        ("a deployment-layer env var", _DEPLOYMENT_ENV_NAMES, _ENV_READERS),
+        (
+            "the transfer config lookup",
+            ("find_transfer_call_config", "revalidate_transfer_config"),
+            _CONFIG_CONSUMERS,
+        ),
+    ],
+)
+def test_no_module_outside_the_pinned_set_touches_the_transfer_config(
+    what, needles, allowed
+):
+    """Platform review gate M14: the test above claims "no fourth reader sneaks
+    past", but it only asserts three *known* modules still mention the lookup --
+    a **new** module reading the row or the env directly is completely invisible
+    to it, which is the exact defect this change exists to close.
+
+    So scan the tree instead of the three names. A new reader turns this red and
+    forces an explicit decision: either it goes through
+    ``revalidate_transfer_config``, or somebody writes down why it may not.
+    """
+    found = {
+        rel
+        for rel, source in _api_sources()
+        if any(needle in source for needle in needles)
+    }
+    unexpected = found - allowed
+    assert not unexpected, (
+        f"new module(s) touching {what} without being on the pinned list: "
+        f"{sorted(unexpected)} -- route it through revalidate_transfer_config, "
+        f"or add it here with the reason it may bypass the merge point"
+    )
+    # The pinned list must not rot into a claim about files that are gone: a
+    # stale name here is a silent hole (it exempts a path that no longer exists,
+    # and would exempt a brand-new file that happens to reuse the name).
+    assert not (allowed - found), (
+        f"pinned list names modules that no longer touch {what}: "
+        f"{sorted(allowed - found)}"
+    )
+
+
 # ── 1.10 開機期驗證（警告模式）──────────────────────────────────────────
 
 
@@ -680,6 +764,55 @@ def test_call_time_unverifiable_canon_also_drops_the_token(monkeypatch):
     assert "queueHealthUrl" not in merged
     assert "queueHealthToken" not in merged
     assert merged["destination"] == GOOD_DESTINATION
+
+
+def test_the_two_missing_mounts_fail_in_the_directions_we_chose(monkeypatch):
+    """Platform review gate M15: the *same* operator slip -- one missing ``-v``
+    -- lands differently for the two bind-mounted artifacts, and the review
+    called the pair out because one of the two directions used to be silent.
+
+    Both directions are deliberate and this pins them side by side:
+
+    - **``sip_uri.py`` gone** -> destination blanked. Fail-**closed**: without
+      the parser we cannot tell a queue from an attacker's SIP host. The
+      transfer stops; C4's other exits (spoken message, explicit hangup) carry
+      the caller.
+    - **``feature-scope.json`` gone** -> health URL *and* token dropped, the
+      destination untouched. Fail-**closed on the credential**, degraded on the
+      probe: ``queue_health`` already documents "unset means unchecked" as an
+      accepted degradation, so the transfer still reaches a human.
+
+    Neither is silent any more (review gate F-12 routed both events to the
+    alert dispatcher); the asymmetry that remains is the intended one. The
+    failure this guards against is somebody "harmonising" the two later and
+    turning the parser branch into a pass-through.
+    """
+    from api.services import platform_scope
+
+    # ① parser gone, canon fine
+    monkeypatch.setenv("PLATFORM_SIP_URI", str(SUPPORT_DIR / "does-not-exist-sip-uri.py"))
+    monkeypatch.setenv("PLATFORM_FEATURE_SCOPE", str(HEALTH_URL_SCOPE))
+    platform_scope.reset_cache()
+    _set_deployment_env(
+        monkeypatch,
+        destination=GOOD_DESTINATION,
+        queueHealthUrl=GOOD_HEALTH_URL,
+        queueHealthToken="env-token",
+    )
+    merged = revalidate_transfer_config(_db_config())
+    assert merged["destination"] == "", "解析器不在時仍撥出目的地＝fail-open"
+
+    # ② canon gone, parser fine (contrast: the destination survives)
+    monkeypatch.delenv("PLATFORM_SIP_URI", raising=False)
+    monkeypatch.setenv("PLATFORM_FEATURE_SCOPE", str(MISSING_SCOPE_PATH))
+    platform_scope.reset_cache()
+    merged = revalidate_transfer_config(_db_config())
+    if sip_uri_available():
+        assert merged["destination"] == GOOD_DESTINATION, (
+            "正本缺席不該連目的地一起抹白——那會把一個可用性降級升級成轉接全滅"
+        )
+    assert "queueHealthToken" not in merged
+    assert "queueHealthUrl" not in merged
 
 
 @requires_sip_uri
