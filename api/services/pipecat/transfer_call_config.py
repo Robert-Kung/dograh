@@ -701,9 +701,22 @@ def _deployment_only_config(why: str) -> dict | None:
     自己就足以支撐兩張安全網的設定，並大聲說出來。沒有 ⇒ ``None`` 仍然正確，
     press-0 的安靜分支（「這個工作流本來就不轉真人」）原封不動。
 
-    話術層會缺席，那是這個降級的已知代價：``transferFailedMessage`` 有內建預設，
-    ``transferUnavailableMessage`` 沒有。相對於 fail-open 地 REFER 進死隊列、
-    或整條轉真人路徑無聲消失，少一句客製話術是可接受的那一邊。
+    話術層會缺席，那是這個降級的已知代價：來電者聽到的是**內建預設**而不是這套
+    部署客製的字。相對於 fail-open 地 REFER 進死隊列、或整條轉真人路徑無聲消失，
+    少一句客製話術是可接受的那一邊。
+
+    **更正（W3a §9.3 security F-17 複驗）**：本段原本寫「``transferFailedMessage``
+    有內建預設，``transferUnavailableMessage`` 沒有」——後半不成立。
+    ``_announce_unavailable`` 播的是 ``message or _DEFAULT_UNAVAILABLE_MESSAGE``
+    （``livekit_transfer_flow``），四個話術層執行點**都有**碼層預設：
+    ``transferFailedMessage``→``press0_gate._DEFAULT_FAILURE_MESSAGE``、
+    ``transferUnavailableMessage``／``afterHoursMessage``→
+    ``livekit_transfer_flow`` 的兩個 ``_DEFAULT_*_MESSAGE``、
+    ``unavailableAnnounceLimit``→``DEFAULT_UNAVAILABLE_ANNOUNCE_LIMIT = 2``。
+    所以少任何一鍵都不會產生無聲掛斷或無上限迴圈（C4 兩條出口都還在），
+    ``test_every_c4_exit_has_a_code_level_default`` 把這件事釘住。
+    ``feature-scope.json`` 的 ``required_keys`` 只列兩鍵**不是** C4 的漏洞：
+    它防的是「一次回送不全的寫入把營運者設定的字刪掉」，不是防無聲。
     """
     supplied = deployment_transfer_config()
     if not str(supplied.get("destination") or "").strip():
