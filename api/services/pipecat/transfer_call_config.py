@@ -173,9 +173,15 @@ def _merge_deployment_layer(config: dict) -> dict:
 # （2.0／60.0）並拒負值，於是顯式的 ``0.001`` 會被誠實採用 → 探測必逾時 →
 # 恆判不健康 → **營運時間內的真人轉接全滅**（W2c review M-6）。
 #
-# **這個數字在 ``deploy/preflight.sh`` 有一份刻意的複本**（W3a §2.7）：那一份是
-# 部署期的擋門，這一份是開機期的。兩處都要，理由與 D10 相同——preflight 有已知
-# 繞道且是一次性，而本檔看得到行程實際讀到的值。改一處 SHALL 同批改另一處。
+# **這個數字在 ``deploy/bin/feature_scope_check.py`` 有一份刻意的複本**
+# （常數名 ``MIN_PROBE_SECONDS``；W3a §2.7）：那一份是部署期的擋門，這一份是
+# 開機期的。兩處都要，理由與 D10 相同——preflight 有已知繞道且是一次性，
+# 而本檔看得到行程實際讀到的值。改一處 SHALL 同批改另一處。
+#
+# **交叉引用原本指錯檔**（W3a §9.3 reviewer L-19）：寫的是 ``deploy/preflight.sh``
+# ——那支只是**呼叫**驗證器，常數不在它裡面。照著指標去找的人找不到東西，
+# 於是「同批改」這個承諾在第一步就斷了。兩份現由平台側的
+# ``test_both_copies_of_the_probe_floor_agree`` 斷言一致（願望改成守衛）。
 _MIN_PROBE_SECONDS = 0.2
 
 
