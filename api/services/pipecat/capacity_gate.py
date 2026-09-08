@@ -232,8 +232,24 @@ async def _gate_allows(workflow_id: int, user_id: int, now: datetime) -> bool:
 
     Inputs come from the workflow's ``transfer_call`` tool config (shared
     lookup). A failed lookup degrades to "unconfigured" — open hours, health
-    unchecked — matching the in-call gate's unset semantics; the warning below
-    is the ops signal that the health dimension was skipped, not passed.
+    unchecked — matching the in-call gate's unset semantics.
+
+    **Two corrections from the platform review gate (2026-09-04):**
+
+    *L-23 — "the tool row is gone" no longer lands here.* The finding was that
+    removing ``transfer_call`` from the node graph made the lookup return
+    ``None``, so ``config or {}`` reached ``queue_is_healthy({})`` and its
+    ``if not url: return True`` **fail-open** REFERed every capacity-rejected
+    caller into a possibly dead queue with the schedule gate off as well.
+    Since F-11 the lookup returns the deployment-layer config whenever the
+    deployment declares a destination, so that path now arrives here *with*
+    the health keys and the gate actually runs.
+
+    *The warning was not an ops signal.* ``logger.warning`` is a shape, not a
+    route (the same mistake F-12 fixed for the config events). What remains
+    reachable here is a genuine lookup failure — DB down, ORM error — and it
+    still degrades open, which is the right call for a background overflow
+    path. It now says so through the alert dispatcher instead of only loguru.
     """
     from api.db import db_client
     from api.services.pipecat.transfer_call_config import find_transfer_call_config
@@ -244,9 +260,14 @@ async def _gate_allows(workflow_id: int, user_id: int, now: datetime) -> bool:
         if workflow is not None and workflow.organization_id:
             config = await find_transfer_call_config(workflow, workflow.organization_id)
     except Exception as e:
-        logger.warning(
-            f"capacity gate config lookup failed ({e}); "
-            "degrading to unconfigured — hours open, queue health unchecked"
+        from api.services.pipecat.transfer_call_config import _config_event
+
+        _config_event(
+            "transfer.config_unvalidatable",
+            f"transfer.config_unvalidatable: capacity gate config lookup failed "
+            f"({type(e).__name__}); degrading to unconfigured — hours open, "
+            f"queue health unchecked, overflow will REFER (platform review L-23)",
+            field="schedule",
         )
     config = config or {}
 

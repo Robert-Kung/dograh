@@ -26,6 +26,7 @@ from api.services.pipecat.transfer_call_config import (
     validate_transfer_config,
 )
 from api.tests.support.platform_artifacts import (
+    DELIVERED_SCOPE,
     SUPPORT_DIR,
     requires_sip_uri,
     sip_uri_available,
@@ -394,6 +395,10 @@ _ENV_READERS = {
 #: three consumers the behaviour tests cover, the convergence point itself, and
 #: the two schema/route modules that only reference it by name.
 _CONFIG_CONSUMERS = {
+    # Names it in a docstring only: it receives the **already merged** dict and
+    # picks its own keys out of it, so it is downstream of the merge point
+    # rather than a fourth reader (platform review L-9 put the pointer there).
+    "api/services/pipecat/queue_health.py",
     "api/routes/tool.py",
     "api/schemas/tool.py",
     "api/services/pipecat/capacity_gate.py",
@@ -706,10 +711,14 @@ def test_boot_validation_says_so_when_the_canon_carries_no_rule(monkeypatch):
 
     正本若沒有這條規則，本檢查 SHALL 明說沒有可比對的白名單，而不是靜默通過
     ——靜默通過正是本 change 對 preflight §7「空轉全綠」提出的同一個指控。
-    """
-    from api.tests.support.platform_artifacts import DELIVERED_SCOPE
 
-    monkeypatch.setenv("PLATFORM_FEATURE_SCOPE", str(DELIVERED_SCOPE))
+    **用哪一份 fixture 有差**（platform review L-21／L-22）：本測試原本指向
+    `feature_scope_delivered_shape.json`，而那份檔當時**完全沒有 field_rules**
+    ——於是一個名字寫著「交付態形狀」的 fixture 實際上是「一份沒有規則的正本」，
+    真正的白名單行為在這裡零覆蓋。空 allowlist 有自己的 fixture，用那一份；
+    交付態那份現已補上正本的 field_rules，並由平台側斷言兩者同步。
+    """
+    monkeypatch.setenv("PLATFORM_FEATURE_SCOPE", str(NO_RULE_SCOPE))
     _set_deployment_env(
         monkeypatch,
         destination=GOOD_DESTINATION,
@@ -718,6 +727,22 @@ def test_boot_validation_says_so_when_the_canon_carries_no_rule(monkeypatch):
     )
     joined = "\n".join(_boot_problems())
     assert "no allowlist to check against" in joined
+
+
+@requires_sip_uri
+def test_the_delivered_shape_canon_really_does_enforce_the_allowlist(monkeypatch):
+    """L-21／L-22 的對照組：補了 field_rules 之後，「交付態形狀」這份 fixture
+    必須真的擋得住白名單外的 host——否則它仍然只是一個名字。"""
+    monkeypatch.setenv("PLATFORM_FEATURE_SCOPE", str(DELIVERED_SCOPE))
+    _set_deployment_env(
+        monkeypatch,
+        destination=GOOD_DESTINATION,
+        queueHealthUrl="http://attacker.test/health",
+        queueHealthToken="env-token",
+    )
+    joined = "\n".join(_boot_problems())
+    assert "is not in" in joined, joined
+    assert "no allowlist to check against" not in joined
 
 
 # ── 通話期的白名單執行點（platform review gate F-1／H3）────────────────────

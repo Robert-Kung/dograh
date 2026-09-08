@@ -464,7 +464,7 @@ def _allowlist_problems(url: str) -> tuple[list[str], list[str]]:
     return problems, []
 
 
-def revalidate_transfer_config(config: dict) -> dict | None:
+def revalidate_transfer_config(config: dict) -> dict:
     """Merge the deployment layer in, then re-check every shape (issue #3, W3a).
 
     **This is also the merge point for the deployment-layer six** (W3a D3), and
