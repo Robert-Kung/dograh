@@ -83,14 +83,62 @@ class PlatformArtifactMissing(RuntimeError):
 
 
 # Import/parse results are cached: both files are read-only bind mounts, and
-# the call-time filter runs per tool per call. ``reset_cache`` exists for tests
-# only — nothing in the runtime rereads.
-_cache: dict[str, Any] = {}
+# the call-time filter runs per tool per call. Each entry is keyed on the
+# file's ``(mtime_ns, size)`` at load time and re-read when that changes
+# (platform gate2 H-1): a module-level dict with no invalidation meant that
+# tightening ``feature-scope.json`` after an incident never reached the
+# call-time allowlist until the container happened to be recreated -- and
+# ``platform-up.sh`` did not recreate it. The deploy entry point now
+# force-recreates ``api``; this stat check is the in-process half, so a
+# bind-mounted edit takes effect on the next call even when it is not.
+# One ``stat`` per lookup is the whole cost. ``reset_cache`` exists for tests.
+_cache: dict[str, tuple[tuple[int, int] | None, Any]] = {}
 
 
 def reset_cache() -> None:
     """Drop memoized artifacts. Tests only."""
     _cache.clear()
+
+
+def _signature(path: Path) -> tuple[int, int] | None:
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    return (st.st_mtime_ns, st.st_size)
+
+
+def _read_stable(path: Path, read):
+    """Read ``path`` and return ``(signature, value)`` for one consistent revision.
+
+    An atomic replace of the bind-mounted file between the read and the
+    post-read ``stat`` would otherwise store the *old* content under the *new*
+    signature, and the stale copy would then be served until the next edit
+    (Codex review on PR #26). Signature is taken before and after; a mismatch
+    means the file moved underneath us, so read again. Three consecutive
+    mismatches is not a race but a file that keeps changing -- fail closed.
+    """
+    for _ in range(3):
+        before = _signature(path)
+        value = read()
+        after = _signature(path)
+        if before is not None and before == after:
+            return before, value
+    raise PlatformArtifactMissing(
+        f"platform artifact at {path} changed underneath every read attempt; "
+        "refusing to cache an unidentifiable revision"
+    )
+
+
+def _cached(key: str, path: Path):
+    entry = _cache.get(key)
+    if entry is None:
+        return None
+    signature, value = entry
+    if signature is None or signature != _signature(path):
+        _cache.pop(key, None)
+        return None
+    return value
 
 
 def sip_uri_path() -> Path:
@@ -103,11 +151,11 @@ def feature_scope_path() -> Path:
 
 def load_sip_uri():
     """Import ``sip_uri`` from the bind mount. Raises PlatformArtifactMissing."""
-    cached = _cache.get("sip_uri")
+    path = sip_uri_path()
+    cached = _cached("sip_uri", path)
     if cached is not None:
         return cached
 
-    path = sip_uri_path()
     if not path.is_file():
         raise PlatformArtifactMissing(
             f"shared REFER URI parser not readable at {path}; the api container "
@@ -115,21 +163,26 @@ def load_sip_uri():
             "deploy/overrides/dograh.override.yml) and PLATFORM_SIP_URI pointing "
             "at it"
         )
-    spec = importlib.util.spec_from_file_location(_MODULE_NAME, path)
-    if spec is None or spec.loader is None:
-        raise PlatformArtifactMissing(f"cannot load a module from {path}")
-    module = importlib.util.module_from_spec(spec)
-    # Register before exec so the module's own ``from __future__``/dataclass
-    # machinery resolves normally, mirroring a real import.
-    sys.modules[_MODULE_NAME] = module
-    try:
-        spec.loader.exec_module(module)
-    except Exception as exc:  # pragma: no cover - corrupt mount
-        sys.modules.pop(_MODULE_NAME, None)
-        raise PlatformArtifactMissing(
-            f"shared REFER URI parser at {path} failed to load: {type(exc).__name__}"
-        ) from exc
-    _cache["sip_uri"] = module
+
+    def _import():
+        spec = importlib.util.spec_from_file_location(_MODULE_NAME, path)
+        if spec is None or spec.loader is None:
+            raise PlatformArtifactMissing(f"cannot load a module from {path}")
+        module = importlib.util.module_from_spec(spec)
+        # Register before exec so the module's own ``from __future__``/dataclass
+        # machinery resolves normally, mirroring a real import.
+        sys.modules[_MODULE_NAME] = module
+        try:
+            spec.loader.exec_module(module)
+        except Exception as exc:  # pragma: no cover - corrupt mount
+            sys.modules.pop(_MODULE_NAME, None)
+            raise PlatformArtifactMissing(
+                f"shared REFER URI parser at {path} failed to load: {type(exc).__name__}"
+            ) from exc
+        return module
+
+    signature, module = _read_stable(path, _import)
+    _cache["sip_uri"] = (signature, module)
     return module
 
 
@@ -146,11 +199,11 @@ def parse_refer_uri(value):
 
 def load_feature_scope() -> dict:
     """Parse the enabled-set canon. Raises PlatformArtifactMissing."""
-    cached = _cache.get("feature_scope")
+    path = feature_scope_path()
+    cached = _cached("feature_scope", path)
     if cached is not None:
         return cached
 
-    path = feature_scope_path()
     if not path.is_file():
         raise PlatformArtifactMissing(
             f"feature scope canon not readable at {path}; the api container needs "
@@ -158,15 +211,19 @@ def load_feature_scope() -> dict:
             "deploy/overrides/dograh.override.yml) and PLATFORM_FEATURE_SCOPE "
             "pointing at it"
         )
-    try:
-        scope = json.loads(path.read_text(encoding="utf-8"))
-    except Exception as exc:
-        raise PlatformArtifactMissing(
-            f"feature scope canon at {path} is not parseable JSON: {type(exc).__name__}"
-        ) from exc
+
+    def _parse():
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            raise PlatformArtifactMissing(
+                f"feature scope canon at {path} is not parseable JSON: {type(exc).__name__}"
+            ) from exc
+
+    signature, scope = _read_stable(path, _parse)
     if not isinstance(scope, dict):
         raise PlatformArtifactMissing(f"feature scope canon at {path} is not an object")
-    _cache["feature_scope"] = scope
+    _cache["feature_scope"] = (signature, scope)
     return scope
 
 

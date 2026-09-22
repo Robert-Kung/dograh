@@ -464,6 +464,11 @@ async def test_after_hours_alternate_without_target_falls_back_to_ai():
     )
     assert res == {"status": "after_hours", "action": "back_to_ai"}
     assert eng._frames and not eng._ended
+    # Codex review (PR #26) / platform gate2 on F-5: emit alone leaves the run
+    # to be recorded as ``ai_completed``; the outcome marker is what the reports read.
+    assert str(getattr(eng, "_call_outcome", None)).startswith("transfer_failed:"), (
+        "alternate_queue without a deployment destination must not read as a clean completion"
+    )
 
 
 # --- queue-health dimension (S-L5-QUEUE) -----------------------------------
@@ -593,6 +598,66 @@ async def test_malformed_announce_limit_degrades_to_default(monkeypatch):
         "back_to_ai",
         "announced_hangup",  # default cap (2) still enforced
     ]
+
+
+@pytest.mark.skipif(not PIPECAT, reason="pipecat runtime not installed")
+async def test_every_c4_exit_has_a_code_level_default(monkeypatch):
+    """Platform review gate F-17: the prompt layer is seed-once and can be
+    partially written back, so "the operator's wording is missing" is a
+    reachable state on every one of the four C4 exits. The finding claimed a
+    missing ``unavailableAnnounceLimit`` means *no* cap -- it does not, and
+    ``transfer_call_config`` used to claim ``transferUnavailableMessage`` had
+    no built-in default -- it does. Both are corrected; this pins the fact so
+    the correction cannot rot back into a real dead-silence path.
+
+    Drives the exits with **no prompt-layer keys at all** (exactly what
+    ``config.get(...)`` yields for an absent key in ``press0_gate`` and
+    ``pipecat_engine_custom_tools``): every exit still speaks a non-empty line,
+    and the unavailable loop is still bounded.
+    """
+    from api.services.pipecat import queue_health as qh
+    from api.services.pipecat.livekit_transfer_flow import execute_cold_transfer
+
+    async def always_unhealthy(config, **kw):
+        return False
+
+    monkeypatch.setattr(qh, "queue_is_healthy", always_unhealthy)
+
+    # Exit 1+2: queue unhealthy, no message and no limit configured.
+    eng = _fake_engine()
+    actions = [
+        (
+            await execute_cold_transfer(
+                eng,
+                room_name="cs-room",
+                destination="tel:+886277001234",
+                schedule=SCHED,
+                now=OPEN,
+                queue_health_config={"queueHealthUrl": "http://q/h"},
+            )
+        )["action"]
+        for _ in range(3)
+    ]
+    assert actions == ["back_to_ai", "back_to_ai", "announced_hangup"]
+    assert eng._ended, "unbounded loop: C4 has no exit without an explicit cap"
+
+    # Exit 3: after hours, announce-and-hangup, no afterHoursMessage.
+    eng2 = _fake_engine()
+    result = await execute_cold_transfer(
+        eng2,
+        room_name="cs-room",
+        destination="tel:+886277001234",
+        schedule=SCHED,
+        after_hours_action="announce_and_hangup",
+        now=CLOSED,
+    )
+    assert result["status"] != "success"
+    assert eng2._ended
+
+    # Nothing was spoken as an empty frame anywhere above (dead air is the
+    # failure shape C4 names, and "" is what a bare config.get() would give).
+    for frame in eng._frames + eng2._frames:
+        assert getattr(frame, "text", "").strip(), "C4 出口播了空話術＝無聲"
 
 
 @pytest.mark.skipif(not PIPECAT, reason="pipecat runtime not installed")

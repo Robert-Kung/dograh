@@ -1,14 +1,111 @@
 {
   "_readme": [
-    "TEST FIXTURE mirroring the SHAPE of the delivered canon (allowed_tool_types",
-    "= transfer_call + end_call). It is not the canon itself and is not kept in",
-    "sync automatically: it exists so the enabled-set filter can be tested for",
-    "'blocks what is not listed' without the platform repo being checked out.",
+    "TEST FIXTURE mirroring the SHAPE of the delivered canon: allowed/blocked",
+    "tool types AND the field_rules dograh actually reads at boot and at call",
+    "time (constrained_values for queueHealthUrl / destination).",
     "",
-    "The real canon is deploy/feature-scope.json in the platform repo. Tests that",
-    "must assert against the real thing point PLATFORM_FEATURE_SCOPE at it."
+    "It is not the canon itself. The real canon is deploy/feature-scope.json in",
+    "the platform repo; the platform suite asserts this file stays in step with",
+    "it (test_dograh_delivered_shape_fixture_matches_the_canon) -- platform",
+    "review L-21/L-22, which found this file carried NO field_rules at all, so",
+    "a test naming 'the delivered shape' was in fact exercising 'a canon with",
+    "no rules' and the real allowlist behaviour had zero coverage here.",
+    "",
+    "For the genuinely-empty-allowlist case use feature_scope_no_allowlist.json."
   ],
   "version": 0,
-  "allowed_tool_types": ["transfer_call", "end_call"],
-  "blocked_tool_types": ["calculator", "http_api", "mcp", "native", "integration"]
+  "allowed_tool_types": [
+    "transfer_call",
+    "end_call"
+  ],
+  "blocked_tool_types": [
+    "calculator",
+    "http_api",
+    "mcp",
+    "native",
+    "integration"
+  ],
+  "field_rules": {
+    "constrained_values": {
+      "queueHealthUrl": {
+        "kind": "url",
+        "allowed_schemes": [
+          "http"
+        ],
+        "allowed_hosts": [
+          "queue:8080"
+        ],
+        "_why": [
+          "queue_health.py 帶 Authorization: Bearer {queueHealthToken} 對本 URL 發 GET，",
+          "而欄位型別僅 Optional[str]、無 scheme／host 驗證 → 內網探測＋把 bearer token 送給指定主機。",
+          "host allowlist 補的正好是 egress proxy 看不到的那一半（NO_PROXY 內的內網目的地）。",
+          "",
+          "**規則本體保留，執行對象於 W3a 改變。** 設定分層把本欄位移出工具 definition，",
+          "故 check_definition 對它的命中數**歸零**——本規則若只留在這裡就是死碼。",
+          "「規則還在正本裡」MUST NOT 被讀成「該控制仍生效」：本檔沒有",
+          "「某條 constrained_values 一次都沒命中」的偵測，那正是靜默失效的具體形態。",
+          "",
+          "**兩個承接點，都沿用本條規則本體、不另寫一份**：",
+          "  ①`preflight.sh` §7 對部署層 env 的 QUEUE_HEALTH_URL 執行**同一個 _check_url**；",
+          "  ②dograh `transfer_call_config.validate_transfer_config()` 在開機期讀本檔",
+          "    （platform_scope.queue_health_url_constraints()）套用做得到的子集",
+          "    ——scheme ＋ hostname:port。_check_url 本體（userinfo／IDN／尾隨點／顯式埠）",
+          "    未 bind-mount 進該容器，只有本 JSON 有，故差額是**宣告過的**而非遺漏。",
+          "",
+          "**allowed_schemes 只有 http 是刻意的，且它是兩側中較嚴的那一側。**",
+          "dograh 通話期的 transfer_call_config._HEALTH_URL_SCHEMES 放行 http 與 https。",
+          "分層前由部署期這一側收斂；欄位移出後若只剩寬鬆側即為**實質放寬**，",
+          "故承接點②讀的是本條規則而不是那個常數。"
+        ]
+      },
+      "queueHealthToken": {
+        "kind": "placeholder_only",
+        "_why": [
+          "版控檔不得含真值（dograh-bootstrap.py 的既有原則）。",
+          "只在 pre-substitution 模式檢查——代換後它就是真值，形狀無從驗。",
+          "",
+          "**W3a 之後本規則的命中數為零並保留**：本欄位已進 forbidden_keys，出現即拒，",
+          "所以「出現了、但形狀是佔位符」這個狀態不再可達。保留而不刪的理由**不是**",
+          "防禦縱深（那個論證這裡不成立）——是 kind 的登記本身有值：",
+          "它記著「這個鍵一旦回到版控定義，版控檔仍不得含真值」。",
+          "命中歸零已於 _forbidden_keys_why 的差額表登記，MUST NOT 被讀成控制未變。"
+        ]
+      },
+      "destination": {
+        "kind": "refer_uri",
+        "allowed_values": [],
+        "allowed_hosts": [],
+        "_why": [
+          "**只驗形狀，不是目的地清單。** 形狀是寫入層本來就做的事；被閘門唯讀化拆除的",
+          "是**目的地白名單**，而 sip:[A-Za-z0-9._@:-]+ 允許任意主機——取得寫入權者可把所有轉真人",
+          "的來電導向任意 SIP 主機（話務攔截／vishing）。",
+          "allowed_values／allowed_hosts 是**保留欄位**：留空＝只驗形狀（不擋現行部署）；",
+          "填了才額外比對。目的地清單在**兩面**皆仍不存在，登記為 R-E。"
+        ]
+      },
+      "alternateDestination": {
+        "kind": "refer_uri",
+        "allowed_values": [],
+        "allowed_hosts": []
+      }
+    },
+    "forbidden_keys": [
+      "pre_call_fetch_enabled",
+      "pre_call_fetch_url",
+      "pre_call_fetch_credential_uuid",
+      "workflow_configurations",
+      "template_context_variables",
+      "destination",
+      "alternateDestination",
+      "queueHealthUrl",
+      "queueHealthToken",
+      "queueHealthTimeoutSeconds",
+      "queueHealthCacheTtlSeconds"
+    ],
+    "required_keys": [
+      "transferFailedMessage",
+      "transferUnavailableMessage"
+    ],
+    "required_keys_when_tool_type": "transfer_call"
+  }
 }

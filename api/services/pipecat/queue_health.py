@@ -96,9 +96,17 @@ async def queue_is_healthy(
 ) -> bool:
     """Health verdict for the transfer gate; True when unconfigured.
 
-    Config keys (tool config, org/workflow level):
+    Config keys (**deployment layer since W3a**, not the tool config):
       queueHealthUrl / queueHealthToken /
       queueHealthTimeoutSeconds / queueHealthCacheTtlSeconds
+
+    All four moved out of the tool definition and are supplied by environment
+    (``QUEUE_HEALTH_*``), merged in by
+    ``transfer_call_config.revalidate_transfer_config`` **before** this function
+    ever sees the dict. What arrives here is therefore the *effective* value;
+    the database's copy is six nulls and never wins. Saying "tool config,
+    org/workflow level" points a reader at a place where the value provably
+    is not, and at an editing path that is now a 403 (platform review L-9).
     """
     url = _text((config or {}).get("queueHealthUrl"))
     if not url:

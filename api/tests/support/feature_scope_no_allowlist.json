@@ -1,0 +1,27 @@
+{
+  "_readme": [
+    "TEST FIXTURE: canon that is mounted and readable but carries NO host/scheme",
+    "allowlist for queueHealthUrl. That is a legal canon state (CS-19/R-E leaves",
+    "destination's allowed_hosts empty on purpose), and the two phases treat it",
+    "differently: boot records a verdict, call time keeps the probe running."
+  ],
+  "version": 0,
+  "allowed_tool_types": [
+    "transfer_call",
+    "end_call"
+  ],
+  "blocked_tool_types": [
+    "calculator",
+    "http_api",
+    "mcp",
+    "native",
+    "integration"
+  ],
+  "field_rules": {
+    "constrained_values": {
+      "queueHealthUrl": {
+        "kind": "url"
+      }
+    }
+  }
+}
