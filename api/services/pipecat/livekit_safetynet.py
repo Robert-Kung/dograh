@@ -583,7 +583,6 @@ async def resolve_safetynet_watchdog(
             transfer_reason="safetynet",
         )
         await record_call_fact(
-            engine,
             workflow_run.id,
             safetynet_installed=False,
             safetynet_not_installed_reason="no_room",

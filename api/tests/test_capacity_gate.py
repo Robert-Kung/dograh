@@ -658,11 +658,18 @@ async def test_gate_missing_workflow_is_unresolved_not_a_choice(monkeypatch, gat
     async def fake_get_workflow(workflow_id, user_id):
         return None
 
+    from api.services.pipecat import transfer_call_config
+
+    seen = []
+    monkeypatch.setattr(
+        transfer_call_config, "_config_event", lambda ev, msg, **kw: seen.append(ev)
+    )
     monkeypatch.setattr(db_client, "get_workflow", fake_get_workflow)
     assert await capacity_gate._gate_allows(1, 2, datetime.now(timezone.utc))
     lines = [m for m in gate_log if m.startswith("capacity gate:")]
     assert len(lines) == 1 and "unresolved" in lines[0] and "not found" in lines[0]
     assert "workflow choice" not in lines[0]
+    assert seen == ["transfer.config_unvalidatable"]  # not log-only (round-2 M5)
 
 
 @pytest.mark.asyncio

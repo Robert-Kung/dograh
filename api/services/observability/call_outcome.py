@@ -67,7 +67,7 @@ async def record_call_outcome(
         logger.warning(f"record_call_outcome failed for run {workflow_run_id}: {e}")
 
 
-async def record_call_fact(engine, workflow_run_id: int | None, **facts) -> None:
+async def record_call_fact(workflow_run_id: int | None, **facts) -> None:
     """Write per-call facts that are *not* the outcome (ccp#7 review #1).
 
     ``call_outcome`` is one slot with rank precedence, so two facts recorded
@@ -75,7 +75,8 @@ async def record_call_fact(engine, workflow_run_id: int | None, **facts) -> None
     it and the second was dropped. A fact about the call's *protection* is
     orthogonal to how the call *ended*: it goes under its own annotation keys
     (merged by ``update_workflow_run``, so a later outcome write keeps it) and
-    onto the span as ``dograh.<key>``. Never raises.
+    onto the span as ``dograh.<key>``. No precedence, no engine state: a
+    repeated call writes again and the last value wins. Never raises.
     """
     try:
         from opentelemetry import trace as otel_trace

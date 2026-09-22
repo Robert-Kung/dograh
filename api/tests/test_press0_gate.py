@@ -421,24 +421,34 @@ async def test_log_distinguishes_no_room_from_no_tool(observability, log_lines):
 # --- ccp#7 D4: the resolver never raises; a DB blip is not dead air ---
 
 
-def _engine_with_failing_lookup(exc):
-    """A stand-in ``self`` for PipecatEngine.resolve_transfer_call_config.
+def _engine_with_failing_lookup(exc=None, organization_id=None):
+    """A stand-in engine carrying the **real** resolver and the **real**
+    ``transfer_config_lookup_failed`` property, bound to a minimal self.
 
-    The method is exercised unbound so the test does not need the full engine
-    build; only the attributes the guard reads are provided.
+    Not a SimpleNamespace with hand-copied attributes (round-2 M1/L6): the
+    contract press-0 relies on is the property *name* on PipecatEngine, and a
+    rename must fail here, not default silently to False via getattr.
     """
+    from api.services.workflow.pipecat_engine import PipecatEngine
 
-    async def _get_organization_id():
-        raise exc
+    class _Engine:
+        resolve_transfer_call_config = PipecatEngine.resolve_transfer_call_config
+        _transfer_config_unresolved = PipecatEngine._transfer_config_unresolved
+        transfer_config_lookup_failed = PipecatEngine.transfer_config_lookup_failed
 
-    return types.SimpleNamespace(
-        _get_organization_id=_get_organization_id,
-        _room_name="cs-+886912345678",
-        _workflow_run_id=42,
-        _call_outcome=None,
-        _transfer_config_lookup_failed=False,
-        workflow=None,
-    )
+        def __init__(self):
+            self._room_name = "cs-+886912345678"
+            self._workflow_run_id = 42
+            self._call_outcome = None
+            self._transfer_config_lookup_failed = False
+            self.workflow = None
+
+        async def _get_organization_id(self):
+            if exc is not None:
+                raise exc
+            return organization_id
+
+    return _Engine()
 
 
 @pytest.mark.asyncio
@@ -453,7 +463,7 @@ async def test_resolver_db_failure_degrades_to_none_with_event_and_outcome(
     result = await PipecatEngine.resolve_transfer_call_config(engine)
 
     assert result is None  # "no transfer gate", the same value the quiet branch returns
-    assert engine._transfer_config_lookup_failed is True
+    assert engine.transfer_config_lookup_failed is True
     assert [e[0] for e in events] == ["transfer.config_unvalidatable"]
     assert "ConnectionError" in events[0][1]["reason"]
     assert events[0][1]["room_name"] == "cs-+886912345678"
@@ -468,29 +478,36 @@ async def test_press0_setup_survives_resolver_failure(observability, log_lines):
     guard in the resolver the gate simply does not install — and says it was
     the lookup, not a workflow choice (review gate #2)."""
     from api.services.pipecat.press0_gate import resolve_press0_gate
-    from api.services.workflow.pipecat_engine import PipecatEngine
 
     events, outcomes = observability
-    failing = _engine_with_failing_lookup(RuntimeError("orm error"))
-
-    async def resolve_transfer_call_config():
-        return await PipecatEngine.resolve_transfer_call_config(failing)
-
-    engine, run = _run()
-    engine.resolve_transfer_call_config = resolve_transfer_call_config
-    engine.transfer_config_lookup_failed = False
-    # Mirror the real engine: the resolver flips the flag on the object it ran on.
-    orig = resolve_transfer_call_config
-
-    async def flagged():
-        result = await orig()
-        engine.transfer_config_lookup_failed = failing._transfer_config_lookup_failed
-        return result
-
-    engine.resolve_transfer_call_config = flagged
+    # The engine handed to resolve_press0_gate *is* the one whose resolver
+    # fails: the flag press-0 reads is set by the real resolver on the same
+    # object, through the real property name (round-2 M1).
+    engine = _engine_with_failing_lookup(RuntimeError("orm error"))
+    _, run = _run()
 
     assert await resolve_press0_gate(engine, run) is None  # did not raise
     assert [e[0] for e in events] == ["transfer.config_unvalidatable"]
+    assert [o[1] for o in outcomes] == ["transfer_failed:config_unresolvable"]
+    line = [m for m in log_lines if "press-0 gate not installed" in m]
+    assert len(line) == 1 and "lookup failed" in line[0]
+    assert "workflow choice" not in line[0]
+
+
+@pytest.mark.asyncio
+async def test_orgless_run_is_unresolved_not_a_choice(observability, log_lines):
+    """Round-2 M3: the engine path used to return None quietly for a run with
+    no organization while the capacity gate called the same state a defect.
+    One verdict on both paths: unresolved."""
+    from api.services.pipecat.press0_gate import resolve_press0_gate
+
+    events, outcomes = observability
+    engine = _engine_with_failing_lookup(organization_id=None)
+    _, run = _run()
+
+    assert await resolve_press0_gate(engine, run) is None
+    assert [e[0] for e in events] == ["transfer.config_unvalidatable"]
+    assert "no organization" in events[0][1]["reason"]
     assert [o[1] for o in outcomes] == ["transfer_failed:config_unresolvable"]
     line = [m for m in log_lines if "press-0 gate not installed" in m]
     assert len(line) == 1 and "lookup failed" in line[0]

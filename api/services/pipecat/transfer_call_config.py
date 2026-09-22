@@ -805,9 +805,10 @@ def transfer_tool_absent(config: dict | None) -> bool:
     outcome, one ``logger.info`` naming the choice.
 
     The engine wrapper (``PipecatEngine.resolve_transfer_call_config``) adds a
-    second ``None``: the lookup raised (D4). It reports that itself and sets
-    ``transfer_config_lookup_failed`` so a consumer can keep the two apart —
-    check that flag *before* this predicate.
+    second ``None``: the lookup raised, or the run has no organization (D4).
+    It reports that itself and sets ``transfer_config_lookup_failed`` — sticky
+    for the engine's lifetime — so a consumer can keep the two apart: check
+    that flag *before* this predicate.
     """
     return config is None
 

@@ -273,13 +273,17 @@ async def _gate_allows(workflow_id: int, user_id: int, now: datetime) -> bool:
         else:
             config = await find_transfer_call_config(workflow, workflow.organization_id)
     except Exception as e:
+        unresolved = f"lookup failed ({type(e).__name__})"
+    if unresolved is not None:
+        # All three sources emit, not just the exception (round-2 M5): a
+        # log-only branch is indistinguishable from "all is well" on the
+        # subscription surface, and every one of these degrades the gate open.
         from api.services.pipecat.transfer_call_config import _config_event
 
-        unresolved = f"lookup failed ({type(e).__name__})"
         _config_event(
             "transfer.config_unvalidatable",
-            f"transfer.config_unvalidatable: capacity gate config lookup failed "
-            f"({type(e).__name__}); degrading to unconfigured — hours open, "
+            f"transfer.config_unvalidatable: capacity gate config unresolved "
+            f"({unresolved}); degrading to unconfigured — hours open, "
             f"queue health unchecked, overflow will REFER (platform review L-23)",
             field="schedule",
         )

@@ -1165,7 +1165,12 @@ class PipecatEngine:
         try:
             organization_id = await self._get_organization_id()
             if not organization_id:
-                return None
+                # Same verdict as the capacity gate's "workflow has no
+                # organization" (round-2 M3): an org-less run cannot resolve
+                # its config, and that is unresolved, not "no transfer tool".
+                return await self._transfer_config_unresolved(
+                    "workflow run has no organization"
+                )
 
             from api.services.pipecat.transfer_call_config import (
                 find_transfer_call_config,
@@ -1173,38 +1178,49 @@ class PipecatEngine:
 
             return await find_transfer_call_config(self.workflow, organization_id)
         except Exception as e:
-            self._transfer_config_lookup_failed = True
-            # Class name only on the warning line: ORM / asyncpg reprs can
-            # carry the DSN, and this fires once per call during an outage.
-            # The traceback stays available at DEBUG.
-            logger.warning(
-                f"transfer config lookup failed ({type(e).__name__}); degrading "
-                f"to no transfer gate (ccp#7 D4)"
-            )
+            # The traceback stays available at DEBUG; the warning line below
+            # carries the class name only (ORM / asyncpg reprs can carry the
+            # DSN, and this fires once per call during an outage).
             logger.opt(exception=e).debug("transfer config lookup traceback")
-            try:
-                from api.services.observability.call_events import emit
-                from api.services.observability.call_outcome import (
-                    record_call_outcome,
-                )
+            return await self._transfer_config_unresolved(
+                f"lookup failed ({type(e).__name__})"
+            )
 
-                emit(
-                    "transfer.config_unvalidatable",
-                    room_name=self._room_name or "",
-                    reason=f"transfer config lookup failed ({type(e).__name__}); "
-                    f"degrading to no transfer gate (ccp#7 D4)",
-                    workflow_run_id=self._workflow_run_id,
-                )
-                await record_call_outcome(
-                    self,
-                    self._workflow_run_id,
-                    outcome="transfer_failed:config_unresolvable",
-                )
-            except Exception as report_error:  # noqa: BLE001 - never raises (C4)
-                logger.warning(
-                    f"transfer config failure could not be reported: {report_error!r}"
-                )
-            return None
+    async def _transfer_config_unresolved(self, why: str) -> None:
+        """Report an unresolvable transfer config and degrade to ``None``.
+
+        Sets ``transfer_config_lookup_failed`` (sticky for the engine's life —
+        press-0 at pipeline setup is its only reader today; a consumer added
+        after a successful retry would read a stale True), emits the windowed
+        event and records the outcome. Never raises.
+        """
+        self._transfer_config_lookup_failed = True
+        logger.warning(
+            f"transfer config unresolved ({why}); degrading to no transfer gate "
+            f"(ccp#7 D4)"
+        )
+        try:
+            from api.services.observability.call_events import emit
+            from api.services.observability.call_outcome import record_call_outcome
+
+            emit(
+                "transfer.config_unvalidatable",
+                room_name=self._room_name or "",
+                reason=f"transfer config unresolved ({why}); degrading to no "
+                f"transfer gate (ccp#7 D4)",
+                workflow_run_id=self._workflow_run_id,
+            )
+            await record_call_outcome(
+                self,
+                self._workflow_run_id,
+                outcome="transfer_failed:config_unresolvable",
+            )
+        except Exception as report_error:  # noqa: BLE001 - never raises (C4)
+            logger.warning(
+                f"transfer config failure could not be reported "
+                f"({type(report_error).__name__})"
+            )
+        return None
 
     async def close_mcp_sessions(self) -> None:
         """Close all open MCP tool sessions.

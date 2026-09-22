@@ -711,7 +711,7 @@ def install_observability(monkeypatch):
 
     monkeypatch.setattr(sn, "record_call_outcome", fake_record)
 
-    async def fake_fact(engine, workflow_run_id, **facts):
+    async def fake_fact(workflow_run_id, **facts):
         outcomes.append((workflow_run_id, "fact", facts))
 
     monkeypatch.setattr(sn, "record_call_fact", fake_fact)
