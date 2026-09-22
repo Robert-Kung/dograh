@@ -38,7 +38,10 @@ from typing import Optional
 from loguru import logger
 
 from api.services.observability import call_events
-from api.services.observability.call_outcome import record_call_outcome
+from api.services.observability.call_outcome import (
+    record_call_fact,
+    record_call_outcome,
+)
 from api.services.pipecat.livekit_dispatcher import DEFAULT_ROOM_PREFIX
 from api.services.pipecat.livekit_transfer_flow import valid_destination
 from api.utils.background import (
@@ -338,11 +341,10 @@ async def midcall_safetynet(
 
         destination = fallback_queue()
         if destination is None:
-            config = None
-            try:
-                config = await engine.resolve_transfer_call_config()
-            except Exception as e:
-                logger.warning(f"safetynet could not resolve transfer config: {e}")
+            # The resolver never raises (ccp#7 D4) — a failed lookup comes
+            # back as None, already reported, and the blank destination below
+            # makes execute_cold_transfer report the refused transfer.
+            config = await engine.resolve_transfer_call_config()
             destination = ((config or {}).get("destination") or "").strip()
 
         result = await execute_cold_transfer(
@@ -555,8 +557,16 @@ async def resolve_safetynet_watchdog(
     not raised as an error: a LIVEKIT run without ``room_name`` is a defect in
     how the run was created (the dispatcher always writes one), the call
     itself still proceeds, and the annotation is what lets "this call had no
-    safety net" be counted and traced back. The outcome ranks with the other
-    ``transfer_failed:*`` markers, so a later successful transfer still wins.
+    safety net" be counted and traced back.
+
+    Recorded as a **fact**, not as the call outcome (review gate #1): press-0
+    hits the same condition on the same engine moments earlier and takes the
+    rank-1 ``call_outcome`` slot, so a second rank-1 write here was dropped
+    whenever the workflow had a transfer tool — the marker landed only on
+    workflows *without* one. ``safetynet_installed=false`` under its own key
+    lands unconditionally and survives whatever outcome the call then has
+    (``ai_completed`` included: the call did complete, it just ran without a
+    net). Key absent means installed; the normal path writes nothing.
     """
     from api.enums import WorkflowRunMode
 
@@ -572,11 +582,11 @@ async def resolve_safetynet_watchdog(
             workflow_run_id=workflow_run.id,
             transfer_reason="safetynet",
         )
-        await record_call_outcome(
+        await record_call_fact(
             engine,
             workflow_run.id,
-            outcome="transfer_failed:safetynet_not_installed",
-            transfer_reason="safetynet",
+            safetynet_installed=False,
+            safetynet_not_installed_reason="no_room",
         )
         logger.warning(
             f"safetynet watchdog not installed: LIVEKIT run {workflow_run.id} has "

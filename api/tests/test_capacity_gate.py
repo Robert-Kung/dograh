@@ -607,7 +607,7 @@ async def test_midway_failure_releases_reservation(monkeypatch):
 # --- ccp#7 D5: None vs defective dict are not the same fact ---
 
 
-def _gate_log(monkeypatch):
+def _gate_log():
     from loguru import logger
 
     messages: list[str] = []
@@ -619,8 +619,8 @@ def _gate_log(monkeypatch):
 
 
 @pytest.fixture
-def gate_log(monkeypatch):
-    yield from _gate_log(monkeypatch)
+def gate_log():
+    yield from _gate_log()
 
 
 @pytest.mark.asyncio
@@ -650,7 +650,23 @@ async def test_gate_names_blank_destination_as_a_defect_and_still_gates(
 
 
 @pytest.mark.asyncio
-async def test_gate_lookup_failure_is_not_logged_as_no_tool(monkeypatch, gate_log):
+async def test_gate_missing_workflow_is_unresolved_not_a_choice(monkeypatch, gate_log):
+    """Review gate #3: a deleted workflow / missing org still degrades open
+    (behaviour unchanged) but must not be labelled a workflow choice."""
+    from api.db import db_client
+
+    async def fake_get_workflow(workflow_id, user_id):
+        return None
+
+    monkeypatch.setattr(db_client, "get_workflow", fake_get_workflow)
+    assert await capacity_gate._gate_allows(1, 2, datetime.now(timezone.utc))
+    lines = [m for m in gate_log if m.startswith("capacity gate:")]
+    assert len(lines) == 1 and "unresolved" in lines[0] and "not found" in lines[0]
+    assert "workflow choice" not in lines[0]
+
+
+@pytest.mark.asyncio
+async def test_gate_lookup_exception_is_logged_as_unresolved(monkeypatch, gate_log):
     from api.db import db_client
 
     async def boom(workflow_id, user_id):
@@ -658,4 +674,5 @@ async def test_gate_lookup_failure_is_not_logged_as_no_tool(monkeypatch, gate_lo
 
     monkeypatch.setattr(db_client, "get_workflow", boom)
     assert await capacity_gate._gate_allows(1, 2, datetime.now(timezone.utc))
-    assert not [m for m in gate_log if m.startswith("capacity gate:")]
+    lines = [m for m in gate_log if m.startswith("capacity gate:")]
+    assert len(lines) == 1 and "lookup failed (RuntimeError)" in lines[0]

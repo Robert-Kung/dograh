@@ -146,6 +146,19 @@ async def resolve_press0_gate(engine, workflow_run) -> Press0Gate | None:
     room_name = (workflow_run.initial_context or {}).get("room_name")
     transfer_config = await engine.resolve_transfer_call_config()
 
+    if transfer_config is None and getattr(
+        engine, "transfer_config_lookup_failed", False
+    ):
+        # The resolver degraded to None because the lookup raised (D4). It
+        # already emitted and recorded the outcome; what is owed here is a
+        # log line that does not call an infrastructure failure a workflow
+        # choice (review gate #2).
+        logger.warning(
+            "press-0 gate not installed: transfer config lookup failed "
+            "(defect, already reported); call continues without press-0"
+        )
+        return None
+
     if transfer_tool_absent(transfer_config):
         # The one quiet branch (ccp#7 D1): no transfer_call tool and no
         # deployment-layer destination means this workflow does not hand off
@@ -158,8 +171,8 @@ async def resolve_press0_gate(engine, workflow_run) -> Press0Gate | None:
         )
         return None
 
-    destination = transfer_config.get("destination", "")
     if transfer_config_defective(transfer_config):
+        destination = transfer_config.get("destination", "")
         # A configured-but-malformed destination is a deployment defect, not a
         # workflow choice: press-0 silently does nothing for the whole call and
         # no other path reports it (execute_cold_transfer only emits once the

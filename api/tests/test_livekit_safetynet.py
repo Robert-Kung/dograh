@@ -710,6 +710,11 @@ def install_observability(monkeypatch):
         outcomes.append((workflow_run_id, outcome, transfer_reason))
 
     monkeypatch.setattr(sn, "record_call_outcome", fake_record)
+
+    async def fake_fact(engine, workflow_run_id, **facts):
+        outcomes.append((workflow_run_id, "fact", facts))
+
+    monkeypatch.setattr(sn, "record_call_fact", fake_fact)
     return events, outcomes
 
 
@@ -742,20 +747,62 @@ async def test_watchdog_missing_room_name_is_visible_and_does_not_raise(
     assert events[0][1]["reason"] == "safetynet_not_installed"
     assert events[0][1]["transfer_reason"] == "safetynet"
     assert events[0][1]["workflow_run_id"] == 42
-    assert outcomes == [(42, "transfer_failed:safetynet_not_installed", "safetynet")]
+    assert outcomes == [
+        (
+            42,
+            "fact",
+            {"safetynet_installed": False, "safetynet_not_installed_reason": "no_room"},
+        )
+    ]
 
 
 @pytest.mark.asyncio
-async def test_watchdog_not_installed_outcome_yields_to_a_later_transfer():
-    """Recorded as a fact, not a verdict: a later successful transfer still wins."""
+async def test_both_setup_markers_land_on_the_same_engine(monkeypatch):
+    """Review gate #1: the production sequence is resolve_press0_gate then
+    resolve_safetynet_watchdog on the *same* engine, both hitting the same
+    missing room_name. With both as rank-1 outcomes the second was dropped.
+    Real record_call_outcome / record_call_fact here — only the DB write and
+    the event sink are captured."""
+    from api.db import db_client
+    from api.services.observability import call_events
+    from api.services.pipecat.press0_gate import resolve_press0_gate
+
+    events, annotations = [], []
+    monkeypatch.setattr(
+        call_events, "emit", lambda event, **fields: events.append(fields["reason"])
+    )
+
+    async def fake_update(run_id, **kwargs):
+        annotations.append(kwargs["annotations"])
+
+    monkeypatch.setattr(db_client, "update_workflow_run", fake_update)
+
+    async def resolve_transfer_call_config():
+        return {"destination": "tel:+886912345678"}
+
+    engine = types.SimpleNamespace(
+        _call_outcome=None, resolve_transfer_call_config=resolve_transfer_call_config
+    )
+    run = _livekit_run(room_name=None)
+
+    assert await resolve_press0_gate(engine, run) is None
+    assert await sn.resolve_safetynet_watchdog(engine, run) is None
+
+    assert events == ["no_room", "safetynet_not_installed"]
+    assert engine._call_outcome == "transfer_failed:press0_not_installed"
+    assert {
+        "safetynet_installed": False,
+        "safetynet_not_installed_reason": "no_room",
+    } in annotations
+    # And the fact survives the outcome the call then ends with.
     from api.services.observability.call_outcome import record_call_outcome
 
-    engine = types.SimpleNamespace(_call_outcome=None)
-    await record_call_outcome(
-        engine, None, outcome="transfer_failed:safetynet_not_installed"
-    )
-    await record_call_outcome(engine, None, outcome="transferred:voice_tool")
-    assert engine._call_outcome == "transferred:voice_tool"
+    await record_call_outcome(engine, 42, outcome="transferred:voice_tool")
+    merged = {}
+    for a in annotations:
+        merged.update(a)
+    assert merged["safetynet_installed"] is False
+    assert merged["call_outcome"] == "transferred:voice_tool"
 
 
 @pytest.mark.asyncio

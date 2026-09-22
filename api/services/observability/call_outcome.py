@@ -65,3 +65,29 @@ async def record_call_outcome(
             )
     except Exception as e:
         logger.warning(f"record_call_outcome failed for run {workflow_run_id}: {e}")
+
+
+async def record_call_fact(engine, workflow_run_id: int | None, **facts) -> None:
+    """Write per-call facts that are *not* the outcome (ccp#7 review #1).
+
+    ``call_outcome`` is one slot with rank precedence, so two facts recorded
+    at setup — press-0 not installed, safetynet not installed — competed for
+    it and the second was dropped. A fact about the call's *protection* is
+    orthogonal to how the call *ended*: it goes under its own annotation keys
+    (merged by ``update_workflow_run``, so a later outcome write keeps it) and
+    onto the span as ``dograh.<key>``. Never raises.
+    """
+    try:
+        from opentelemetry import trace as otel_trace
+
+        span = otel_trace.get_current_span()
+        if span is not None and span.is_recording():
+            for key, value in facts.items():
+                span.set_attribute(f"dograh.{key}", value)
+
+        if workflow_run_id is not None:
+            from api.db import db_client
+
+            await db_client.update_workflow_run(workflow_run_id, annotations=facts)
+    except Exception as e:
+        logger.warning(f"record_call_fact failed for run {workflow_run_id}: {e}")

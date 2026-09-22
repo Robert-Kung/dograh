@@ -259,15 +259,23 @@ async def _gate_allows(workflow_id: int, user_id: int, now: datetime) -> bool:
     )
 
     config: dict | None = None
-    lookup_failed = False
+    # Why the lookup produced nothing, when it did — so the log below never
+    # calls an unresolved lookup a workflow choice (review gate #3): a missing
+    # workflow row or a workflow without an organization is a defect on the
+    # path that REFERs capacity-rejected callers, not "no transfer tool".
+    unresolved: str | None = None
     try:
         workflow = await db_client.get_workflow(workflow_id, user_id)
-        if workflow is not None and workflow.organization_id:
+        if workflow is None:
+            unresolved = f"workflow {workflow_id} not found for user {user_id}"
+        elif not workflow.organization_id:
+            unresolved = f"workflow {workflow_id} has no organization"
+        else:
             config = await find_transfer_call_config(workflow, workflow.organization_id)
     except Exception as e:
         from api.services.pipecat.transfer_call_config import _config_event
 
-        lookup_failed = True
+        unresolved = f"lookup failed ({type(e).__name__})"
         _config_event(
             "transfer.config_unvalidatable",
             f"transfer.config_unvalidatable: capacity gate config lookup failed "
@@ -282,12 +290,17 @@ async def _gate_allows(workflow_id: int, user_id: int, now: datetime) -> bool:
     # fact and must not share a log line. The defective case already emitted
     # ``transfer.config_rejected`` inside the lookup; the failed-lookup case
     # emitted above.
-    if not lookup_failed and transfer_tool_absent(config):
+    if unresolved is not None:
+        logger.warning(
+            f"capacity gate: transfer config unresolved ({unresolved}); degrading "
+            f"to unconfigured (hours open, health unchecked) — defect, not a choice"
+        )
+    elif transfer_tool_absent(config):
         logger.info(
             "capacity gate: workflow has no transfer_call tool; unconfigured "
             "(hours open, health unchecked) — workflow choice, not a defect"
         )
-    elif not lookup_failed and transfer_config_defective(config):
+    elif transfer_config_defective(config):
         logger.info(
             "capacity gate: transfer_call config present but destination invalid "
             "(deployment defect, already reported); gating on schedule/health only"

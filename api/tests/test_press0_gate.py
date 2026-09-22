@@ -346,7 +346,7 @@ async def test_non_livekit_mode_is_untouched(observability):
 # --- ccp#7: the only quiet branch is "no transfer tool" (D1/D5) ---
 
 
-def _capture_log(monkeypatch):
+def _capture_log():
     """Collect loguru messages so the not-installed wording can be asserted."""
     from loguru import logger
 
@@ -359,8 +359,8 @@ def _capture_log(monkeypatch):
 
 
 @pytest.fixture
-def log_lines(monkeypatch):
-    yield from _capture_log(monkeypatch)
+def log_lines():
+    yield from _capture_log()
 
 
 @pytest.mark.asyncio
@@ -436,6 +436,7 @@ def _engine_with_failing_lookup(exc):
         _room_name="cs-+886912345678",
         _workflow_run_id=42,
         _call_outcome=None,
+        _transfer_config_lookup_failed=False,
         workflow=None,
     )
 
@@ -452,6 +453,7 @@ async def test_resolver_db_failure_degrades_to_none_with_event_and_outcome(
     result = await PipecatEngine.resolve_transfer_call_config(engine)
 
     assert result is None  # "no transfer gate", the same value the quiet branch returns
+    assert engine._transfer_config_lookup_failed is True
     assert [e[0] for e in events] == ["transfer.config_unvalidatable"]
     assert "ConnectionError" in events[0][1]["reason"]
     assert events[0][1]["room_name"] == "cs-+886912345678"
@@ -460,10 +462,11 @@ async def test_resolver_db_failure_degrades_to_none_with_event_and_outcome(
 
 
 @pytest.mark.asyncio
-async def test_press0_setup_survives_resolver_failure(observability):
+async def test_press0_setup_survives_resolver_failure(observability, log_lines):
     """C4 regression: the unguarded call site was ``resolve_press0_gate`` —
     the exception left pipeline setup and the caller got silence. With the
-    guard in the resolver the gate simply does not install."""
+    guard in the resolver the gate simply does not install — and says it was
+    the lookup, not a workflow choice (review gate #2)."""
     from api.services.pipecat.press0_gate import resolve_press0_gate
     from api.services.workflow.pipecat_engine import PipecatEngine
 
@@ -475,7 +478,20 @@ async def test_press0_setup_survives_resolver_failure(observability):
 
     engine, run = _run()
     engine.resolve_transfer_call_config = resolve_transfer_call_config
+    engine.transfer_config_lookup_failed = False
+    # Mirror the real engine: the resolver flips the flag on the object it ran on.
+    orig = resolve_transfer_call_config
+
+    async def flagged():
+        result = await orig()
+        engine.transfer_config_lookup_failed = failing._transfer_config_lookup_failed
+        return result
+
+    engine.resolve_transfer_call_config = flagged
 
     assert await resolve_press0_gate(engine, run) is None  # did not raise
     assert [e[0] for e in events] == ["transfer.config_unvalidatable"]
     assert [o[1] for o in outcomes] == ["transfer_failed:config_unresolvable"]
+    line = [m for m in log_lines if "press-0 gate not installed" in m]
+    assert len(line) == 1 and "lookup failed" in line[0]
+    assert "workflow choice" not in line[0]
