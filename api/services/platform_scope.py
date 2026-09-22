@@ -83,14 +83,40 @@ class PlatformArtifactMissing(RuntimeError):
 
 
 # Import/parse results are cached: both files are read-only bind mounts, and
-# the call-time filter runs per tool per call. ``reset_cache`` exists for tests
-# only — nothing in the runtime rereads.
-_cache: dict[str, Any] = {}
+# the call-time filter runs per tool per call. Each entry is keyed on the
+# file's ``(mtime_ns, size)`` at load time and re-read when that changes
+# (platform gate2 H-1): a module-level dict with no invalidation meant that
+# tightening ``feature-scope.json`` after an incident never reached the
+# call-time allowlist until the container happened to be recreated -- and
+# ``platform-up.sh`` did not recreate it. The deploy entry point now
+# force-recreates ``api``; this stat check is the in-process half, so a
+# bind-mounted edit takes effect on the next call even when it is not.
+# One ``stat`` per lookup is the whole cost. ``reset_cache`` exists for tests.
+_cache: dict[str, tuple[tuple[int, int] | None, Any]] = {}
 
 
 def reset_cache() -> None:
     """Drop memoized artifacts. Tests only."""
     _cache.clear()
+
+
+def _signature(path: Path) -> tuple[int, int] | None:
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    return (st.st_mtime_ns, st.st_size)
+
+
+def _cached(key: str, path: Path):
+    entry = _cache.get(key)
+    if entry is None:
+        return None
+    signature, value = entry
+    if signature is None or signature != _signature(path):
+        _cache.pop(key, None)
+        return None
+    return value
 
 
 def sip_uri_path() -> Path:
@@ -103,11 +129,11 @@ def feature_scope_path() -> Path:
 
 def load_sip_uri():
     """Import ``sip_uri`` from the bind mount. Raises PlatformArtifactMissing."""
-    cached = _cache.get("sip_uri")
+    path = sip_uri_path()
+    cached = _cached("sip_uri", path)
     if cached is not None:
         return cached
 
-    path = sip_uri_path()
     if not path.is_file():
         raise PlatformArtifactMissing(
             f"shared REFER URI parser not readable at {path}; the api container "
@@ -129,7 +155,7 @@ def load_sip_uri():
         raise PlatformArtifactMissing(
             f"shared REFER URI parser at {path} failed to load: {type(exc).__name__}"
         ) from exc
-    _cache["sip_uri"] = module
+    _cache["sip_uri"] = (_signature(path), module)
     return module
 
 
@@ -146,11 +172,11 @@ def parse_refer_uri(value):
 
 def load_feature_scope() -> dict:
     """Parse the enabled-set canon. Raises PlatformArtifactMissing."""
-    cached = _cache.get("feature_scope")
+    path = feature_scope_path()
+    cached = _cached("feature_scope", path)
     if cached is not None:
         return cached
 
-    path = feature_scope_path()
     if not path.is_file():
         raise PlatformArtifactMissing(
             f"feature scope canon not readable at {path}; the api container needs "
@@ -166,7 +192,7 @@ def load_feature_scope() -> dict:
         ) from exc
     if not isinstance(scope, dict):
         raise PlatformArtifactMissing(f"feature scope canon at {path} is not an object")
-    _cache["feature_scope"] = scope
+    _cache["feature_scope"] = (_signature(path), scope)
     return scope
 
 

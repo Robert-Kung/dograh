@@ -158,7 +158,9 @@ def test_db_residue_must_not_win(monkeypatch):
             queueHealthToken="db-residue-token",
         )
     )
-    assert DB_DESTINATION not in merged.values()
+    # gate2 L-20: this used to assert ``DB_DESTINATION not in merged.values()``,
+    # which was vacuously true -- the residue fed in above is not DB_DESTINATION.
+    assert "sip:attacker@evil.example" not in merged.values()
     assert merged["destination"] == GOOD_DESTINATION
     assert merged["queueHealthToken"] == "env-token"
     assert "db-residue" not in merged["queueHealthUrl"]
@@ -680,6 +682,7 @@ def test_boot_validation_rejects_non_finite_seconds(monkeypatch, raw):
     assert "not a finite number" in joined
 
 
+@requires_sip_uri
 def test_a_finite_in_range_value_still_boots(monkeypatch):
     """非有限值那條擋門 MUST NOT 連正常值一起擋——沒有這條，`return` 掉整個迴圈也會綠。"""
     monkeypatch.setenv("PLATFORM_FEATURE_SCOPE", str(HEALTH_URL_SCOPE))
@@ -815,7 +818,9 @@ def test_the_two_missing_mounts_fail_in_the_directions_we_chose(monkeypatch):
     from api.services import platform_scope
 
     # ① parser gone, canon fine
-    monkeypatch.setenv("PLATFORM_SIP_URI", str(SUPPORT_DIR / "does-not-exist-sip-uri.py"))
+    monkeypatch.setenv(
+        "PLATFORM_SIP_URI", str(SUPPORT_DIR / "does-not-exist-sip-uri.py")
+    )
     monkeypatch.setenv("PLATFORM_FEATURE_SCOPE", str(HEALTH_URL_SCOPE))
     platform_scope.reset_cache()
     _set_deployment_env(
@@ -923,6 +928,7 @@ def test_premium_rate_is_reported_even_without_the_uri_parser(monkeypatch):
 
 
 # ── TTL 0 是被支援的輸入（platform review gate M2）─────────────────────────
+@requires_sip_uri
 def test_cache_ttl_zero_is_honored_not_blocked(monkeypatch):
     """``TTL 0 disables the cache`` 是上游 ``_bounded_seconds`` 的明文契約。
 
@@ -1018,6 +1024,7 @@ def test_the_config_event_names_are_actually_routable():
     assert "transfer.config_rejected" in alerts.WINDOWED_EVENTS
 
 
+@requires_sip_uri
 def test_alert_dispatch_failure_never_breaks_call_handling(monkeypatch):
     """C4：告警通道壞掉 MUST NOT 影響通話處理。"""
     from api.services.observability import alerts
@@ -1091,3 +1098,99 @@ async def test_a_workflow_that_never_transfers_still_returns_none(monkeypatch):
         monkeypatch.delenv(name, raising=False)
     config = await tcc.find_transfer_call_config(_FakeWorkflow([_FakeNode()]), 1)
     assert config is None
+
+
+# ── gate2 F-35／F-55: the allowlist runs before every destination early-return ──
+def test_both_mounts_missing_still_drops_the_credential(monkeypatch):
+    """M15 pinned the two single-mount directions; this is the cell it left
+    empty (gate2 F-55), and the cell where F-35 lived: with the parser gone the
+    destination branch used to ``return`` *before* the queueHealthUrl allowlist
+    ran, so ``queueHealthUrl``/``queueHealthToken`` came back untouched -- the
+    capacity gate then sent ``Authorization: Bearer`` to an unverified host
+    while the only visible event said ``field=destination``.
+    """
+    from api.services import platform_scope
+
+    monkeypatch.setenv(
+        "PLATFORM_SIP_URI", str(SUPPORT_DIR / "does-not-exist-sip-uri.py")
+    )
+    monkeypatch.setenv("PLATFORM_FEATURE_SCOPE", str(MISSING_SCOPE_PATH))
+    platform_scope.reset_cache()
+    _set_deployment_env(
+        monkeypatch,
+        destination=GOOD_DESTINATION,
+        queueHealthUrl="http://attacker.example:8080/h",
+        queueHealthToken="env-token",
+    )
+    merged = revalidate_transfer_config(_db_config())
+    assert merged["destination"] == ""
+    assert "queueHealthToken" not in merged, (
+        "credential survived an unverifiable allowlist"
+    )
+    assert "queueHealthUrl" not in merged
+
+
+@requires_sip_uri
+def test_a_rejected_health_url_is_dropped_even_when_the_destination_is_rejected(
+    monkeypatch,
+):
+    """Same ordering, the other early-return: a malformed destination must not
+    shield a bad health URL from the shape check."""
+    monkeypatch.setenv("PLATFORM_FEATURE_SCOPE", str(HEALTH_URL_SCOPE))
+    _set_deployment_env(
+        monkeypatch,
+        destination="not-a-refer-uri",
+        queueHealthUrl="http://user:pw@queue:8080/h",
+        queueHealthToken="env-token",
+    )
+    merged = revalidate_transfer_config(_db_config())
+    assert merged["destination"] == ""
+    assert "queueHealthToken" not in merged and "queueHealthUrl" not in merged
+
+
+# ── gate2 H-4: the per-call verdict must not storm the immediate channel ──
+def test_deploy_config_unverified_pages_once_per_text_per_process(monkeypatch):
+    from api.services.observability import alerts
+
+    sent: list[str] = []
+    monkeypatch.setattr(alerts, "spawn", lambda coro: (coro.close(), sent.append("x")))
+    monkeypatch.setenv("OBS_ALERT_WEBHOOK_URL", "https://hooks.example/x")
+    alerts.reset_once_per_process()
+    fields = {"room_name": None, "field": "queueHealthUrl", "reason": "same problem"}
+    for _ in range(50):
+        alerts.notify("transfer.deploy_config_unverified", fields)
+    assert len(sent) == 1, "identical per-call verdicts must not repeat"
+    alerts.notify(
+        "transfer.deploy_config_unverified", {**fields, "reason": "a different problem"}
+    )
+    assert len(sent) == 2, "a new problem must still page"
+    # The events that are re-derived on every call are windowed, not immediate.
+    assert "transfer.config_unvalidatable" in alerts.WINDOWED_EVENTS
+    assert "transfer.config_unvalidatable" not in alerts.IMMEDIATE_EVENTS
+    # Genuinely per-incident events are untouched by the dedupe.
+    alerts.notify("safetynet.triggered", {"room_name": "r1"})
+    alerts.notify("safetynet.triggered", {"room_name": "r1"})
+    assert len(sent) == 4
+
+
+# ── gate2 H-1: a bind-mounted canon edit reaches the running process ──
+def test_feature_scope_cache_follows_the_file(monkeypatch, tmp_path):
+    import json
+    import os
+    import time
+
+    from api.services import platform_scope
+
+    canon = tmp_path / "feature-scope.json"
+    canon.write_text(json.dumps({"allowed_tool_types": ["end_call", "transfer_call"]}))
+    monkeypatch.setenv("PLATFORM_FEATURE_SCOPE", str(canon))
+    platform_scope.reset_cache()
+    assert platform_scope.allowed_tool_categories() == {"end_call", "transfer_call"}
+
+    canon.write_text(json.dumps({"allowed_tool_types": ["end_call"]}))
+    # Force a distinct mtime even on coarse filesystems.
+    later = time.time() + 2
+    os.utime(canon, (later, later))
+    assert platform_scope.allowed_tool_categories() == {"end_call"}, (
+        "a tightened canon was still served from the memoized copy (gate2 H-1)"
+    )

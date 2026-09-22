@@ -167,6 +167,7 @@ def test_absent_destination_is_not_confused_with_blank():
     assert request.definition.config.destination is None
 
 
+@requires_sip_uri
 def test_the_case_variant_assumption_the_platform_canon_relies_on():
     """Platform review gate F-18: the canon's ``forbidden_keys`` is an **exact**
     match, so ``{"Destination": ...}`` / ``{"queuehealthurl": ...}`` sail past

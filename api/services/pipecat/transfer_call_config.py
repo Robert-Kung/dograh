@@ -558,73 +558,16 @@ def revalidate_transfer_config(config: dict) -> dict:
     # single most likely failure mode, so the merge deliberately lands above
     # the checks rather than beside them.
     config = _merge_deployment_layer(config)
-
-    destination = config.get("destination")
-    try:
-        parsed = parse_refer_uri(destination)
-    except PlatformArtifactMissing as exc:
-        # Fail closed, matching the call-time tool filter: with the parser gone
-        # we cannot tell a queue from an attacker's SIP host, and the two
-        # artifacts are mounted together, so the tool itself is about to be
-        # dropped by the enabled-set filter anyway.
-        log_artifact_missing("revalidate_transfer_config", exc)
-        _config_event(
-            "transfer.config_unvalidatable",
-            "transfer.config_unvalidatable: shared REFER URI parser unavailable; "
-            "blanking the destination (fail-closed, W2a)",
-            field="destination",
-        )
-        return dict(config, destination="")
-
-    if not parsed.ok:
-        _config_event(
-            "transfer.config_rejected",
-            f"transfer.config_rejected field=destination: {parsed.reason}; "
-            f"destination blanked — the configured-but-malformed path takes over "
-            f"(W2a issue #3)",
-            field="destination",
-        )
-        return dict(config, destination="")
-
-    # Premium-rate guard (2026-08-19 review M-1). The write path runs shape
-    # **and** premium-rate; the read path ran only shape — so a `tel:+1900…`
-    # sitting in the database was shape-perfect and dialled every time. The
-    # read path exists precisely because the database's contents never went
-    # through the write path.
-    from api.services.pipecat.capacity_gate import PREMIUM_RATE_PREFIXES, _premium_rate
-
-    if _premium_rate(destination):
-        _config_event(
-            "transfer.config_rejected",
-            f"transfer.config_rejected field=destination: matches a premium-rate "
-            f"prefix {PREMIUM_RATE_PREFIXES}; destination blanked (review M-1)",
-            field="destination",
-        )
-        return dict(config, destination="")
-
     checked = dict(config)
 
-    alternate = checked.get("alternateDestination")
-    if alternate is not None and str(alternate).strip():
-        alt_parsed = parse_refer_uri(alternate)
-        if alt_parsed.ok and _premium_rate(alternate):
-            _config_event(
-                "transfer.config_rejected",
-                "transfer.config_rejected field=alternateDestination: premium-rate "
-                "prefix; after-hours alternate branch disabled (review M-1)",
-                field="alternateDestination",
-            )
-            checked.pop("alternateDestination", None)
-        elif not alt_parsed.ok:
-            _config_event(
-                "transfer.config_rejected",
-                f"transfer.config_rejected field=alternateDestination: "
-                f"{alt_parsed.reason}; after-hours alternate branch disabled for "
-                f"this call (W2a issue #3)",
-                field="alternateDestination",
-            )
-            checked.pop("alternateDestination", None)
-
+    # **健康端點那一關先跑，且在 destination 的任何早退之前**（W3a §9.4 gate2 F-35）。
+    # 原本的順序是 destination 三個早退（解析器缺席／形狀不合／高費率）在前、
+    # F-1 的白名單＋pop 在後；於是只要 destination 那一關先 return，
+    # ``queueHealthUrl`` 與 ``queueHealthToken`` 就**原封回傳、未經白名單**——
+    # 兩個 bind mount 同時不可讀時（開機依 D-A5 放行），通話期 keys 仍含真憑證、
+    # URL 仍是那個未驗證的主機，``capacity_gate`` 的溢流探測照樣把
+    # ``Authorization: Bearer`` 送過去，而運維只看得到 ``field=destination`` 的事件。
+    # 兩關互相獨立（健康探測不看目的地），先後只由「憑證不得未經白名單外送」決定。
     health_url = checked.get("queueHealthUrl")
     if health_url is not None and str(health_url).strip():
         problem = _health_url_problem(str(health_url))
@@ -681,6 +624,70 @@ def revalidate_transfer_config(config: dict) -> dict:
                 )
                 for key in ("queueHealthUrl", "queueHealthToken"):
                     checked.pop(key, None)
+
+    destination = checked.get("destination")
+    try:
+        parsed = parse_refer_uri(destination)
+    except PlatformArtifactMissing as exc:
+        # Fail closed, matching the call-time tool filter: with the parser gone
+        # we cannot tell a queue from an attacker's SIP host, and the two
+        # artifacts are mounted together, so the tool itself is about to be
+        # dropped by the enabled-set filter anyway.
+        log_artifact_missing("revalidate_transfer_config", exc)
+        _config_event(
+            "transfer.config_unvalidatable",
+            "transfer.config_unvalidatable: shared REFER URI parser unavailable; "
+            "blanking the destination (fail-closed, W2a)",
+            field="destination",
+        )
+        return dict(checked, destination="")
+
+    if not parsed.ok:
+        _config_event(
+            "transfer.config_rejected",
+            f"transfer.config_rejected field=destination: {parsed.reason}; "
+            f"destination blanked — the configured-but-malformed path takes over "
+            f"(W2a issue #3)",
+            field="destination",
+        )
+        return dict(checked, destination="")
+
+    # Premium-rate guard (2026-08-19 review M-1). The write path runs shape
+    # **and** premium-rate; the read path ran only shape — so a `tel:+1900…`
+    # sitting in the database was shape-perfect and dialled every time. The
+    # read path exists precisely because the database's contents never went
+    # through the write path.
+    from api.services.pipecat.capacity_gate import PREMIUM_RATE_PREFIXES, _premium_rate
+
+    if _premium_rate(destination):
+        _config_event(
+            "transfer.config_rejected",
+            f"transfer.config_rejected field=destination: matches a premium-rate "
+            f"prefix {PREMIUM_RATE_PREFIXES}; destination blanked (review M-1)",
+            field="destination",
+        )
+        return dict(checked, destination="")
+
+    alternate = checked.get("alternateDestination")
+    if alternate is not None and str(alternate).strip():
+        alt_parsed = parse_refer_uri(alternate)
+        if alt_parsed.ok and _premium_rate(alternate):
+            _config_event(
+                "transfer.config_rejected",
+                "transfer.config_rejected field=alternateDestination: premium-rate "
+                "prefix; after-hours alternate branch disabled (review M-1)",
+                field="alternateDestination",
+            )
+            checked.pop("alternateDestination", None)
+        elif not alt_parsed.ok:
+            _config_event(
+                "transfer.config_rejected",
+                f"transfer.config_rejected field=alternateDestination: "
+                f"{alt_parsed.reason}; after-hours alternate branch disabled for "
+                f"this call (W2a issue #3)",
+                field="alternateDestination",
+            )
+            checked.pop("alternateDestination", None)
 
     return checked
 

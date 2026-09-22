@@ -21,16 +21,41 @@ IMMEDIATE_EVENTS = {
     "safetynet.transfer_failed",
     "safetynet.terminated",
     "transfer.failed",
-    # Boot-time transfer config verdicts (platform review gate F-12). These fire
-    # once per process start, so "immediate" cannot storm. They were previously
-    # only ``logger.bind(call_event=...)`` -- which is the event's *shape*, not
-    # its *path*: nothing outside IMMEDIATE/WINDOWED ever reaches notify(), so
-    # "we log loudly" meant "loudly, to a container log nobody is grepping".
-    # That is load-bearing here: ``deploy_config_unverified`` is the whole
+    # The deployment-config verdict (platform review gate F-12). It was
+    # previously only ``logger.bind(call_event=...)`` -- which is the event's
+    # *shape*, not its *path*: nothing outside IMMEDIATE/WINDOWED ever reaches
+    # notify(), so "we log loudly" meant "loudly, to a container log nobody is
+    # grepping". That is load-bearing: ``deploy_config_unverified`` is the whole
     # compensation for not blocking boot when the canon cannot be read.
+    #
+    # **It is not boot-only** (platform gate2 H-4 / F-42 -- the earlier comment
+    # here said "fire once per process start, so immediate cannot storm", and
+    # the same batch of commits made that false): the call-time revalidation
+    # re-derives the verdict on **every call, per transfer tool**, and
+    # ``load_feature_scope`` has no negative cache for a missing file. One
+    # forgotten ``-v`` -> boot deliberately continues (D-A5) -> one IMMEDIATE
+    # alert per call -> the webhook rate-limits -> ``safetynet.triggered`` and
+    # ``transfer.failed`` are dropped along with it. So it stays immediate
+    # (the first occurrence must page) but is deduplicated per process per
+    # text: see IMMEDIATE_ONCE_PER_PROCESS.
     "transfer.deploy_config_unverified",
-    "transfer.config_unvalidatable",
 }
+
+# Immediate events whose text is re-derived on a per-call path and would
+# otherwise repeat identically for every call: send each distinct text once
+# per process. The boot-time verdict and the call-time verdict have different
+# texts, so both still page once; a *new* problem pages again; the same
+# problem does not storm. A process restart (the only thing that changes the
+# mounts) resets the set naturally.
+IMMEDIATE_ONCE_PER_PROCESS = {"transfer.deploy_config_unverified"}
+_sent_once: set[str] = set()
+
+
+def reset_once_per_process() -> None:
+    """Forget which once-per-process texts were sent. Tests only."""
+    _sent_once.clear()
+
+
 # trust.violation is windowed, not immediate: one occurrence may be a benign
 # LLM formatting slip; repetition is the attack signal (S-L8-TRUST).
 # transfer.unavailable is windowed too: a queue outage emits once per call,
@@ -40,12 +65,17 @@ IMMEDIATE_EVENTS = {
 # transfer.config_rejected is windowed, not immediate: a bad deployment value
 # is re-detected on *every* call, so per-call alerts would storm exactly when
 # the operator is least able to read them (platform review gate F-12).
+# transfer.config_unvalidatable is windowed for the same reason (gate2 H-4):
+# every emit point is per call -- the shared parser missing at call time, the
+# capacity gate's DB lookup failing (platform review L-23) -- and a Postgres
+# blip during a burst would otherwise page once per capacity check.
 WINDOWED_EVENTS = {
     "provider.error",
     "trust.violation",
     "transfer.unavailable",
     "capacity.rejected",
     "transfer.config_rejected",
+    "transfer.config_unvalidatable",
 }
 
 _redis = None
@@ -77,7 +107,12 @@ def notify(event: str, fields: dict) -> None:
     if url is None:
         return
     if event in IMMEDIATE_EVENTS:
-        spawn(_send(url, _format(event, fields)))
+        text = _format(event, fields)
+        if event in IMMEDIATE_ONCE_PER_PROCESS:
+            if text in _sent_once:
+                return
+            _sent_once.add(text)
+        spawn(_send(url, text))
     elif event in WINDOWED_EVENTS:
         spawn(_count_and_alert(url, event, fields))
 
