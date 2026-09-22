@@ -1259,4 +1259,8 @@ def test_empty_tool_config_never_reaches_consumers_as_empty_dict(monkeypatch):
     out = tcc.revalidate_transfer_config({})
     assert out == {"destination": ""}
     assert tcc.transfer_config_defective(out)
-    assert ("transfer.config_rejected", {"field": "destination"}) in seen
+    # Which event depends on whether the shared REFER URI parser is mounted:
+    # rejected (parser judged the blank) or unvalidatable (parser absent,
+    # fail-closed). Either way the lookup spoke — consumers need not repeat it.
+    assert [kw["field"] for _, kw in seen] == ["destination"]
+    assert seen[0][0] in {"transfer.config_rejected", "transfer.config_unvalidatable"}
