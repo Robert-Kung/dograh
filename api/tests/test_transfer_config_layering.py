@@ -1229,3 +1229,34 @@ def test_feature_scope_cache_never_stores_a_torn_revision(monkeypatch, tmp_path)
         "stale scope cached under the replaced file's signature"
     )
     assert platform_scope.allowed_tool_categories() == {"end_call"}
+
+
+# --- ccp#7 D5: None is the only quiet value ------------------------------
+
+
+def test_transfer_tool_absent_is_exactly_none():
+    assert tcc.transfer_tool_absent(None)
+    assert not tcc.transfer_tool_absent({})
+    assert not tcc.transfer_tool_absent({"destination": ""})
+
+
+def test_transfer_config_defective_is_a_dict_that_cannot_dial():
+    assert not tcc.transfer_config_defective(None)  # absent, not defective
+    assert tcc.transfer_config_defective({})
+    assert tcc.transfer_config_defective({"destination": ""})
+    assert tcc.transfer_config_defective({"destination": "SIP/human@10.0.0.1"})
+    assert not tcc.transfer_config_defective({"destination": "tel:+886912345678"})
+    assert not tcc.transfer_config_defective({"destination": "sip:queue@pbx.example"})
+
+
+def test_empty_tool_config_never_reaches_consumers_as_empty_dict(monkeypatch):
+    """The lookup blanks the destination and reports it (W2a), so the D5
+    contract holds by construction: ``{}`` in, defective truthy dict out."""
+    seen = []
+    monkeypatch.setattr(
+        tcc, "_config_event", lambda event, message, **kw: seen.append((event, kw))
+    )
+    out = tcc.revalidate_transfer_config({})
+    assert out == {"destination": ""}
+    assert tcc.transfer_config_defective(out)
+    assert ("transfer.config_rejected", {"field": "destination"}) in seen

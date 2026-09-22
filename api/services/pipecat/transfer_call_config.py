@@ -793,3 +793,32 @@ async def find_transfer_call_config(workflow, organization_id: int) -> dict | No
     return revalidate_transfer_config(
         (transfer_tools[0].definition or {}).get("config", {}) or {}
     )
+
+
+def transfer_tool_absent(config: dict | None) -> bool:
+    """``None`` is the **only** quiet value (ccp#7 D1/D5).
+
+    :func:`find_transfer_call_config` returns ``None`` in exactly one state:
+    the node graph carries no ``transfer_call`` tool *and* the deployment layer
+    declares no destination — the workflow does not hand off to a human by
+    design. Every consumer treats that as a workflow choice: no event, no
+    outcome, one ``logger.info`` naming the choice.
+    """
+    return config is None
+
+
+def transfer_config_defective(config: dict | None) -> bool:
+    """A tool exists but the effective config cannot dial (ccp#7 D5).
+
+    Since W2a (B-1/M-5) a malformed or missing destination is *blanked*, not
+    turned into ``None``, so "tool present, config empty" reaches consumers as
+    a truthy dict with ``destination == ""`` — and this lookup has already
+    emitted ``transfer.config_rejected`` for it. Consumers use this predicate
+    to record the outcome on their own path: the event says a bad value was
+    read; the outcome says which safety net therefore did not install.
+    """
+    if config is None:
+        return False
+    from api.services.pipecat.livekit_transfer_flow import valid_destination
+
+    return not valid_destination(config.get("destination"))

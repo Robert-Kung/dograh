@@ -341,3 +341,141 @@ async def test_non_livekit_mode_is_untouched(observability):
 
     assert await resolve_press0_gate(engine, run) is None
     assert events == [] and outcomes == []
+
+
+# --- ccp#7: the only quiet branch is "no transfer tool" (D1/D5) ---
+
+
+def _capture_log(monkeypatch):
+    """Collect loguru messages so the not-installed wording can be asserted."""
+    from loguru import logger
+
+    messages: list[str] = []
+    handle = logger.add(
+        lambda m: messages.append(m.record["message"]), level="INFO", format="{message}"
+    )
+    yield messages
+    logger.remove(handle)
+
+
+@pytest.fixture
+def log_lines(monkeypatch):
+    yield from _capture_log(monkeypatch)
+
+
+@pytest.mark.asyncio
+async def test_missing_room_name_is_a_defect_not_a_choice(observability):
+    """A LIVEKIT run without room_name used to share the quiet info line with
+    "no transfer tool". It is the voice-tool template's ``no_room`` case
+    (pipecat_engine_custom_tools): emit + outcome, call proceeds."""
+    from api.services.pipecat.press0_gate import resolve_press0_gate
+
+    events, outcomes = observability
+    engine, run = _run(room_name=None)
+
+    assert await resolve_press0_gate(engine, run) is None
+    assert [e[0] for e in events] == ["transfer.failed"]
+    assert events[0][1]["reason"] == "no_room"
+    assert events[0][1]["transfer_reason"] == "press0"
+    assert events[0][1]["workflow_run_id"] == 42
+    assert outcomes == [(42, "transfer_failed:press0_not_installed", "press0")]
+
+
+@pytest.mark.asyncio
+async def test_empty_tool_config_is_a_defect(observability):
+    """``{}`` never reaches consumers any more — the lookup blanks the
+    destination (W2a) — so the shape a tool with an empty config actually
+    arrives in is ``{"destination": ""}``. That is a defect, not "no tool"."""
+    from api.services.pipecat.press0_gate import resolve_press0_gate
+
+    events, outcomes = observability
+    engine, run = _run(destination="")
+
+    assert await resolve_press0_gate(engine, run) is None
+    assert [e[0] for e in events] == ["transfer.failed"]
+    assert events[0][1]["reason"] == "press0_gate_not_installed"
+    assert outcomes == [(42, "transfer_failed:press0_not_installed", "press0")]
+
+
+@pytest.mark.asyncio
+async def test_log_distinguishes_no_room_from_no_tool(observability, log_lines):
+    """AC5: the message itself says which case it is."""
+    from api.services.pipecat.press0_gate import resolve_press0_gate
+
+    engine, run = _run(destination=None)
+    await resolve_press0_gate(engine, run)
+    no_tool = [m for m in log_lines if "press-0 gate not installed" in m]
+    assert len(no_tool) == 1
+    assert "no transfer_call tool" in no_tool[0]
+    assert "room_name" not in no_tool[0]
+
+    log_lines.clear()
+    engine, run = _run(room_name=None)
+    await resolve_press0_gate(engine, run)
+    no_room = [m for m in log_lines if "press-0 gate not installed" in m]
+    assert len(no_room) == 1
+    assert "room_name" in no_room[0]
+    assert "no transfer_call tool" not in no_room[0]
+
+
+# --- ccp#7 D4: the resolver never raises; a DB blip is not dead air ---
+
+
+def _engine_with_failing_lookup(exc):
+    """A stand-in ``self`` for PipecatEngine.resolve_transfer_call_config.
+
+    The method is exercised unbound so the test does not need the full engine
+    build; only the attributes the guard reads are provided.
+    """
+
+    async def _get_organization_id():
+        raise exc
+
+    return types.SimpleNamespace(
+        _get_organization_id=_get_organization_id,
+        _room_name="cs-+886912345678",
+        _workflow_run_id=42,
+        _call_outcome=None,
+        workflow=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_resolver_db_failure_degrades_to_none_with_event_and_outcome(
+    observability,
+):
+    from api.services.workflow.pipecat_engine import PipecatEngine
+
+    events, outcomes = observability
+    engine = _engine_with_failing_lookup(ConnectionError("postgres blip"))
+
+    result = await PipecatEngine.resolve_transfer_call_config(engine)
+
+    assert result is None  # "no transfer gate", the same value the quiet branch returns
+    assert [e[0] for e in events] == ["transfer.config_unvalidatable"]
+    assert "ConnectionError" in events[0][1]["reason"]
+    assert events[0][1]["room_name"] == "cs-+886912345678"
+    assert events[0][1]["workflow_run_id"] == 42
+    assert outcomes == [(42, "transfer_failed:config_unresolvable", None)]
+
+
+@pytest.mark.asyncio
+async def test_press0_setup_survives_resolver_failure(observability):
+    """C4 regression: the unguarded call site was ``resolve_press0_gate`` —
+    the exception left pipeline setup and the caller got silence. With the
+    guard in the resolver the gate simply does not install."""
+    from api.services.pipecat.press0_gate import resolve_press0_gate
+    from api.services.workflow.pipecat_engine import PipecatEngine
+
+    events, outcomes = observability
+    failing = _engine_with_failing_lookup(RuntimeError("orm error"))
+
+    async def resolve_transfer_call_config():
+        return await PipecatEngine.resolve_transfer_call_config(failing)
+
+    engine, run = _run()
+    engine.resolve_transfer_call_config = resolve_transfer_call_config
+
+    assert await resolve_press0_gate(engine, run) is None  # did not raise
+    assert [e[0] for e in events] == ["transfer.config_unvalidatable"]
+    assert [o[1] for o in outcomes] == ["transfer_failed:config_unresolvable"]

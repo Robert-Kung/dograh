@@ -449,9 +449,14 @@ async def test_alternate_destination_is_stripped_before_refer():
 
 
 @pytest.mark.skipif(not PIPECAT, reason="pipecat runtime not installed")
-async def test_after_hours_alternate_without_target_falls_back_to_ai():
+async def test_after_hours_alternate_without_target_falls_back_to_ai(monkeypatch):
+    from api.services.observability import call_events
     from api.services.pipecat.livekit_transfer_flow import execute_cold_transfer
 
+    events = []
+    monkeypatch.setattr(
+        call_events, "emit", lambda event, **fields: events.append((event, fields))
+    )
     eng = _fake_engine()
     res = await execute_cold_transfer(
         eng,
@@ -469,6 +474,11 @@ async def test_after_hours_alternate_without_target_falls_back_to_ai():
     assert str(getattr(eng, "_call_outcome", None)).startswith("transfer_failed:"), (
         "alternate_queue without a deployment destination must not read as a clean completion"
     )
+    # ccp#7 path 1: the one logger.warning is not a subscription surface —
+    # the event is what alerts, and the caller stays with the AI (behaviour unchanged).
+    assert [e[0] for e in events] == ["transfer.failed"]
+    assert events[0][1]["reason"] == "alternate_queue_without_destination"
+    assert events[0][1]["room_name"] == "room1"
 
 
 # --- queue-health dimension (S-L5-QUEUE) -----------------------------------

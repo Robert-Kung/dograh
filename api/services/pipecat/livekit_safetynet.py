@@ -536,3 +536,63 @@ class SafetynetWatchdog(BaseObserver):
             except asyncio.CancelledError:
                 pass
             self._monitor = None
+
+
+async def resolve_safetynet_watchdog(
+    engine, workflow_run
+) -> "SafetynetWatchdog | None":
+    """Build the mid-call watchdog for a LIVEKIT run, or say why it could not be.
+
+    Split out of ``_run_pipeline_impl`` for the same reason as
+    ``resolve_press0_gate``: the not-installed branch must be reachable in a
+    test, and everything around the install point needs a full transport/LLM
+    build to reach.
+
+    The watchdog is C4's last line — fatal ErrorFrames and owed-reply silence
+    have nothing else behind them — so "it did not install" is a fact that has
+    to be visible per call (ccp#7 D3). It used to be an ``if safetynet_room:``
+    with no else: no log, no event, no outcome. It is recorded here as a fact,
+    not raised as an error: a LIVEKIT run without ``room_name`` is a defect in
+    how the run was created (the dispatcher always writes one), the call
+    itself still proceeds, and the annotation is what lets "this call had no
+    safety net" be counted and traced back. The outcome ranks with the other
+    ``transfer_failed:*`` markers, so a later successful transfer still wins.
+    """
+    from api.enums import WorkflowRunMode
+
+    if not workflow_run or workflow_run.mode != WorkflowRunMode.LIVEKIT.value:
+        return None
+
+    room_name = (workflow_run.initial_context or {}).get("room_name")
+    if not room_name:
+        call_events.emit(
+            "transfer.failed",
+            room_name="",
+            reason="safetynet_not_installed",
+            workflow_run_id=workflow_run.id,
+            transfer_reason="safetynet",
+        )
+        await record_call_outcome(
+            engine,
+            workflow_run.id,
+            outcome="transfer_failed:safetynet_not_installed",
+            transfer_reason="safetynet",
+        )
+        logger.warning(
+            f"safetynet watchdog not installed: LIVEKIT run {workflow_run.id} has "
+            f"no room_name in initial_context (deployment defect); the call runs "
+            f"without the fatal-error / silence fallback"
+        )
+        return None
+
+    async def _on_fatal(reason: str) -> None:
+        await midcall_safetynet(
+            engine,
+            room_name=room_name,
+            reason=reason,
+            workflow_run_id=workflow_run.id,
+        )
+
+    return SafetynetWatchdog(
+        on_fatal=_on_fatal, room_name=room_name, workflow_run_id=workflow_run.id
+    )

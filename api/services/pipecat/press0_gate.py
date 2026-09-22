@@ -14,9 +14,10 @@ from collections.abc import Callable
 from loguru import logger
 
 from api.enums import WorkflowRunMode
-from api.services.pipecat.livekit_transfer_flow import (
-    execute_cold_transfer,
-    valid_destination,
+from api.services.pipecat.livekit_transfer_flow import execute_cold_transfer
+from api.services.pipecat.transfer_call_config import (
+    transfer_config_defective,
+    transfer_tool_absent,
 )
 from pipecat.audio.dtmf.types import KeypadEntry
 from pipecat.frames.frames import Frame, InputDTMFFrame, TTSSpeakFrame
@@ -144,12 +145,21 @@ async def resolve_press0_gate(engine, workflow_run) -> Press0Gate | None:
 
     room_name = (workflow_run.initial_context or {}).get("room_name")
     transfer_config = await engine.resolve_transfer_call_config()
-    destination = (transfer_config or {}).get("destination", "")
 
-    if room_name and transfer_config and valid_destination(destination):
-        return Press0Gate(engine, room_name=room_name, config=transfer_config)
+    if transfer_tool_absent(transfer_config):
+        # The one quiet branch (ccp#7 D1): no transfer_call tool and no
+        # deployment-layer destination means this workflow does not hand off
+        # to a human by design. Say which case this is — the old message
+        # ("no room_name or no transfer_call tool") folded a defect and a
+        # choice into one sentence, so a reader could not tell them apart.
+        logger.info(
+            "press-0 gate not installed: workflow has no transfer_call tool "
+            "(workflow choice, not a defect)"
+        )
+        return None
 
-    if transfer_config and not valid_destination(destination):
+    destination = transfer_config.get("destination", "")
+    if transfer_config_defective(transfer_config):
         # A configured-but-malformed destination is a deployment defect, not a
         # workflow choice: press-0 silently does nothing for the whole call and
         # no other path reports it (execute_cold_transfer only emits once the
@@ -186,5 +196,35 @@ async def resolve_press0_gate(engine, workflow_run) -> Press0Gate | None:
         )
         return None
 
-    logger.info("press-0 gate not installed (no room_name or no transfer_call tool)")
-    return None
+    if not room_name:
+        # A LIVEKIT run without a room identifier is a defect in how the run
+        # was created (the dispatcher always writes one — livekit_dispatcher),
+        # never a workflow choice. It used to share the quiet info line above.
+        # Same shape as the voice-tool path (pipecat_engine_custom_tools, the
+        # ccp#7 D2 template): emit + outcome, then stay out of the way — the
+        # call proceeds without press-0, and the annotation is what makes
+        # "this call had no press-0 net" queryable instead of reading as a
+        # clean AI completion.
+        from api.services.observability.call_events import emit
+        from api.services.observability.call_outcome import record_call_outcome
+
+        emit(
+            "transfer.failed",
+            room_name="",
+            reason="no_room",
+            workflow_run_id=workflow_run.id,
+            transfer_reason="press0",
+        )
+        await record_call_outcome(
+            engine,
+            workflow_run.id,
+            outcome="transfer_failed:press0_not_installed",
+            transfer_reason="press0",
+        )
+        logger.warning(
+            f"press-0 gate not installed: LIVEKIT run {workflow_run.id} has no "
+            f"room_name in initial_context (deployment defect, not a workflow choice)"
+        )
+        return None
+
+    return Press0Gate(engine, room_name=room_name, config=transfer_config)

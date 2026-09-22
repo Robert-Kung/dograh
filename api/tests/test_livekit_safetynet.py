@@ -682,3 +682,136 @@ async def test_watchdog_monitor_loop_fires():
     await asyncio.sleep(0.1)
     assert fired == ["bot_silence"]
     await wd.stop()
+
+
+# --- ccp#7 D3: the watchdog install decision is a visible fact ---
+
+
+def _livekit_run(room_name="cs-+886912345678", mode=None):
+    from api.enums import WorkflowRunMode
+
+    return types.SimpleNamespace(
+        id=42,
+        mode=WorkflowRunMode.LIVEKIT.value if mode is None else mode,
+        initial_context={"room_name": room_name} if room_name else {},
+    )
+
+
+@pytest.fixture
+def install_observability(monkeypatch):
+    from api.services.observability import call_events
+
+    events, outcomes = [], []
+    monkeypatch.setattr(
+        call_events, "emit", lambda event, **fields: events.append((event, fields))
+    )
+
+    async def fake_record(engine, workflow_run_id, *, outcome, transfer_reason=None):
+        outcomes.append((workflow_run_id, outcome, transfer_reason))
+
+    monkeypatch.setattr(sn, "record_call_outcome", fake_record)
+    return events, outcomes
+
+
+@pytest.mark.asyncio
+async def test_watchdog_installs_quietly_with_room_name(install_observability):
+    events, outcomes = install_observability
+    engine, _, _ = _fake_engine()
+
+    wd = await sn.resolve_safetynet_watchdog(engine, _livekit_run())
+
+    assert isinstance(wd, SafetynetWatchdog)
+    assert wd._room_name == "cs-+886912345678" and wd._workflow_run_id == 42
+    assert events == [] and outcomes == []
+    await wd.stop()
+
+
+@pytest.mark.asyncio
+async def test_watchdog_missing_room_name_is_visible_and_does_not_raise(
+    install_observability,
+):
+    """The old install point was ``if safetynet_room:`` with no else — zero
+    trace that C4's last line was absent for the whole call."""
+    events, outcomes = install_observability
+    engine, _, _ = _fake_engine()
+
+    wd = await sn.resolve_safetynet_watchdog(engine, _livekit_run(room_name=None))
+
+    assert wd is None
+    assert [e[0] for e in events] == ["transfer.failed"]
+    assert events[0][1]["reason"] == "safetynet_not_installed"
+    assert events[0][1]["transfer_reason"] == "safetynet"
+    assert events[0][1]["workflow_run_id"] == 42
+    assert outcomes == [(42, "transfer_failed:safetynet_not_installed", "safetynet")]
+
+
+@pytest.mark.asyncio
+async def test_watchdog_not_installed_outcome_yields_to_a_later_transfer():
+    """Recorded as a fact, not a verdict: a later successful transfer still wins."""
+    from api.services.observability.call_outcome import record_call_outcome
+
+    engine = types.SimpleNamespace(_call_outcome=None)
+    await record_call_outcome(
+        engine, None, outcome="transfer_failed:safetynet_not_installed"
+    )
+    await record_call_outcome(engine, None, outcome="transferred:voice_tool")
+    assert engine._call_outcome == "transferred:voice_tool"
+
+
+@pytest.mark.asyncio
+async def test_watchdog_skips_non_livekit_runs_quietly(install_observability):
+    from api.enums import WorkflowRunMode
+
+    events, outcomes = install_observability
+    engine, _, _ = _fake_engine()
+
+    assert (
+        await sn.resolve_safetynet_watchdog(
+            engine, _livekit_run(room_name=None, mode=WorkflowRunMode.WEBRTC.value)
+        )
+        is None
+    )
+    assert events == [] and outcomes == []
+
+
+@pytest.mark.asyncio
+async def test_watchdog_on_fatal_routes_to_midcall_with_the_run_room(
+    monkeypatch, install_observability
+):
+    captured = {}
+
+    async def fake_midcall(engine, *, room_name, reason, workflow_run_id):
+        captured.update(room_name=room_name, reason=reason, run=workflow_run_id)
+
+    monkeypatch.setattr(sn, "midcall_safetynet", fake_midcall)
+    engine, _, _ = _fake_engine()
+    wd = await sn.resolve_safetynet_watchdog(engine, _livekit_run())
+    await wd._on_fatal("bot_silence")
+    await wd.stop()
+    assert captured == {
+        "room_name": "cs-+886912345678",
+        "reason": "bot_silence",
+        "run": 42,
+    }
+
+
+@pytest.mark.asyncio
+async def test_midcall_survives_resolver_returning_none(monkeypatch, events):
+    """The mid-call call site (D4): a failed lookup now comes back as ``None``
+    from the resolver itself; the safetynet must still reach the transfer
+    flow (which reports the blank destination) instead of dying on setup."""
+    monkeypatch.delenv("SAFETYNET_FALLBACK_QUEUE", raising=False)
+    captured = _capture_execute(
+        monkeypatch, {"status": "failed", "action": "transfer_failed", "reason": "x"}
+    )
+    engine, frames, calls = _fake_engine()
+
+    async def resolve_none():
+        return None
+
+    engine.resolve_transfer_call_config = resolve_none
+    await midcall_safetynet(
+        engine, room_name="cs-+886912", reason="fatal_error", workflow_run_id=11
+    )
+    assert captured["destination"] == ""
+    assert calls  # explicit end, not silence

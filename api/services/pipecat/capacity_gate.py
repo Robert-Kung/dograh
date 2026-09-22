@@ -252,9 +252,14 @@ async def _gate_allows(workflow_id: int, user_id: int, now: datetime) -> bool:
     path. It now says so through the alert dispatcher instead of only loguru.
     """
     from api.db import db_client
-    from api.services.pipecat.transfer_call_config import find_transfer_call_config
+    from api.services.pipecat.transfer_call_config import (
+        find_transfer_call_config,
+        transfer_config_defective,
+        transfer_tool_absent,
+    )
 
     config: dict | None = None
+    lookup_failed = False
     try:
         workflow = await db_client.get_workflow(workflow_id, user_id)
         if workflow is not None and workflow.organization_id:
@@ -262,12 +267,30 @@ async def _gate_allows(workflow_id: int, user_id: int, now: datetime) -> bool:
     except Exception as e:
         from api.services.pipecat.transfer_call_config import _config_event
 
+        lookup_failed = True
         _config_event(
             "transfer.config_unvalidatable",
             f"transfer.config_unvalidatable: capacity gate config lookup failed "
             f"({type(e).__name__}); degrading to unconfigured — hours open, "
             f"queue health unchecked, overflow will REFER (platform review L-23)",
             field="schedule",
+        )
+    # ccp#7 D5: ``None`` (no transfer tool, no deployment destination) and a
+    # defective dict (tool present, destination blanked by the lookup) both
+    # gate on whatever schedule / health keys exist — destination is not an
+    # input here, overflow dials the env target — but they are not the same
+    # fact and must not share a log line. The defective case already emitted
+    # ``transfer.config_rejected`` inside the lookup; the failed-lookup case
+    # emitted above.
+    if not lookup_failed and transfer_tool_absent(config):
+        logger.info(
+            "capacity gate: workflow has no transfer_call tool; unconfigured "
+            "(hours open, health unchecked) — workflow choice, not a defect"
+        )
+    elif not lookup_failed and transfer_config_defective(config):
+        logger.info(
+            "capacity gate: transfer_call config present but destination invalid "
+            "(deployment defect, already reported); gating on schedule/health only"
         )
     config = config or {}
 

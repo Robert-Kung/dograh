@@ -1051,28 +1051,14 @@ async def _run_pipeline_impl(
 
     # S-L3-SAFETYNET watchdog (LiveKit only): fatal ErrorFrames and owed-reply
     # silence trigger a one-shot fallback cold transfer (C4).
+    # Install decision lives in livekit_safetynet so its not-installed branch
+    # is testable and visible (ccp#7 D3) — never silent here again.
     safetynet_watchdog = None
     if workflow_run and workflow_run.mode == WorkflowRunMode.LIVEKIT.value:
-        safetynet_room = (workflow_run.initial_context or {}).get("room_name")
-        if safetynet_room:
-            from api.services.pipecat.livekit_safetynet import (
-                SafetynetWatchdog,
-                midcall_safetynet,
-            )
+        from api.services.pipecat.livekit_safetynet import resolve_safetynet_watchdog
 
-            async def _on_safetynet_fatal(reason: str) -> None:
-                await midcall_safetynet(
-                    engine,
-                    room_name=safetynet_room,
-                    reason=reason,
-                    workflow_run_id=workflow_run_id,
-                )
-
-            safetynet_watchdog = SafetynetWatchdog(
-                on_fatal=_on_safetynet_fatal,
-                room_name=safetynet_room,
-                workflow_run_id=workflow_run_id,
-            )
+        safetynet_watchdog = await resolve_safetynet_watchdog(engine, workflow_run)
+        if safetynet_watchdog is not None:
             task.add_observer(safetynet_watchdog)
 
     # S-L8-RECORD: recording notice before any conversation; recording is
