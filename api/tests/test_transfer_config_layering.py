@@ -1194,3 +1194,38 @@ def test_feature_scope_cache_follows_the_file(monkeypatch, tmp_path):
     assert platform_scope.allowed_tool_categories() == {"end_call"}, (
         "a tightened canon was still served from the memoized copy (gate2 H-1)"
     )
+
+
+def test_feature_scope_cache_never_stores_a_torn_revision(monkeypatch, tmp_path):
+    """Codex review (PR #26): a replace between the read and the post-read stat
+    must not cache the old content under the new signature."""
+    import json
+
+    from api.services import platform_scope
+
+    canon = tmp_path / "feature-scope.json"
+    canon.write_text(json.dumps({"allowed_tool_types": ["end_call", "transfer_call"]}))
+    monkeypatch.setenv("PLATFORM_FEATURE_SCOPE", str(canon))
+    platform_scope.reset_cache()
+
+    real_read_text = Path.read_text
+    swapped = {"done": False}
+
+    def read_then_replace(self, *a, **k):
+        text = real_read_text(self, *a, **k)
+        if not swapped["done"]:
+            swapped["done"] = True
+            tmp = canon.with_suffix(".tmp")
+            tmp.write_text(json.dumps({"allowed_tool_types": ["end_call"]}))
+            os.utime(tmp, (time.time() + 5, time.time() + 5))
+            os.replace(tmp, canon)
+        return text
+
+    import os
+    import time
+
+    monkeypatch.setattr(Path, "read_text", read_then_replace)
+    assert platform_scope.allowed_tool_categories() == {"end_call"}, (
+        "stale scope cached under the replaced file's signature"
+    )
+    assert platform_scope.allowed_tool_categories() == {"end_call"}

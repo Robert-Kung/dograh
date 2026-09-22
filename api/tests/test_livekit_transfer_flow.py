@@ -464,6 +464,11 @@ async def test_after_hours_alternate_without_target_falls_back_to_ai():
     )
     assert res == {"status": "after_hours", "action": "back_to_ai"}
     assert eng._frames and not eng._ended
+    # Codex review (PR #26) / platform gate2 on F-5: emit alone leaves the run
+    # to be recorded as ``ai_completed``; the outcome marker is what the reports read.
+    assert str(getattr(eng, "_call_outcome", None)).startswith("transfer_failed:"), (
+        "alternate_queue without a deployment destination must not read as a clean completion"
+    )
 
 
 # --- queue-health dimension (S-L5-QUEUE) -----------------------------------

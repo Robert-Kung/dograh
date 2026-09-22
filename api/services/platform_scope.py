@@ -108,6 +108,28 @@ def _signature(path: Path) -> tuple[int, int] | None:
     return (st.st_mtime_ns, st.st_size)
 
 
+def _read_stable(path: Path, read):
+    """Read ``path`` and return ``(signature, value)`` for one consistent revision.
+
+    An atomic replace of the bind-mounted file between the read and the
+    post-read ``stat`` would otherwise store the *old* content under the *new*
+    signature, and the stale copy would then be served until the next edit
+    (Codex review on PR #26). Signature is taken before and after; a mismatch
+    means the file moved underneath us, so read again. Three consecutive
+    mismatches is not a race but a file that keeps changing -- fail closed.
+    """
+    for _ in range(3):
+        before = _signature(path)
+        value = read()
+        after = _signature(path)
+        if before is not None and before == after:
+            return before, value
+    raise PlatformArtifactMissing(
+        f"platform artifact at {path} changed underneath every read attempt; "
+        "refusing to cache an unidentifiable revision"
+    )
+
+
 def _cached(key: str, path: Path):
     entry = _cache.get(key)
     if entry is None:
@@ -141,21 +163,26 @@ def load_sip_uri():
             "deploy/overrides/dograh.override.yml) and PLATFORM_SIP_URI pointing "
             "at it"
         )
-    spec = importlib.util.spec_from_file_location(_MODULE_NAME, path)
-    if spec is None or spec.loader is None:
-        raise PlatformArtifactMissing(f"cannot load a module from {path}")
-    module = importlib.util.module_from_spec(spec)
-    # Register before exec so the module's own ``from __future__``/dataclass
-    # machinery resolves normally, mirroring a real import.
-    sys.modules[_MODULE_NAME] = module
-    try:
-        spec.loader.exec_module(module)
-    except Exception as exc:  # pragma: no cover - corrupt mount
-        sys.modules.pop(_MODULE_NAME, None)
-        raise PlatformArtifactMissing(
-            f"shared REFER URI parser at {path} failed to load: {type(exc).__name__}"
-        ) from exc
-    _cache["sip_uri"] = (_signature(path), module)
+
+    def _import():
+        spec = importlib.util.spec_from_file_location(_MODULE_NAME, path)
+        if spec is None or spec.loader is None:
+            raise PlatformArtifactMissing(f"cannot load a module from {path}")
+        module = importlib.util.module_from_spec(spec)
+        # Register before exec so the module's own ``from __future__``/dataclass
+        # machinery resolves normally, mirroring a real import.
+        sys.modules[_MODULE_NAME] = module
+        try:
+            spec.loader.exec_module(module)
+        except Exception as exc:  # pragma: no cover - corrupt mount
+            sys.modules.pop(_MODULE_NAME, None)
+            raise PlatformArtifactMissing(
+                f"shared REFER URI parser at {path} failed to load: {type(exc).__name__}"
+            ) from exc
+        return module
+
+    signature, module = _read_stable(path, _import)
+    _cache["sip_uri"] = (signature, module)
     return module
 
 
@@ -184,15 +211,19 @@ def load_feature_scope() -> dict:
             "deploy/overrides/dograh.override.yml) and PLATFORM_FEATURE_SCOPE "
             "pointing at it"
         )
-    try:
-        scope = json.loads(path.read_text(encoding="utf-8"))
-    except Exception as exc:
-        raise PlatformArtifactMissing(
-            f"feature scope canon at {path} is not parseable JSON: {type(exc).__name__}"
-        ) from exc
+
+    def _parse():
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            raise PlatformArtifactMissing(
+                f"feature scope canon at {path} is not parseable JSON: {type(exc).__name__}"
+            ) from exc
+
+    signature, scope = _read_stable(path, _parse)
     if not isinstance(scope, dict):
         raise PlatformArtifactMissing(f"feature scope canon at {path} is not an object")
-    _cache["feature_scope"] = (_signature(path), scope)
+    _cache["feature_scope"] = (signature, scope)
     return scope
 
 

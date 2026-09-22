@@ -393,12 +393,32 @@ async def execute_cold_transfer(
             # validation skips it explicitly, and here it degraded silently.
             # The symptom is the whole after-hours route to a human disappearing
             # while the reports read as a pile of clean AI-completed calls.
+            # Emit **and** record the outcome (Codex review on PR #26, and the
+            # platform gate2 note that F-5 "only added the emit"): ``emit()``
+            # does not touch ``engine._call_outcome``, and the pipeline records
+            # ``ai_completed`` whenever nothing was recorded -- so without the
+            # marker these deployment failures still read as clean completions
+            # in the reports, which is the exact symptom described above.
             from api.services.observability.call_events import emit
+            from api.services.observability.call_outcome import record_call_outcome
+            from pipecat.utils.run_context import get_current_run_id
 
+            try:
+                run_id = get_current_run_id()
+                workflow_run_id = int(run_id) if run_id is not None else None
+            except (TypeError, ValueError):
+                workflow_run_id = None
             emit(
                 "transfer.failed",
                 room_name=room_name,
                 reason="alternate_queue_without_destination",
+                workflow_run_id=workflow_run_id,
+                transfer_reason=transfer_reason,
+            )
+            await record_call_outcome(
+                engine,
+                workflow_run_id,
+                outcome=f"transfer_failed:{transfer_reason}",
                 transfer_reason=transfer_reason,
             )
             logger.warning(
