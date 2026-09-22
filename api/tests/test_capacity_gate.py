@@ -602,3 +602,84 @@ async def test_midway_failure_releases_reservation(monkeypatch):
     )
     assert fb == {"reason": "launch_failed"}
     assert active_calls.reserved_slot_count() == 0  # no slot leak (D2 try/finally)
+
+
+# --- ccp#7 D5: None vs defective dict are not the same fact ---
+
+
+def _gate_log():
+    from loguru import logger
+
+    messages: list[str] = []
+    handle = logger.add(
+        lambda m: messages.append(m.record["message"]), level="INFO", format="{message}"
+    )
+    yield messages
+    logger.remove(handle)
+
+
+@pytest.fixture
+def gate_log():
+    yield from _gate_log()
+
+
+@pytest.mark.asyncio
+async def test_gate_names_no_tool_as_a_choice(monkeypatch, gate_log):
+    _patch_transfer_config(monkeypatch, None)
+    assert await capacity_gate._gate_allows(1, 2, datetime.now(timezone.utc))
+    lines = [m for m in gate_log if m.startswith("capacity gate:")]
+    assert len(lines) == 1 and "no transfer_call tool" in lines[0]
+    assert "destination invalid" not in lines[0]
+
+
+@pytest.mark.asyncio
+async def test_gate_names_blank_destination_as_a_defect_and_still_gates(
+    monkeypatch, gate_log
+):
+    """Behaviour unchanged: destination is not a capacity input, so the
+    schedule still decides. Only the wording separates defect from choice."""
+    _patch_transfer_config(
+        monkeypatch,
+        {"destination": "", "schedule": {"tz": "UTC", "mon": [["09:00", "10:00"]]}},
+    )
+    tuesday = datetime(2026, 7, 21, 9, 30, tzinfo=timezone.utc)
+    assert not await capacity_gate._gate_allows(1, 2, tuesday)
+    lines = [m for m in gate_log if m.startswith("capacity gate:")]
+    assert len(lines) == 1 and "destination invalid" in lines[0]
+    assert "no transfer_call tool" not in lines[0]
+
+
+@pytest.mark.asyncio
+async def test_gate_missing_workflow_is_unresolved_not_a_choice(monkeypatch, gate_log):
+    """Review gate #3: a deleted workflow / missing org still degrades open
+    (behaviour unchanged) but must not be labelled a workflow choice."""
+    from api.db import db_client
+
+    async def fake_get_workflow(workflow_id, user_id):
+        return None
+
+    from api.services.pipecat import transfer_call_config
+
+    seen = []
+    monkeypatch.setattr(
+        transfer_call_config, "_config_event", lambda ev, msg, **kw: seen.append(ev)
+    )
+    monkeypatch.setattr(db_client, "get_workflow", fake_get_workflow)
+    assert await capacity_gate._gate_allows(1, 2, datetime.now(timezone.utc))
+    lines = [m for m in gate_log if m.startswith("capacity gate:")]
+    assert len(lines) == 1 and "unresolved" in lines[0] and "not found" in lines[0]
+    assert "workflow choice" not in lines[0]
+    assert seen == ["transfer.config_unvalidatable"]  # not log-only (round-2 M5)
+
+
+@pytest.mark.asyncio
+async def test_gate_lookup_exception_is_logged_as_unresolved(monkeypatch, gate_log):
+    from api.db import db_client
+
+    async def boom(workflow_id, user_id):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(db_client, "get_workflow", boom)
+    assert await capacity_gate._gate_allows(1, 2, datetime.now(timezone.utc))
+    lines = [m for m in gate_log if m.startswith("capacity gate:")]
+    assert len(lines) == 1 and "lookup failed (RuntimeError)" in lines[0]

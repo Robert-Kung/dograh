@@ -252,22 +252,62 @@ async def _gate_allows(workflow_id: int, user_id: int, now: datetime) -> bool:
     path. It now says so through the alert dispatcher instead of only loguru.
     """
     from api.db import db_client
-    from api.services.pipecat.transfer_call_config import find_transfer_call_config
+    from api.services.pipecat.transfer_call_config import (
+        find_transfer_call_config,
+        transfer_config_defective,
+        transfer_tool_absent,
+    )
 
     config: dict | None = None
+    # Why the lookup produced nothing, when it did — so the log below never
+    # calls an unresolved lookup a workflow choice (review gate #3): a missing
+    # workflow row or a workflow without an organization is a defect on the
+    # path that REFERs capacity-rejected callers, not "no transfer tool".
+    unresolved: str | None = None
     try:
         workflow = await db_client.get_workflow(workflow_id, user_id)
-        if workflow is not None and workflow.organization_id:
+        if workflow is None:
+            unresolved = f"workflow {workflow_id} not found for user {user_id}"
+        elif not workflow.organization_id:
+            unresolved = f"workflow {workflow_id} has no organization"
+        else:
             config = await find_transfer_call_config(workflow, workflow.organization_id)
     except Exception as e:
+        unresolved = f"lookup failed ({type(e).__name__})"
+    if unresolved is not None:
+        # All three sources emit, not just the exception (round-2 M5): a
+        # log-only branch is indistinguishable from "all is well" on the
+        # subscription surface, and every one of these degrades the gate open.
         from api.services.pipecat.transfer_call_config import _config_event
 
         _config_event(
             "transfer.config_unvalidatable",
-            f"transfer.config_unvalidatable: capacity gate config lookup failed "
-            f"({type(e).__name__}); degrading to unconfigured — hours open, "
+            f"transfer.config_unvalidatable: capacity gate config unresolved "
+            f"({unresolved}); degrading to unconfigured — hours open, "
             f"queue health unchecked, overflow will REFER (platform review L-23)",
             field="schedule",
+        )
+    # ccp#7 D5: ``None`` (no transfer tool, no deployment destination) and a
+    # defective dict (tool present, destination blanked by the lookup) both
+    # gate on whatever schedule / health keys exist — destination is not an
+    # input here, overflow dials the env target — but they are not the same
+    # fact and must not share a log line. The defective case already emitted
+    # ``transfer.config_rejected`` inside the lookup; the failed-lookup case
+    # emitted above.
+    if unresolved is not None:
+        logger.warning(
+            f"capacity gate: transfer config unresolved ({unresolved}); degrading "
+            f"to unconfigured (hours open, health unchecked) — defect, not a choice"
+        )
+    elif transfer_tool_absent(config):
+        logger.info(
+            "capacity gate: workflow has no transfer_call tool; unconfigured "
+            "(hours open, health unchecked) — workflow choice, not a defect"
+        )
+    elif transfer_config_defective(config):
+        logger.info(
+            "capacity gate: transfer_call config present but destination invalid "
+            "(deployment defect, already reported); gating on schedule/health only"
         )
     config = config or {}
 

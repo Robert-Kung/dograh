@@ -38,7 +38,10 @@ from typing import Optional
 from loguru import logger
 
 from api.services.observability import call_events
-from api.services.observability.call_outcome import record_call_outcome
+from api.services.observability.call_outcome import (
+    record_call_fact,
+    record_call_outcome,
+)
 from api.services.pipecat.livekit_dispatcher import DEFAULT_ROOM_PREFIX
 from api.services.pipecat.livekit_transfer_flow import valid_destination
 from api.utils.background import (
@@ -338,11 +341,10 @@ async def midcall_safetynet(
 
         destination = fallback_queue()
         if destination is None:
-            config = None
-            try:
-                config = await engine.resolve_transfer_call_config()
-            except Exception as e:
-                logger.warning(f"safetynet could not resolve transfer config: {e}")
+            # The resolver never raises (ccp#7 D4) — a failed lookup comes
+            # back as None, already reported, and the blank destination below
+            # makes execute_cold_transfer report the refused transfer.
+            config = await engine.resolve_transfer_call_config()
             destination = ((config or {}).get("destination") or "").strip()
 
         result = await execute_cold_transfer(
@@ -536,3 +538,70 @@ class SafetynetWatchdog(BaseObserver):
             except asyncio.CancelledError:
                 pass
             self._monitor = None
+
+
+async def resolve_safetynet_watchdog(
+    engine, workflow_run
+) -> "SafetynetWatchdog | None":
+    """Build the mid-call watchdog for a LIVEKIT run, or say why it could not be.
+
+    Split out of ``_run_pipeline_impl`` for the same reason as
+    ``resolve_press0_gate``: the not-installed branch must be reachable in a
+    test, and everything around the install point needs a full transport/LLM
+    build to reach.
+
+    The watchdog is C4's last line — fatal ErrorFrames and owed-reply silence
+    have nothing else behind them — so "it did not install" is a fact that has
+    to be visible per call (ccp#7 D3). It used to be an ``if safetynet_room:``
+    with no else: no log, no event, no outcome. It is recorded here as a fact,
+    not raised as an error: a LIVEKIT run without ``room_name`` is a defect in
+    how the run was created (the dispatcher always writes one), the call
+    itself still proceeds, and the annotation is what lets "this call had no
+    safety net" be counted and traced back.
+
+    Recorded as a **fact**, not as the call outcome (review gate #1): press-0
+    hits the same condition on the same engine moments earlier and takes the
+    rank-1 ``call_outcome`` slot, so a second rank-1 write here was dropped
+    whenever the workflow had a transfer tool — the marker landed only on
+    workflows *without* one. ``safetynet_installed=false`` under its own key
+    lands unconditionally and survives whatever outcome the call then has
+    (``ai_completed`` included: the call did complete, it just ran without a
+    net). Key absent means installed; the normal path writes nothing.
+    """
+    from api.enums import WorkflowRunMode
+
+    if not workflow_run or workflow_run.mode != WorkflowRunMode.LIVEKIT.value:
+        return None
+
+    room_name = (workflow_run.initial_context or {}).get("room_name")
+    if not room_name:
+        call_events.emit(
+            "transfer.failed",
+            room_name="",
+            reason="safetynet_not_installed",
+            workflow_run_id=workflow_run.id,
+            transfer_reason="safetynet",
+        )
+        await record_call_fact(
+            workflow_run.id,
+            safetynet_installed=False,
+            safetynet_not_installed_reason="no_room",
+        )
+        logger.warning(
+            f"safetynet watchdog not installed: LIVEKIT run {workflow_run.id} has "
+            f"no room_name in initial_context (deployment defect); the call runs "
+            f"without the fatal-error / silence fallback"
+        )
+        return None
+
+    async def _on_fatal(reason: str) -> None:
+        await midcall_safetynet(
+            engine,
+            room_name=room_name,
+            reason=reason,
+            workflow_run_id=workflow_run.id,
+        )
+
+    return SafetynetWatchdog(
+        on_fatal=_on_fatal, room_name=room_name, workflow_run_id=workflow_run.id
+    )

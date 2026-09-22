@@ -162,6 +162,11 @@ class PipecatEngine:
         # room_name feeds trust.* event fields. Both LIVEKIT-only.
         self._workflow_run_mode: Optional[str] = workflow_run_mode
         self._room_name: Optional[str] = room_name
+        # Set by resolve_transfer_call_config when the lookup raised (ccp#7
+        # review #2): the resolver degrades to None like the quiet no-tool
+        # branch, and consumers need this to say "lookup failed" rather than
+        # "workflow choice" in their own not-installed line.
+        self._transfer_config_lookup_failed = False
         # Lazily resolved caller E.164 for platform-bound params (None =
         # not yet resolved; "" = resolved to anonymous/unavailable).
         self._caller_e164_cache: Optional[str] = None
@@ -170,6 +175,10 @@ class PipecatEngine:
     def trust_enforced(self) -> bool:
         """Deny-by-default tool trust boundary is LIVEKIT-only (C3)."""
         return self._workflow_run_mode == WorkflowRunMode.LIVEKIT.value
+
+    @property
+    def transfer_config_lookup_failed(self) -> bool:
+        return self._transfer_config_lookup_failed
 
     def trust_event_context(self) -> dict:
         return {
@@ -1136,16 +1145,82 @@ class PipecatEngine:
         Single source of truth for the cold-transfer target shared by the LLM
         voice tool and the press-0 DTMF gate (lookup shared with the engine-less
         capacity overflow chain — see :mod:`transfer_call_config`).
+
+        **Never raises** (ccp#7 D4). The lookup reads the database; without a
+        guard a Postgres blip during pipeline setup propagated out of
+        ``resolve_press0_gate`` and aborted the whole call build — dead air for
+        the caller, C4's one forbidden shape, on a trigger that needs no
+        abnormal operation. The guard lives here, in the one function every
+        caller goes through, not per call site: the capacity gate and the
+        mid-call safetynet had each wrapped their own lookup, press-0 had not,
+        and a per-site wrap is exactly what misses the next call site. Failure
+        degrades to ``None`` — "no transfer gate", the same value the quiet
+        no-tool branch returns, with ``transfer_config_lookup_failed`` set so a
+        consumer can still tell the two apart — but is **not** quiet: it emits
+        ``transfer.config_unvalidatable`` (windowed, like the capacity gate's
+        lookup failure — a DB blip during a burst must not page per call) and
+        records an outcome so the degraded call does not read as a clean
+        completion.
         """
-        organization_id = await self._get_organization_id()
-        if not organization_id:
-            return None
+        try:
+            organization_id = await self._get_organization_id()
+            if not organization_id:
+                # Same verdict as the capacity gate's "workflow has no
+                # organization" (round-2 M3): an org-less run cannot resolve
+                # its config, and that is unresolved, not "no transfer tool".
+                return await self._transfer_config_unresolved(
+                    "workflow run has no organization"
+                )
 
-        from api.services.pipecat.transfer_call_config import (
-            find_transfer_call_config,
+            from api.services.pipecat.transfer_call_config import (
+                find_transfer_call_config,
+            )
+
+            return await find_transfer_call_config(self.workflow, organization_id)
+        except Exception as e:
+            # The traceback stays available at DEBUG; the warning line below
+            # carries the class name only (ORM / asyncpg reprs can carry the
+            # DSN, and this fires once per call during an outage).
+            logger.opt(exception=e).debug("transfer config lookup traceback")
+            return await self._transfer_config_unresolved(
+                f"lookup failed ({type(e).__name__})"
+            )
+
+    async def _transfer_config_unresolved(self, why: str) -> None:
+        """Report an unresolvable transfer config and degrade to ``None``.
+
+        Sets ``transfer_config_lookup_failed`` (sticky for the engine's life —
+        press-0 at pipeline setup is its only reader today; a consumer added
+        after a successful retry would read a stale True), emits the windowed
+        event and records the outcome. Never raises.
+        """
+        self._transfer_config_lookup_failed = True
+        logger.warning(
+            f"transfer config unresolved ({why}); degrading to no transfer gate "
+            f"(ccp#7 D4)"
         )
+        try:
+            from api.services.observability.call_events import emit
+            from api.services.observability.call_outcome import record_call_outcome
 
-        return await find_transfer_call_config(self.workflow, organization_id)
+            emit(
+                "transfer.config_unvalidatable",
+                room_name=self._room_name or "",
+                reason=f"transfer config unresolved ({why}); degrading to no "
+                f"transfer gate (ccp#7 D4)",
+                workflow_run_id=self._workflow_run_id,
+            )
+            await record_call_outcome(
+                self,
+                self._workflow_run_id,
+                outcome="transfer_failed:config_unresolvable",
+            )
+        except Exception as report_error:  # noqa: BLE001 - never raises (C4)
+            logger.warning(
+                f"transfer config failure could not be reported "
+                f"({type(report_error).__name__})"
+            )
+        return None
 
     async def close_mcp_sessions(self) -> None:
         """Close all open MCP tool sessions.
