@@ -190,8 +190,10 @@ export function TransferCallToolConfig({
                                     <Input
                                         aria-label="轉接前播放的錄音"
                                         value={
-                                            recordings.find((r) => String(r.id) === form.audioRecordingId)?.name
-                                            ?? (form.audioRecordingId || "（未選擇）")
+                                            (() => {
+                                                const r = recordings.find((x) => String(x.recording_id) === form.audioRecordingId || String(x.id) === form.audioRecordingId);
+                                                return r ? (r.transcript || r.recording_id) : (form.audioRecordingId || "（未選擇）");
+                                            })()
                                         }
                                         onChange={() => undefined}
                                         {...ro}
@@ -319,6 +321,8 @@ export function TransferCallToolConfig({
                     onChange={(s) => set("schedule", s)}
                     readOnly={readOnly}
                     problems={problems}
+                    notice={notice}
+                    ro={ro}
                 />
 
                 <div className="grid gap-2 pt-4 border-t">
@@ -373,11 +377,13 @@ interface ScheduleEditorProps {
     onChange: (next: WeeklySchedule | null) => void;
     readOnly: boolean;
     problems?: FieldProblem[];
+    /** 唯讀態 `aria-describedby` 的目標（角色未確認時為 undefined → 改帶 title）。 */
+    notice: string | undefined;
+    ro: ReturnType<typeof ccpReadOnlyFieldProps> & { title?: string };
 }
 
-function ScheduleEditor({ schedule, onChange, readOnly, problems }: ScheduleEditorProps) {
+function ScheduleEditor({ schedule, onChange, readOnly, problems, notice, ro }: ScheduleEditorProps) {
     const enabled = schedule !== null;
-    const ro = ccpReadOnlyFieldProps(readOnly);
     const tzProblem = problemFor(problems, "schedule.tz");
 
     const update = (patch: Partial<WeeklySchedule>) => onChange({ ...(schedule ?? {}), ...patch });
