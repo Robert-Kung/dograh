@@ -95,8 +95,9 @@ export default function ToolDetailPage() {
     const [saveSuccess, setSaveSuccess] = useState(false);
     const [showCodeDialog, setShowCodeDialog] = useState(false);
 
-    // W3b task 5.5：transfer_call 走 ② 桶。`!tool` 那一項沿用 §6 review F-9 的紀律
-    // （訊號未到一律停用），只是不再多一個「工具類型」的第二訊號。
+    // W3b task 5.5：transfer_call 走 ② 桶。`!tool` 那一項是防禦性的（ui review L-9：Save 只在
+    // `tool` 載入後才渲染，這裡結構上不可能為 true）；真正的保護是 `readOnly`
+    // ＝「角色訊號未到一律唯讀」。
     const isTransferCallCategory = tool?.category === "transfer_call";
     const saveDisabled = readOnly || !tool;
     useCcpPageNotice(
@@ -334,6 +335,7 @@ export default function ToolDetailPage() {
             const problems = validateScriptLayer(transferForm);
             setTransferProblems(problems);
             if (problems.length > 0) {
+                setSaveSuccess(false);
                 setError(`請先修正：${problems.map((p) => p.message).join("；")}`);
                 return;
             }
@@ -682,7 +684,12 @@ const data = await response.json();`;
                             form={transferForm}
                             onFormChange={(next) => {
                                 setTransferForm(next);
-                                if (transferProblems.length) setTransferProblems(validateScriptLayer(next));
+                                if (transferProblems.length) {
+                                    // ui review M-2：修正後即時重算；全部修完時連紅橫幅一起清。
+                                    const remaining = validateScriptLayer(next);
+                                    setTransferProblems(remaining);
+                                    if (remaining.length === 0) setError(null);
+                                }
                             }}
                             recordings={recordings}
                             readOnly={readOnly}
@@ -793,13 +800,13 @@ const data = await response.json();`;
                     )}
 
                     {error && (
-                        <div className="mt-4 p-4 bg-destructive/10 border border-destructive/20 rounded-lg text-destructive">
+                        <div role="alert" className="mt-4 p-4 bg-destructive/10 border border-destructive/20 rounded-lg text-destructive">
                             {error}
                         </div>
                     )}
 
                     {saveSuccess && (
-                        <div className="mt-4 p-4 bg-green-500/10 border border-green-500/20 rounded-lg text-green-600">
+                        <div role="status" className="mt-4 p-4 bg-green-500/10 border border-green-500/20 rounded-lg text-green-600">
                             Tool saved successfully!
                         </div>
                     )}

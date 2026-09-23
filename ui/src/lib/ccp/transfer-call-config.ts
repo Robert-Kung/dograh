@@ -191,7 +191,12 @@ export function validateSchedule(sched: WeeklySchedule): FieldProblem[] {
     return problems;
 }
 
-/** 跨午夜（結束 ≤ 開始）的段：執行層合法，畫面上標示以免被當成打錯。 */
+/** 跨午夜（結束 **<** 開始）的段：執行層合法，畫面上標示以免被當成打錯。 */
 export function segmentWrapsMidnight([start, end]: Segment): boolean {
-    return HHMM_RE.test(start) && HHMM_RE.test(end) && end <= start;
+    return HHMM_RE.test(start) && HHMM_RE.test(end) && end < start;
+}
+
+/** 開始＝結束：執行層 `business_hours.py` 明文「empty interval — never open」，不是跨午夜（ui review H-3）。 */
+export function segmentIsEmpty([start, end]: Segment): boolean {
+    return HHMM_RE.test(start) && HHMM_RE.test(end) && end === start;
 }

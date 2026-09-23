@@ -345,6 +345,10 @@
 [data-ccp-readonly="true"] {
   background-color: var(--muted);
   cursor: default;
+  /* W3b ui review H-2：`--muted` 與可編輯欄位的底色只差 ≈0.03 L，視覺使用者分不出
+     唯讀與可編輯。加虛線邊框＋弱化文字，仍不降到 disabled 的對比、不擋選取複製。 */
+  border-style: dashed;
+  color: var(--muted-foreground);
 }
 
 /* customer-center-platform fork（母 repo §6 review F-5）：節點編輯對話框用的是

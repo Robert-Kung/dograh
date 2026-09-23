@@ -16,8 +16,6 @@
 // 可及性契約沿用 W2d：`data-ccp-readonly`／`data-ccp-disabled` ＋ `aria-describedby`
 // 指得到（頁面級說明條）或自帶 `title`。
 
-import { useMemo } from "react";
-
 import type { RecordingResponseSchema } from "@/client/types.gen";
 import { RecordingSelect, StaticTextWarning } from "@/components/flow/TextOrAudioInput";
 import { Button } from "@/components/ui/button";
@@ -35,13 +33,13 @@ import {
     CCP_TZ_NAMES,
 } from "@/lib/ccp/feature-scope";
 import { CCP_ACCESS_NOTICE_ID, ccpDisabledProps, ccpReadOnlyFieldProps } from "@/lib/ccp/notice-bar";
-import { isPremiumRateCandidate, parseReferUri } from "@/lib/ccp/refer-uri";
 import {
     type AfterHoursAction,
     DAY_KEYS,
     type DayKey,
     type FieldProblem,
     type Segment,
+    segmentIsEmpty,
     segmentWrapsMidnight,
     type TransferFormState,
     type TransferMessageType,
@@ -62,13 +60,6 @@ export interface TransferCallToolConfigProps {
     role: CcpRole | null;
     /** 表單驗證結果（頁面在存檔時算；即時形狀驗證由本元件自算）。 */
     problems?: FieldProblem[];
-    /**
-     * 交付態（CCP）下 destination 不畫。fork 的非 CCP 路徑（沒有政策副本的部署）
-     * 才畫，並以 `refer-uri.ts` 即時驗證——`ccp#1` 的關閉點。
-     */
-    showDestination?: boolean;
-    destination?: string;
-    onDestinationChange?: (destination: string) => void;
 }
 
 const AFTER_HOURS_LABELS: Record<AfterHoursAction, string> = {
@@ -105,19 +96,18 @@ export function TransferCallToolConfig({
     readOnly,
     role,
     problems,
-    showDestination = false,
-    destination = "",
-    onDestinationChange,
 }: TransferCallToolConfigProps) {
     const set = <K extends keyof TransferFormState>(key: K, value: TransferFormState[K]) =>
         onFormChange({ ...form, [key]: value });
-    const ro = ccpReadOnlyFieldProps(readOnly);
+    // 可及性契約（W2d G1）：`aria-describedby` 要指得到，否則自帶 `title`。頁面級說明條
+    // 只在角色**已確認**時渲染（loading／signal-unavailable 回 null），故 role 未到時
+    // 不指、改帶 title（ui review M-6）。
+    const notice = role ? CCP_ACCESS_NOTICE_ID : undefined;
+    const ro = {
+        ...ccpReadOnlyFieldProps(readOnly, role ? {} : { describedBy: null }),
+        ...(readOnly && !role ? { title: "尚未取得權限訊號，暫以唯讀呈現" } : {}),
+    };
     const [limitMin, limitMax] = CCP_TRANSFER_ANNOUNCE_LIMIT_RANGE;
-
-    const destinationCheck = useMemo(
-        () => (showDestination && destination ? parseReferUri(destination) : null),
-        [showDestination, destination],
-    );
 
     return (
         <Card>
@@ -146,29 +136,6 @@ export function TransferCallToolConfig({
                     />
                 </div>
 
-                {showDestination && (
-                    <div className="grid gap-2 pt-4 border-t" data-ccp-non-delivered-path="destination">
-                        <Label htmlFor="transfer-destination">轉接目的地</Label>
-                        <Label className="text-xs text-muted-foreground">
-                            tel:+E164（例：tel:+886223456789）或 sip:user@host（例：sip:queue@pbx.example）
-                        </Label>
-                        <Input
-                            id="transfer-destination"
-                            value={destination}
-                            onChange={(e) => onDestinationChange?.(e.target.value)}
-                            placeholder="tel:+886223456789"
-                            className={destinationCheck && !destinationCheck.ok ? "border-red-500" : ""}
-                            {...ro}
-                        />
-                        {destinationCheck && !destinationCheck.ok && (
-                            <Label className="text-xs text-red-500">{destinationCheck.reason}</Label>
-                        )}
-                        {destinationCheck && isPremiumRateCandidate(destinationCheck) && (
-                            <Label className="text-xs text-amber-600">這個號段看起來是高費率號碼，請再確認。</Label>
-                        )}
-                    </div>
-                )}
-
                 {/* ── ① 話術層 ─────────────────────────────────────────────── */}
                 <div className="grid gap-4 pt-4 border-t">
                     <Label>轉接前的播報</Label>
@@ -178,11 +145,11 @@ export function TransferCallToolConfig({
                         onValueChange={(v) => set("messageType", v as TransferMessageType)}
                         className="space-y-3"
                         aria-readonly={readOnly || undefined}
-                        aria-describedby={readOnly ? CCP_ACCESS_NOTICE_ID : undefined}
+                        aria-describedby={readOnly ? notice : undefined}
                         data-ccp-readonly={readOnly ? "true" : undefined}
                     >
                         <label htmlFor="transfer-mt-none" className="flex items-center space-x-3 p-3 border rounded-lg hover:bg-muted/50 cursor-pointer">
-                            <RadioGroupItem value="none" id="transfer-mt-none" disabled={readOnly} />
+                            <RadioGroupItem value="none" id="transfer-mt-none" disabled={readOnly} title={readOnly && !role ? "尚未取得權限訊號，暫以唯讀呈現" : undefined} />
                             <div className="flex-1">
                                 <span className="font-medium">不播報</span>
                                 <p className="text-xs text-muted-foreground">直接轉接</p>
@@ -217,11 +184,25 @@ export function TransferCallToolConfig({
                         </div>
                         {form.messageType === "audio" && (
                             <div className="pl-8">
-                                <RecordingSelect
-                                    value={form.audioRecordingId}
-                                    onChange={(id) => set("audioRecordingId", id)}
-                                    recordings={recordings}
-                                />
+                                {readOnly ? (
+                                    // ui review H-1：`RecordingSelect` 沒有 disabled 接點（TextOrAudioInput.tsx），
+                                    // 唯讀態改畫唯讀欄位——主管可看到選了哪一段錄音，但改不了。
+                                    <Input
+                                        aria-label="轉接前播放的錄音"
+                                        value={
+                                            recordings.find((r) => String(r.id) === form.audioRecordingId)?.name
+                                            ?? (form.audioRecordingId || "（未選擇）")
+                                        }
+                                        onChange={() => undefined}
+                                        {...ro}
+                                    />
+                                ) : (
+                                    <RecordingSelect
+                                        value={form.audioRecordingId}
+                                        onChange={(id) => set("audioRecordingId", id)}
+                                        recordings={recordings}
+                                    />
+                                )}
                             </div>
                         )}
                     </RadioGroup>
@@ -238,10 +219,11 @@ export function TransferCallToolConfig({
                         onChange={(e) => set("transferFailedMessage", e.target.value)}
                         rows={2}
                         aria-invalid={problemFor(problems, "transferFailedMessage") ? true : undefined}
+                        aria-describedby={problemFor(problems, "transferFailedMessage") ? "transfer-failed-message-error" : ro["aria-describedby"]}
                         {...ro}
                     />
                     {problemFor(problems, "transferFailedMessage") && (
-                        <Label className="text-xs text-red-500">{problemFor(problems, "transferFailedMessage")}</Label>
+                        <Label id="transfer-failed-message-error" role="alert" className="text-xs text-red-500">{problemFor(problems, "transferFailedMessage")}</Label>
                     )}
                 </div>
 
@@ -256,10 +238,11 @@ export function TransferCallToolConfig({
                         onChange={(e) => set("transferUnavailableMessage", e.target.value)}
                         rows={2}
                         aria-invalid={problemFor(problems, "transferUnavailableMessage") ? true : undefined}
+                        aria-describedby={problemFor(problems, "transferUnavailableMessage") ? "transfer-unavailable-message-error" : ro["aria-describedby"]}
                         {...ro}
                     />
                     {problemFor(problems, "transferUnavailableMessage") && (
-                        <Label className="text-xs text-red-500">{problemFor(problems, "transferUnavailableMessage")}</Label>
+                        <Label id="transfer-unavailable-message-error" role="alert" className="text-xs text-red-500">{problemFor(problems, "transferUnavailableMessage")}</Label>
                     )}
                 </div>
 
@@ -281,28 +264,30 @@ export function TransferCallToolConfig({
                             set("unavailableAnnounceLimit", raw === "" ? null : Number(raw));
                         }}
                         aria-invalid={problemFor(problems, "unavailableAnnounceLimit") ? true : undefined}
+                        aria-describedby={problemFor(problems, "unavailableAnnounceLimit") ? "transfer-announce-limit-error" : ro["aria-describedby"]}
                         {...ro}
                     />
                     {problemFor(problems, "unavailableAnnounceLimit") && (
-                        <Label className="text-xs text-red-500">{problemFor(problems, "unavailableAnnounceLimit")}</Label>
+                        <Label id="transfer-announce-limit-error" role="alert" className="text-xs text-red-500">{problemFor(problems, "unavailableAnnounceLimit")}</Label>
                     )}
                 </div>
 
                 <div className="grid gap-2 pt-4 border-t">
                     <Label>非營業時間的行為</Label>
                     <Label className="text-xs text-muted-foreground">
-                        依下方營業時間表判定為非營業時間時，來電者要求真人怎麼處理。未設定＝回到 AI 繼續服務。
+                        依下方營業時間表判定為非營業時間時，來電者要求真人怎麼處理（未設定時執行層＝回到 AI）。
                     </Label>
+                    {/* ui review M-8：未設定與 back_to_ai 在執行層同結果，不畫兩個同義選項。
+                        未設時顯示 back_to_ai；使用者未動過就仍送 null（builder 送現值）。 */}
                     <Select
-                        value={form.afterHoursAction || "__unset"}
-                        onValueChange={(v) => set("afterHoursAction", v === "__unset" ? "" : (v as AfterHoursAction))}
+                        value={form.afterHoursAction || "back_to_ai"}
+                        onValueChange={(v) => set("afterHoursAction", v as AfterHoursAction)}
                         disabled={readOnly}
                     >
-                        <SelectTrigger aria-label="非營業時間的行為" aria-describedby={readOnly ? CCP_ACCESS_NOTICE_ID : undefined} data-ccp-readonly={readOnly ? "true" : undefined}>
+                        <SelectTrigger aria-label="非營業時間的行為" aria-describedby={readOnly ? notice : undefined} data-ccp-readonly={readOnly ? "true" : undefined}>
                             <SelectValue />
                         </SelectTrigger>
                         <SelectContent>
-                            <SelectItem value="__unset">未設定（回到 AI）</SelectItem>
                             {CCP_TRANSFER_AFTER_HOURS_ACTIONS.map((a) => (
                                 <SelectItem key={a} value={a}>{AFTER_HOURS_LABELS[a]}</SelectItem>
                             ))}
@@ -337,23 +322,22 @@ export function TransferCallToolConfig({
                 />
 
                 <div className="grid gap-2 pt-4 border-t">
-                    <Label htmlFor="transfer-timeout">等待接聽秒數（本部署不使用）</Label>
+                    <Label>等待接聽秒數（本部署不使用）</Label>
                     <Label className="text-xs text-muted-foreground" id="transfer-timeout-why">
                         本部署以 LiveKit 冷轉接送出 REFER 後即離線，不等待目的地接聽，故此值不生效。
                         這裡如實顯示現值，存檔會原樣帶回（整份取代），但無法在此調整。
                     </Label>
-                    <Input
+                    {/* ui review H-2：spec 的判準在**呈現面**——一個 `<input type=number>` 就算 readOnly
+                        也長得像可調（hover 出 spinner）。改為純文字現值，不畫輸入框。 */}
+                    <p
                         id="transfer-timeout"
-                        type="number"
-                        className="w-32"
-                        value={form.timeout}
-                        readOnly
-                        aria-readonly
+                        className="w-32 rounded-md border border-dashed px-3 py-2 text-sm text-muted-foreground"
                         aria-describedby="transfer-timeout-why"
                         data-ccp-readonly="true"
                         title="LiveKit 冷轉接不使用此值"
-                        onChange={() => undefined}
-                    />
+                    >
+                        {form.timeout} 秒
+                    </p>
                 </div>
 
                 {/* ── ③ 部署層唯讀區塊 ─────────────────────────────────────── */}
@@ -397,6 +381,7 @@ function ScheduleEditor({ schedule, onChange, readOnly, problems }: ScheduleEdit
     const tzProblem = problemFor(problems, "schedule.tz");
 
     const update = (patch: Partial<WeeklySchedule>) => onChange({ ...(schedule ?? {}), ...patch });
+    const anyDayListed = !!schedule && DAY_KEYS.some((d) => schedule[d] !== undefined);
     const setSegments = (day: DayKey, segs: Segment[]) => update({ [day]: segs });
 
     return (
@@ -417,7 +402,7 @@ function ScheduleEditor({ schedule, onChange, readOnly, problems }: ScheduleEdit
                         type="button"
                         variant="outline"
                         size="sm"
-                        onClick={() => onChange({ tz: "Asia/Taipei", mon: [["09:00", "18:00"]] })}
+                        onClick={() => onChange({ tz: "Asia/Taipei", mon: [["09:00", "18:00"]], tue: [["09:00", "18:00"]], wed: [["09:00", "18:00"]], thu: [["09:00", "18:00"]], fri: [["09:00", "18:00"]] })}
                         {...ccpDisabledProps(readOnly)}
                     >
                         設定時間表
@@ -430,7 +415,7 @@ function ScheduleEditor({ schedule, onChange, readOnly, problems }: ScheduleEdit
                     <div className="grid gap-1">
                         <Label htmlFor="transfer-schedule-tz">時區</Label>
                         <Select value={schedule.tz ?? "__unset"} onValueChange={(v) => update({ tz: v === "__unset" ? undefined : v })} disabled={readOnly}>
-                            <SelectTrigger id="transfer-schedule-tz" className="w-72" aria-invalid={tzProblem ? true : undefined} aria-describedby={readOnly ? CCP_ACCESS_NOTICE_ID : undefined} data-ccp-readonly={readOnly ? "true" : undefined}>
+                            <SelectTrigger id="transfer-schedule-tz" className="w-72" aria-invalid={tzProblem ? true : undefined} aria-describedby={readOnly ? notice : undefined} data-ccp-readonly={readOnly ? "true" : undefined}>
                                 <SelectValue placeholder="選擇時區" />
                             </SelectTrigger>
                             <SelectContent className="max-h-72">
@@ -443,6 +428,14 @@ function ScheduleEditor({ schedule, onChange, readOnly, problems }: ScheduleEdit
                         {tzProblem && <Label className="text-xs text-red-500">{tzProblem}</Label>}
                     </div>
 
+                    {/* ui review M-1：執行層（business_hours.py）——沒有任何一天列出＝整份等同未設定（全天候
+                        開放）；有列出任何一天後，未列出的日子＝當天不營業（前一日跨午夜的段除外）。兩種情形
+                        畫面本來完全相同而結果相反，這裡把它說出來。 */}
+                    {!anyDayListed && (
+                        <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded p-2" data-ccp-schedule-empty="true">
+                            目前沒有列出任何一天：這份時間表在執行層等同「未設定」（全天候可轉接）。請至少為一天加時段。
+                        </p>
+                    )}
                     {DAY_KEYS.map((day) => {
                         const segs = schedule[day] ?? [];
                         const defined = schedule[day] !== undefined;
@@ -450,7 +443,8 @@ function ScheduleEditor({ schedule, onChange, readOnly, problems }: ScheduleEdit
                             <div key={day} className="grid gap-1" data-ccp-schedule-day={day}>
                                 <div className="flex items-center gap-3">
                                     <span className="w-10 text-sm font-medium">{DAY_LABELS[day]}</span>
-                                    {!defined && <span className="text-xs text-muted-foreground">未列出（依執行層＝當天不營業）</span>}
+                                    {!defined && anyDayListed && <span className="text-xs text-muted-foreground">未列出＝當天不營業（前一日跨午夜的時段除外）</span>}
+                                    {!defined && !anyDayListed && <span className="text-xs text-muted-foreground">未列出</span>}
                                     {defined && segs.length === 0 && <span className="text-xs text-muted-foreground">當天休息</span>}
                                     <Button
                                         type="button"
@@ -504,6 +498,9 @@ function ScheduleEditor({ schedule, onChange, readOnly, problems }: ScheduleEdit
                                             />
                                             {segmentWrapsMidnight(seg) && (
                                                 <span className="text-xs text-amber-700" data-ccp-wraps-midnight="true">跨午夜（到隔天）</span>
+                                            )}
+                                            {segmentIsEmpty(seg) && (
+                                                <span className="text-xs text-red-600" data-ccp-empty-segment="true">開始與結束相同＝空時段（執行層視為當天此段不營業）；全天請用 00:00–23:59</span>
                                             )}
                                             <Button
                                                 type="button"
