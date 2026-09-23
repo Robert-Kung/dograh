@@ -11,7 +11,9 @@
     "generate-client": "openapi-ts",
     "test:display-options": "node scripts/test-display-options.mts",
     "lint:lead-flow": "bash ../../user_onboarding/scripts/check_lead_flow.sh",
-    "test:ccp-access": "node scripts/ccp-access-rules.test.mts"
+    "test:ccp-access": "node scripts/ccp-access-rules.test.mts",
+    "test:refer-uri": "node scripts/refer-uri-vectors.test.mts",
+    "test:transfer-config": "node scripts/transfer-call-config.test.mts"
   },
   "dependencies": {
     "@dagrejs/dagre": "^1.1.4",

@@ -184,6 +184,14 @@ export type ActiveCallsResponse = {
      * Active Calls
      */
     active_calls: number;
+    /**
+     * Livekit Active Calls
+     */
+    livekit_active_calls: number;
+    /**
+     * Reserved Slots
+     */
+    reserved_slots: number;
 };
 
 /**
@@ -1806,6 +1814,12 @@ export type DeepgramSttConfiguration = {
      * Language code. 'multi' enables Nova-3 auto-detect and omits language hints for Flux multilingual auto-detect.
      */
     language?: string;
+    /**
+     * Base Url
+     *
+     * Override only to route Deepgram through a custom endpoint (e.g. proxy or relay). Leave blank for api.deepgram.com. Not supported by flux models.
+     */
+    base_url?: string;
 };
 
 /**
@@ -2233,7 +2247,7 @@ export type ElevenlabsTtsConfiguration = {
     /**
      * Model
      *
-     * ElevenLabs TTS model.
+     * ElevenLabs TTS model. eleven_multilingual_v2 covers zh; flash/turbo v2.5 are the low-latency options.
      */
     model?: string;
     /**
@@ -2615,13 +2629,13 @@ export type GoogleTtsConfiguration = {
     /**
      * Model
      *
-     * Google Cloud low-latency TTS engine. Dograh maps this to Pipecat's streaming Google TTS service for Chirp 3 HD and Journey voices.
+     * Google Cloud TTS engine hint. The voice name decides the transport: Chirp 3 HD / Journey voices stream; other voice families (Wavenet/Standard/Neural2, e.g. the cmn-TW voices) use the HTTP API.
      */
     model?: string;
     /**
      * Voice
      *
-     * Google Cloud voice name. Use a Chirp 3 HD or Journey voice for streaming TTS.
+     * Google Cloud voice name. Chirp 3 HD / Journey voices use streaming TTS; Wavenet/Standard/Neural2 voices (e.g. 'cmn-TW-Wavenet-A') use the HTTP synthesize API.
      */
     voice?: string;
     /**
@@ -3853,7 +3867,7 @@ export type OpenAisttConfiguration = {
     /**
      * Model
      *
-     * OpenAI transcription model.
+     * OpenAI transcription model. Custom values are allowed for OpenAI-compatible endpoints (see base_url).
      */
     model?: string;
     /**
@@ -5760,14 +5774,36 @@ export type ToolResponse = {
  * TransferCallConfig
  *
  * Configuration for Transfer Call tools.
+ *
+ * **Two layers since W3a.** Six of these keys are *deployment layer* —
+ * ``destination``, ``alternateDestination``, ``queueHealthUrl``,
+ * ``queueHealthToken``, ``queueHealthTimeoutSeconds``,
+ * ``queueHealthCacheTtlSeconds``. Their value is decided by the deployment
+ * site, so they are supplied by environment and merged in at read time by
+ * ``transfer_call_config.revalidate_transfer_config``; the platform repo's
+ * version-controlled template no longer carries them and its enabled-set
+ * canon rejects them on any write that reaches the editor gateway. The other
+ * ten are *speech layer* and are seeded once.
+ *
+ * **``destination`` had to become optional, and that is not a relaxation.**
+ * It was ``str = Field(...)`` — no default, i.e. required. The moment the
+ * template stops carrying the key, ``dograh-bootstrap.ensure_tools``'s PUT
+ * would be refused by this model with a 422 and the deployment would block
+ * itself. What actually guards the field is unchanged and is *not* this
+ * annotation: :meth:`validate_destination` below still runs on every write
+ * that carries a value, ``revalidate_transfer_config`` re-checks the merged
+ * effective value on every read, and ``validate_transfer_config`` checks the
+ * environment at boot. What the optionality removes is only "the key must be
+ * present in the write body" — and that half moved to the canon's forbidden
+ * keys, which is stricter: present is now *rejected*, not merely optional.
  */
 export type TransferCallConfig = {
     /**
      * Destination
      *
-     * Phone number or SIP endpoint to transfer the call to, e.g. +1234567890 or PJSIP/1234.
+     * Where to transfer the call. A LiveKit REFER target: tel:+886912345678 or sip:queue@pbx.example. Asterisk dialstrings (PJSIP/1234, SIP/1001) and bare E.164 are no longer accepted — the LiveKit executor never dialled them, so accepting them here only produced destinations that failed at REFER time. **Deployment layer (W3a): the effective value comes from DOGRAH_TRANSFER_DESTINATION, merged in at read time by revalidate_transfer_config.** Optional here because the version-controlled template no longer carries it — see the note on this class.
      */
-    destination: string;
+    destination?: string | null;
     /**
      * Messagetype
      *
@@ -5792,6 +5828,74 @@ export type TransferCallConfig = {
      * Maximum seconds to wait for the destination to answer.
      */
     timeout?: number;
+    /**
+     * Schedule
+     *
+     * Business-hours schedule for the transfer gate. Out-of-hours calls take afterHoursAction instead of transferring.
+     */
+    schedule?: {
+        [key: string]: unknown;
+    } | null;
+    /**
+     * Afterhoursaction
+     *
+     * What to do out of hours: back_to_ai, announce_and_hangup or alternate_queue (the executor's _SUPPORTED_AFTER_HOURS — anything else silently falls back to back_to_ai, so a plausible-looking wrong value yields a branch that never fires).
+     */
+    afterHoursAction?: string | null;
+    /**
+     * Afterhoursmessage
+     *
+     * Message to play for the after-hours branch.
+     */
+    afterHoursMessage?: string | null;
+    /**
+     * Alternatedestination
+     *
+     * Out-of-hours transfer destination (same format as destination).
+     */
+    alternateDestination?: string | null;
+    /**
+     * Transferfailedmessage
+     *
+     * Message to play when the transfer fails.
+     */
+    transferFailedMessage?: string | null;
+    /**
+     * Transferunavailablemessage
+     *
+     * Message to play when the queue is unhealthy (gate: unavailable).
+     */
+    transferUnavailableMessage?: string | null;
+    /**
+     * Unavailableannouncelimit
+     *
+     * Hang up after this many unavailable announcements.
+     */
+    unavailableAnnounceLimit?: number | null;
+    /**
+     * Queuehealthurl
+     *
+     * Queue health endpoint for the transfer gate. Unset means the health dimension is unchecked.
+     */
+    queueHealthUrl?: string | null;
+    /**
+     * Queuehealthtoken
+     *
+     * Bearer token for the queue health endpoint.
+     */
+    queueHealthToken?: string | null;
+    /**
+     * Queuehealthtimeoutseconds
+     *
+     * Total wall-clock budget for the health probe.
+     */
+    queueHealthTimeoutSeconds?: number | null;
+    /**
+     * Queuehealthcachettlseconds
+     *
+     * How long a health verdict is cached.
+     */
+    queueHealthCacheTtlSeconds?: number | null;
 };
 
 /**
@@ -7547,6 +7651,27 @@ export type HandleVonageEventsApiV1TelephonyVonageEventsWorkflowRunIdPostErrors 
 export type HandleVonageEventsApiV1TelephonyVonageEventsWorkflowRunIdPostError = HandleVonageEventsApiV1TelephonyVonageEventsWorkflowRunIdPostErrors[keyof HandleVonageEventsApiV1TelephonyVonageEventsWorkflowRunIdPostErrors];
 
 export type HandleVonageEventsApiV1TelephonyVonageEventsWorkflowRunIdPostResponses = {
+    /**
+     * Successful Response
+     */
+    200: unknown;
+};
+
+export type LivekitInboundApiV1LivekitInboundPostData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/api/v1/livekit/inbound';
+};
+
+export type LivekitInboundApiV1LivekitInboundPostErrors = {
+    /**
+     * Not found
+     */
+    404: unknown;
+};
+
+export type LivekitInboundApiV1LivekitInboundPostResponses = {
     /**
      * Successful Response
      */
