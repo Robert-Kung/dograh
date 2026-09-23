@@ -25,7 +25,7 @@
  * **這條比對的是 submodule 工作副本**，未 bump pointer 時仍會綠（gate L-G）；
  * 那一軸由 `2.0b`／`AC8b`／`7.4` 的從零 `git clone --recursive` 承擔。
  *
- * ## 前端要持有的三組政策知識
+ * ## 前端要持有的政策知識
  *
  * ① 啟用的工具類型集合 —— `CCP_ALLOWED_TOOL_TYPES`／`CCP_BLOCKED_TOOL_TYPES`
  * ② `transfer_call` 的**欄位層**額外規則 —— `CCP_TOOL_TYPE_REQUIRED_KEYS`。
@@ -34,6 +34,15 @@
  *    而「UI 說可以選、正本已封鎖」正是 AC5 要消滅的「選了才失敗」。
  * ③ coverage-map 的 deny 清單 —— 不在本檔，落在各頁的 `ccpDisabledProps()`
  *    與 `useCcpPageNotice()`（那是逐頁處置，不是一份可比對的清單）。
+ * ④ **W3b（母 repo tasks 3.4）**：transfer 表單的欄位層政策 ——
+ *    `CCP_TRANSFER_DEPLOYMENT_KEYS`（六欄，不畫、不送）、
+ *    `CCP_TRANSFER_AFTER_HOURS_ACTIONS`／`CCP_TRANSFER_MESSAGE_TYPES`（下拉選項）、
+ *    `CCP_TRANSFER_ANNOUNCE_LIMIT_RANGE`（整數範圍）、`CCP_TZ_NAMES`（週表 tz 下拉）、
+ *    `CCP_SINGLETON_TOOL_TYPES`（建立對話框維持不可選的獨立宣告）。
+ *    **每一項前端驗證在閘門都有對應規則**（`constrained_values` 四種 kind ＋
+ *    `forbidden_keys`），本檔的副本只決定畫面。
+ *    **全部是扁平字面量陣列**：比對器 `ui-feature-scope-diff.py` 是文字解析，
+ *    `_OBJECT_RE` 對巢狀物件會截斷（母 repo review L-1／F-17）——寫成物件會當場失敗。
  *
  * ## 這份副本**不是**執行點
  *
@@ -111,6 +120,16 @@ export function ccpToolTypeAdmission(category: ToolCategory): CcpToolTypeAdmissi
             reason: '本部署未開放這個工具類型：交付範圍是話術與轉接設定的維護。',
         };
     }
+    // W3b（母 repo review F-10）：單例型別**先於**必要鍵推導。表單補齊後
+    // 「必要欄位新建時湊不齊」對 transfer_call 已不成立，真理由是 R-AE。
+    if (CCP_SINGLETON_TOOL_TYPES.includes(category)) {
+        return {
+            selectable: false,
+            reason:
+                '本部署只能有一個轉接工具，且由建置程序建立；'
+                + '話術與營業時間請到既有的轉接工具頁面調整。',
+        };
+    }
     const requiredKeys = CCP_TOOL_TYPE_REQUIRED_KEYS[category];
     if (requiredKeys && requiredKeys.length > 0) {
         return {
@@ -134,3 +153,149 @@ export function ccpToolTypeAdmission(category: ToolCategory): CcpToolTypeAdmissi
  */
 export const CCP_DEFAULT_TOOL_CATEGORY: ToolCategory =
     CCP_ALLOWED_TOOL_TYPES.find((c) => ccpToolTypeAdmission(c).selectable) ?? 'end_call';
+
+// ── W3b：transfer 表單的欄位層政策副本（母 repo tasks 3.4）──────────────────
+//
+// 正本：`deploy/feature-scope.json`。每一個常數都由 `ui-feature-scope-diff.py`
+// 與正本比對；**改這裡而不改正本（或反之）會在 preflight 當場失敗**。
+
+/**
+ * `transfer_call` 的部署層六欄（正本 `forbidden_keys` 的子集；母 repo
+ * `feature_scope_check.DEPLOYMENT_ENV_FIELDS` 的鍵順序）。
+ * 表單**不畫輸入框、不顯示值、送出 body 永不含這些鍵**（含 `null` 形式——
+ * `forbidden_keys` 是存在性判定）。
+ */
+export const CCP_TRANSFER_DEPLOYMENT_KEYS = [
+    'destination',
+    'alternateDestination',
+    'queueHealthUrl',
+    'queueHealthToken',
+    'queueHealthTimeoutSeconds',
+    'queueHealthCacheTtlSeconds',
+] as const;
+
+/** 正本 `constrained_values.afterHoursAction.enum_values`（執行層 `_SUPPORTED_AFTER_HOURS` 的複本）。 */
+export const CCP_TRANSFER_AFTER_HOURS_ACTIONS = [
+    'back_to_ai',
+    'announce_and_hangup',
+    'alternate_queue',
+] as const;
+
+/** 正本 `constrained_values.messageType.enum_values`（上游 `Literal` 的複本）。 */
+export const CCP_TRANSFER_MESSAGE_TYPES = ['none', 'custom', 'audio'] as const;
+
+/** 正本 `constrained_values.unavailableAnnounceLimit` 的 `[min, max]`。 */
+export const CCP_TRANSFER_ANNOUNCE_LIMIT_RANGE = [1, 10] as const;
+
+/**
+ * 建立對話框維持不可選的型別（正本 `field_rules.singleton_tool_types`）。
+ * 這是「呈現面比授權面更嚴」的**刻意例外**：閘門對實施方 `POST /tools/` 放行，
+ * 擋在對話框只是體驗面。理由 R-AE（一套部署一組部署層值）。
+ */
+export const CCP_SINGLETON_TOOL_TYPES: readonly ToolCategory[] = ['transfer_call'];
+
+/**
+ * 週表 `tz` 下拉的選項：正本 `constrained_values.schedule.tz_names` 的**同一份快照**
+ * （IANA 名稱，母 repo W3b 0.5 產生）。**不用** `Intl.supportedValuesOf('timeZone')`——
+ * 那是瀏覽器的集合，與閘門的判準可能不同，選得到卻存不進去。
+ */
+export const CCP_TZ_NAMES = [
+    'Africa/Abidjan', 'Africa/Accra', 'Africa/Addis_Ababa', 'Africa/Algiers', 'Africa/Asmara',
+    'Africa/Bamako', 'Africa/Bangui', 'Africa/Banjul', 'Africa/Bissau', 'Africa/Blantyre',
+    'Africa/Brazzaville', 'Africa/Bujumbura', 'Africa/Cairo', 'Africa/Casablanca', 'Africa/Ceuta',
+    'Africa/Conakry', 'Africa/Dakar', 'Africa/Dar_es_Salaam', 'Africa/Djibouti', 'Africa/Douala',
+    'Africa/El_Aaiun', 'Africa/Freetown', 'Africa/Gaborone', 'Africa/Harare', 'Africa/Johannesburg',
+    'Africa/Juba', 'Africa/Kampala', 'Africa/Khartoum', 'Africa/Kigali', 'Africa/Kinshasa',
+    'Africa/Lagos', 'Africa/Libreville', 'Africa/Lome', 'Africa/Luanda', 'Africa/Lubumbashi',
+    'Africa/Lusaka', 'Africa/Malabo', 'Africa/Maputo', 'Africa/Maseru', 'Africa/Mbabane', 'Africa/Mogadishu',
+    'Africa/Monrovia', 'Africa/Nairobi', 'Africa/Ndjamena', 'Africa/Niamey', 'Africa/Nouakchott',
+    'Africa/Ouagadougou', 'Africa/Porto-Novo', 'Africa/Sao_Tome', 'Africa/Timbuktu', 'Africa/Tripoli',
+    'Africa/Tunis', 'Africa/Windhoek', 'America/Adak', 'America/Anchorage', 'America/Anguilla',
+    'America/Antigua', 'America/Araguaina', 'America/Argentina/Buenos_Aires', 'America/Argentina/Catamarca',
+    'America/Argentina/Cordoba', 'America/Argentina/Jujuy', 'America/Argentina/La_Rioja', 'America/Argentina/Mendoza',
+    'America/Argentina/Rio_Gallegos', 'America/Argentina/Salta', 'America/Argentina/San_Juan',
+    'America/Argentina/San_Luis', 'America/Argentina/Tucuman', 'America/Argentina/Ushuaia',
+    'America/Aruba', 'America/Asuncion', 'America/Atikokan', 'America/Atka', 'America/Bahia',
+    'America/Bahia_Banderas', 'America/Barbados', 'America/Belem', 'America/Belize', 'America/Blanc-Sablon',
+    'America/Boa_Vista', 'America/Bogota', 'America/Boise', 'America/Cambridge_Bay', 'America/Campo_Grande',
+    'America/Cancun', 'America/Caracas', 'America/Cayenne', 'America/Cayman', 'America/Chicago',
+    'America/Chihuahua', 'America/Ciudad_Juarez', 'America/Coral_Harbour', 'America/Costa_Rica',
+    'America/Coyhaique', 'America/Creston', 'America/Cuiaba', 'America/Curacao', 'America/Danmarkshavn',
+    'America/Dawson', 'America/Dawson_Creek', 'America/Denver', 'America/Detroit', 'America/Dominica',
+    'America/Edmonton', 'America/Eirunepe', 'America/El_Salvador', 'America/Ensenada', 'America/Fort_Nelson',
+    'America/Fortaleza', 'America/Glace_Bay', 'America/Goose_Bay', 'America/Grand_Turk', 'America/Grenada',
+    'America/Guadeloupe', 'America/Guatemala', 'America/Guayaquil', 'America/Guyana', 'America/Halifax',
+    'America/Havana', 'America/Hermosillo', 'America/Indiana/Indianapolis', 'America/Indiana/Knox',
+    'America/Indiana/Marengo', 'America/Indiana/Petersburg', 'America/Indiana/Tell_City', 'America/Indiana/Vevay',
+    'America/Indiana/Vincennes', 'America/Indiana/Winamac', 'America/Inuvik', 'America/Iqaluit',
+    'America/Jamaica', 'America/Juneau', 'America/Kentucky/Louisville', 'America/Kentucky/Monticello',
+    'America/Kralendijk', 'America/La_Paz', 'America/Lima', 'America/Los_Angeles', 'America/Lower_Princes',
+    'America/Maceio', 'America/Managua', 'America/Manaus', 'America/Marigot', 'America/Martinique',
+    'America/Matamoros', 'America/Mazatlan', 'America/Menominee', 'America/Merida', 'America/Metlakatla',
+    'America/Mexico_City', 'America/Miquelon', 'America/Moncton', 'America/Monterrey', 'America/Montevideo',
+    'America/Montreal', 'America/Montserrat', 'America/Nassau', 'America/New_York', 'America/Nipigon',
+    'America/Nome', 'America/Noronha', 'America/North_Dakota/Beulah', 'America/North_Dakota/Center',
+    'America/North_Dakota/New_Salem', 'America/Nuuk', 'America/Ojinaga', 'America/Panama',
+    'America/Pangnirtung', 'America/Paramaribo', 'America/Phoenix', 'America/Port-au-Prince',
+    'America/Port_of_Spain', 'America/Porto_Acre', 'America/Porto_Velho', 'America/Puerto_Rico',
+    'America/Punta_Arenas', 'America/Rainy_River', 'America/Rankin_Inlet', 'America/Recife',
+    'America/Regina', 'America/Resolute', 'America/Rio_Branco', 'America/Santa_Isabel', 'America/Santarem',
+    'America/Santiago', 'America/Santo_Domingo', 'America/Sao_Paulo', 'America/Scoresbysund',
+    'America/Shiprock', 'America/Sitka', 'America/St_Barthelemy', 'America/St_Johns', 'America/St_Kitts',
+    'America/St_Lucia', 'America/St_Thomas', 'America/St_Vincent', 'America/Swift_Current',
+    'America/Tegucigalpa', 'America/Thule', 'America/Thunder_Bay', 'America/Tijuana', 'America/Toronto',
+    'America/Tortola', 'America/Vancouver', 'America/Virgin', 'America/Whitehorse', 'America/Winnipeg',
+    'America/Yakutat', 'America/Yellowknife', 'Antarctica/Casey', 'Antarctica/Davis', 'Antarctica/DumontDUrville',
+    'Antarctica/Macquarie', 'Antarctica/Mawson', 'Antarctica/McMurdo', 'Antarctica/Palmer',
+    'Antarctica/Rothera', 'Antarctica/Syowa', 'Antarctica/Troll', 'Antarctica/Vostok', 'Arctic/Longyearbyen',
+    'Asia/Aden', 'Asia/Almaty', 'Asia/Amman', 'Asia/Anadyr', 'Asia/Aqtau', 'Asia/Aqtobe', 'Asia/Ashgabat',
+    'Asia/Atyrau', 'Asia/Baghdad', 'Asia/Bahrain', 'Asia/Baku', 'Asia/Bangkok', 'Asia/Barnaul',
+    'Asia/Beirut', 'Asia/Bishkek', 'Asia/Brunei', 'Asia/Chita', 'Asia/Choibalsan', 'Asia/Chongqing',
+    'Asia/Colombo', 'Asia/Damascus', 'Asia/Dhaka', 'Asia/Dili', 'Asia/Dubai', 'Asia/Dushanbe',
+    'Asia/Famagusta', 'Asia/Gaza', 'Asia/Harbin', 'Asia/Hebron', 'Asia/Ho_Chi_Minh', 'Asia/Hong_Kong',
+    'Asia/Hovd', 'Asia/Irkutsk', 'Asia/Istanbul', 'Asia/Jakarta', 'Asia/Jayapura', 'Asia/Jerusalem',
+    'Asia/Kabul', 'Asia/Kamchatka', 'Asia/Karachi', 'Asia/Kashgar', 'Asia/Kathmandu', 'Asia/Khandyga',
+    'Asia/Kolkata', 'Asia/Krasnoyarsk', 'Asia/Kuala_Lumpur', 'Asia/Kuching', 'Asia/Kuwait',
+    'Asia/Macau', 'Asia/Magadan', 'Asia/Makassar', 'Asia/Manila', 'Asia/Muscat', 'Asia/Nicosia',
+    'Asia/Novokuznetsk', 'Asia/Novosibirsk', 'Asia/Omsk', 'Asia/Oral', 'Asia/Phnom_Penh', 'Asia/Pontianak',
+    'Asia/Pyongyang', 'Asia/Qatar', 'Asia/Qostanay', 'Asia/Qyzylorda', 'Asia/Riyadh', 'Asia/Sakhalin',
+    'Asia/Samarkand', 'Asia/Seoul', 'Asia/Shanghai', 'Asia/Singapore', 'Asia/Srednekolymsk',
+    'Asia/Taipei', 'Asia/Tashkent', 'Asia/Tbilisi', 'Asia/Tehran', 'Asia/Tel_Aviv', 'Asia/Thimphu',
+    'Asia/Tokyo', 'Asia/Tomsk', 'Asia/Ulaanbaatar', 'Asia/Urumqi', 'Asia/Ust-Nera', 'Asia/Vientiane',
+    'Asia/Vladivostok', 'Asia/Yakutsk', 'Asia/Yangon', 'Asia/Yekaterinburg', 'Asia/Yerevan',
+    'Atlantic/Azores', 'Atlantic/Bermuda', 'Atlantic/Canary', 'Atlantic/Cape_Verde', 'Atlantic/Faroe',
+    'Atlantic/Jan_Mayen', 'Atlantic/Madeira', 'Atlantic/Reykjavik', 'Atlantic/South_Georgia',
+    'Atlantic/St_Helena', 'Atlantic/Stanley', 'Australia/Adelaide', 'Australia/Brisbane', 'Australia/Broken_Hill',
+    'Australia/Canberra', 'Australia/Currie', 'Australia/Darwin', 'Australia/Eucla', 'Australia/Hobart',
+    'Australia/Lindeman', 'Australia/Lord_Howe', 'Australia/Melbourne', 'Australia/Perth',
+    'Australia/Sydney', 'Australia/Yancowinna', 'CET', 'CST6CDT', 'EET', 'EST', 'EST5EDT',
+    'Etc/GMT', 'Etc/GMT+0', 'Etc/GMT+1', 'Etc/GMT+10', 'Etc/GMT+11', 'Etc/GMT+12', 'Etc/GMT+2',
+    'Etc/GMT+3', 'Etc/GMT+4', 'Etc/GMT+5', 'Etc/GMT+6', 'Etc/GMT+7', 'Etc/GMT+8', 'Etc/GMT+9',
+    'Etc/GMT-0', 'Etc/GMT-1', 'Etc/GMT-10', 'Etc/GMT-11', 'Etc/GMT-12', 'Etc/GMT-13', 'Etc/GMT-14',
+    'Etc/GMT-2', 'Etc/GMT-3', 'Etc/GMT-4', 'Etc/GMT-5', 'Etc/GMT-6', 'Etc/GMT-7', 'Etc/GMT-8',
+    'Etc/GMT-9', 'Etc/GMT0', 'Etc/Greenwich', 'Etc/UCT', 'Etc/UTC', 'Etc/Universal', 'Etc/Zulu',
+    'Europe/Amsterdam', 'Europe/Andorra', 'Europe/Astrakhan', 'Europe/Athens', 'Europe/Belfast',
+    'Europe/Belgrade', 'Europe/Berlin', 'Europe/Bratislava', 'Europe/Brussels', 'Europe/Bucharest',
+    'Europe/Budapest', 'Europe/Busingen', 'Europe/Chisinau', 'Europe/Copenhagen', 'Europe/Dublin',
+    'Europe/Gibraltar', 'Europe/Guernsey', 'Europe/Helsinki', 'Europe/Isle_of_Man', 'Europe/Istanbul',
+    'Europe/Jersey', 'Europe/Kaliningrad', 'Europe/Kirov', 'Europe/Kyiv', 'Europe/Lisbon',
+    'Europe/Ljubljana', 'Europe/London', 'Europe/Luxembourg', 'Europe/Madrid', 'Europe/Malta',
+    'Europe/Mariehamn', 'Europe/Minsk', 'Europe/Monaco', 'Europe/Moscow', 'Europe/Nicosia',
+    'Europe/Oslo', 'Europe/Paris', 'Europe/Podgorica', 'Europe/Prague', 'Europe/Riga', 'Europe/Rome',
+    'Europe/Samara', 'Europe/San_Marino', 'Europe/Sarajevo', 'Europe/Saratov', 'Europe/Simferopol',
+    'Europe/Skopje', 'Europe/Sofia', 'Europe/Stockholm', 'Europe/Tallinn', 'Europe/Tirane',
+    'Europe/Tiraspol', 'Europe/Ulyanovsk', 'Europe/Vaduz', 'Europe/Vatican', 'Europe/Vienna',
+    'Europe/Vilnius', 'Europe/Volgograd', 'Europe/Warsaw', 'Europe/Zagreb', 'Europe/Zurich',
+    'Factory', 'GMT', 'HST', 'Indian/Antananarivo', 'Indian/Chagos', 'Indian/Christmas', 'Indian/Cocos',
+    'Indian/Comoro', 'Indian/Kerguelen', 'Indian/Mahe', 'Indian/Maldives', 'Indian/Mauritius',
+    'Indian/Mayotte', 'Indian/Reunion', 'MET', 'MST', 'MST7MDT', 'PST8PDT', 'Pacific/Apia',
+    'Pacific/Auckland', 'Pacific/Bougainville', 'Pacific/Chatham', 'Pacific/Chuuk', 'Pacific/Easter',
+    'Pacific/Efate', 'Pacific/Fakaofo', 'Pacific/Fiji', 'Pacific/Funafuti', 'Pacific/Galapagos',
+    'Pacific/Gambier', 'Pacific/Guadalcanal', 'Pacific/Guam', 'Pacific/Honolulu', 'Pacific/Johnston',
+    'Pacific/Kanton', 'Pacific/Kiritimati', 'Pacific/Kosrae', 'Pacific/Kwajalein', 'Pacific/Majuro',
+    'Pacific/Marquesas', 'Pacific/Midway', 'Pacific/Nauru', 'Pacific/Niue', 'Pacific/Norfolk',
+    'Pacific/Noumea', 'Pacific/Pago_Pago', 'Pacific/Palau', 'Pacific/Pitcairn', 'Pacific/Pohnpei',
+    'Pacific/Port_Moresby', 'Pacific/Rarotonga', 'Pacific/Saipan', 'Pacific/Samoa', 'Pacific/Tahiti',
+    'Pacific/Tarawa', 'Pacific/Tongatapu', 'Pacific/Wake', 'Pacific/Wallis', 'Pacific/Yap',
+    'UTC', 'WET', 'localtime',
+] as const;
