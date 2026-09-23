@@ -34,7 +34,7 @@ import {
     CCP_TRANSFER_DEPLOYMENT_KEYS,
     CCP_TZ_NAMES,
 } from "@/lib/ccp/feature-scope";
-import { ccpDisabledProps, ccpReadOnlyFieldProps } from "@/lib/ccp/notice-bar";
+import { CCP_ACCESS_NOTICE_ID, ccpDisabledProps, ccpReadOnlyFieldProps } from "@/lib/ccp/notice-bar";
 import { isPremiumRateCandidate, parseReferUri } from "@/lib/ccp/refer-uri";
 import {
     type AfterHoursAction,
@@ -178,6 +178,7 @@ export function TransferCallToolConfig({
                         onValueChange={(v) => set("messageType", v as TransferMessageType)}
                         className="space-y-3"
                         aria-readonly={readOnly || undefined}
+                        aria-describedby={readOnly ? CCP_ACCESS_NOTICE_ID : undefined}
                         data-ccp-readonly={readOnly ? "true" : undefined}
                     >
                         <label htmlFor="transfer-mt-none" className="flex items-center space-x-3 p-3 border rounded-lg hover:bg-muted/50 cursor-pointer">
@@ -297,7 +298,7 @@ export function TransferCallToolConfig({
                         onValueChange={(v) => set("afterHoursAction", v === "__unset" ? "" : (v as AfterHoursAction))}
                         disabled={readOnly}
                     >
-                        <SelectTrigger aria-label="非營業時間的行為" data-ccp-readonly={readOnly ? "true" : undefined}>
+                        <SelectTrigger aria-label="非營業時間的行為" aria-describedby={readOnly ? CCP_ACCESS_NOTICE_ID : undefined} data-ccp-readonly={readOnly ? "true" : undefined}>
                             <SelectValue />
                         </SelectTrigger>
                         <SelectContent>
@@ -429,7 +430,7 @@ function ScheduleEditor({ schedule, onChange, readOnly, problems }: ScheduleEdit
                     <div className="grid gap-1">
                         <Label htmlFor="transfer-schedule-tz">時區</Label>
                         <Select value={schedule.tz ?? "__unset"} onValueChange={(v) => update({ tz: v === "__unset" ? undefined : v })} disabled={readOnly}>
-                            <SelectTrigger id="transfer-schedule-tz" className="w-72" aria-invalid={tzProblem ? true : undefined} data-ccp-readonly={readOnly ? "true" : undefined}>
+                            <SelectTrigger id="transfer-schedule-tz" className="w-72" aria-invalid={tzProblem ? true : undefined} aria-describedby={readOnly ? CCP_ACCESS_NOTICE_ID : undefined} data-ccp-readonly={readOnly ? "true" : undefined}>
                                 <SelectValue placeholder="選擇時區" />
                             </SelectTrigger>
                             <SelectContent className="max-h-72">
