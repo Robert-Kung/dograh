@@ -42,13 +42,20 @@ import { Textarea } from "@/components/ui/textarea";
 import { TOOL_DOCUMENTATION_URLS } from "@/constants/documentation";
 import { detailFromError } from "@/lib/apiError";
 import { useAuth } from "@/lib/auth";
-// customer-center-platform fork（母 repo W2d task 3.1／3.7）：
+// customer-center-platform fork（母 repo W2d task 3.1／3.7；W3b task 5.5）：
 // `PUT /tools/{uuid}` 帶 `roles: [implementer]` ⇒ 對主管 403（② 桶）。
-// **transfer_call 工具另外一級**（task 3.7）：它的設定分屬部署層，
-// 內容判準在 admission（`required_keys` 與白名單），對兩個角色皆唯讀，
-// 且說明**分角色**——RUNBOOK 是工程單位文件，客戶不該有存取。
-import { useCcpReadOnly } from "@/lib/ccp/access";
+// **transfer_call 工具自 W3b 起也走 ② 桶**：話術層 10 鍵在表單上補齊、送出只帶話術層，
+// 部署層六欄只在表單上說明不畫。W2d 的「兩個角色皆唯讀＋表單尚未補齊」整頁停用已移除。
+// 說明仍**分角色**——RUNBOOK 是工程單位文件，客戶不該有存取。
+import { useCcpAccess, useCcpReadOnly } from "@/lib/ccp/access";
 import { ccpDisabledProps, useCcpPageNotice } from "@/lib/ccp/notice-bar";
+import {
+    buildTransferCallConfig,
+    type FieldProblem,
+    formStateFromConfig,
+    type TransferFormState,
+    validateScriptLayer,
+} from "@/lib/ccp/transfer-call-config";
 
 import {
     createMcpDefinition,
@@ -83,37 +90,31 @@ export default function ToolDetailPage() {
     const [isLoading, setIsLoading] = useState(true);
     const [isSaving, setIsSaving] = useState(false);
     const readOnly = useCcpReadOnly();
+    const { role: ccpRole } = useCcpAccess();
     const [error, setError] = useState<string | null>(null);
     const [saveSuccess, setSaveSuccess] = useState(false);
     const [showCodeDialog, setShowCodeDialog] = useState(false);
 
-    // task 3.7：transfer_call 的設定分屬部署層 ⇒ 兩個角色皆唯讀，說明分角色。
-    // 其餘工具走 ② 桶（主管唯讀、實施方可寫）。
+    // W3b task 5.5：transfer_call 走 ② 桶。`!tool` 那一項沿用 §6 review F-9 的紀律
+    // （訊號未到一律停用），只是不再多一個「工具類型」的第二訊號。
     const isTransferCallCategory = tool?.category === "transfer_call";
-    // `!tool` 那一項是 §6 review F-9 補的：`tool` 未載入時 `tool?.category` 是
-    // undefined ⇒ `isTransferCallCategory` 為 false ⇒ 對實施方 `saveDisabled` 為
-    // false，而該頁若是 transfer_call 工具，資料到齊後才翻成停用。那個窗口內按下去
-    // 就是欄位層 403——AC5 的形狀，只是窗口很短。
-    // 這條紀律與 `resolveAccess`「訊號未到一律唯讀」是同一條，只是那裡套的是**角色**
-    // 訊號，這裡套的是這一格依賴的**第二個**訊號（工具類型）。
-    const saveDisabled = readOnly || !tool || isTransferCallCategory;
+    const saveDisabled = readOnly || !tool;
     useCcpPageNotice(
         isTransferCallCategory
             ? {
                 supervisor: {
-                    title: '轉接工具在這個頁面是唯讀的',
+                    title: '轉接工具的話術對您是唯讀的',
                     message:
-                        '轉接目的地與佇列參數屬於部署層設定，需要調整時請與您的專案窗口提出，'
-                        + '由建置單位在部署層變更。話術文字（轉接語、失敗與非營業時間的說明）'
-                        + '目前也一併唯讀——本頁的轉接表單尚未補齊，兩種帳號都還不能在此編輯。',
+                        '您可以檢視轉接前播報、失敗與非營業時間的說明、營業時間表，'
+                        + '但變更由負責建置的實施方進行；轉接目的地與隊列參數由部署層供給，'
+                        + '需要調整時請與您的專案窗口提出。',
                 },
                 implementer: {
-                    title: '轉接工具在這個頁面是唯讀的',
+                    title: '轉接目的地與隊列參數由部署層供給',
                     message:
-                        '目的地白名單與佇列健康參數由部署層正本管理，經編輯器寫入會被內容檢查擋下；'
-                        + '請依 deploy/RUNBOOK.md 的轉接設定程序變更後重新部署。'
-                        + '話術文字則不同——它仍屬於工具設定、寫入不會被擋，'
-                        + '只是本頁的轉接表單尚未補齊欄位，故整頁停用。',
+                        '本頁可以編輯話術層（播報、失敗與非營業時間說明、營業時間表、播報次數）。'
+                        + '目的地與隊列健康參數不在此設定——經編輯器寫入會被內容檢查擋下，'
+                        + '請依 deploy/RUNBOOK.md 的轉接設定程序修改部署層後重新部署。',
                 },
             }
             : {
@@ -155,11 +156,9 @@ export default function ToolDetailPage() {
         }
     };
 
-    // Transfer Call form state
-    const [transferDestination, setTransferDestination] = useState("");
-    const [transferMessageType, setTransferMessageType] = useState<EndCallMessageType>("none");
-    const [transferTimeout, setTransferTimeout] = useState(30);
-    const [transferAudioRecordingId, setTransferAudioRecordingId] = useState("");
+    // Transfer Call form state（W3b：話術層 10 鍵一個物件；六欄不進表單狀態）
+    const [transferForm, setTransferForm] = useState<TransferFormState>(() => formStateFromConfig(undefined));
+    const [transferProblems, setTransferProblems] = useState<FieldProblem[]>([]);
 
     // HTTP API form state - custom message type
     const [customMessageType, setCustomMessageType] = useState<'text' | 'audio'>('text');
@@ -228,21 +227,10 @@ export default function ToolDetailPage() {
                 setEndCallReasonDescription("");
             }
         } else if (tool.category === "transfer_call") {
-            // Populate transfer call specific fields
+            // W3b：只讀話術層鍵；六欄不讀（表單不畫、不顯示值）。
             const config = tool.definition?.config as APITransferCallConfig | undefined;
-            if (config) {
-                setTransferDestination(config.destination || "");
-                setTransferMessageType(config.messageType || "none");
-                setCustomMessage(config.customMessage || "");
-                setTransferAudioRecordingId(config.audioRecordingId || "");
-                setTransferTimeout(config.timeout ?? 30);
-            } else {
-                setTransferDestination("");
-                setTransferMessageType("none");
-                setCustomMessage("");
-                setTransferAudioRecordingId("");
-                setTransferTimeout(30);
-            }
+            setTransferForm(formStateFromConfig(config));
+            setTransferProblems([]);
         } else if (tool.category === "mcp") {
             // Populate MCP specific fields
             const config = tool.definition?.config as
@@ -341,14 +329,12 @@ export default function ToolDetailPage() {
         if (tool.category === "calculator") {
             // No validation needed for built-in tools
         } else if (tool.category === "transfer_call") {
-            // Validate destination for Transfer Call tools (supports both E.164 and SIP endpoints)
-            const e164Pattern = /^\+[1-9]\d{1,14}$/;
-            const sipPattern = /^(PJSIP|SIP)\/[\w\-\.@]+$/i;
-            const isValidE164 = e164Pattern.test(transferDestination);
-            const isValidSip = sipPattern.test(transferDestination);
-
-            if (!transferDestination || (!isValidE164 && !isValidSip)) {
-                setError("Please enter a valid phone number (E.164 format) or SIP endpoint (e.g., PJSIP/1234)");
+            // W3b task 5.5：舊的 E.164／PJSIP 正則副本已刪（ccp#1）——交付態不畫 destination，
+            // 話術層每一項判定在閘門都有對應規則；這裡只是先擋、並指名欄位。
+            const problems = validateScriptLayer(transferForm);
+            setTransferProblems(problems);
+            if (problems.length > 0) {
+                setError(`請先修正：${problems.map((p) => p.message).join("；")}`);
                 return;
             }
         } else if (tool.category === "mcp") {
@@ -421,20 +407,15 @@ export default function ToolDetailPage() {
                     },
                 };
             } else if (tool.category === "transfer_call") {
-                // Build transfer call request body
+                // W3b：話術層 10 鍵全帶、永不含部署層六欄（builder 以字面量構造，
+                // 不展開回讀到的 definition.config）。上游對 definition 是整份取代。
                 requestBody = {
                     name,
                     description: description || undefined,
                     definition: {
                         schema_version: 1,
                         type: "transfer_call",
-                        config: {
-                            destination: transferDestination,
-                            messageType: transferMessageType,
-                            customMessage: transferMessageType === "custom" ? customMessage : undefined,
-                            audioRecordingId: transferMessageType === "audio" ? transferAudioRecordingId || undefined : undefined,
-                            timeout: transferTimeout,
-                        },
+                        config: buildTransferCallConfig(transferForm),
                     },
                 };
             } else if (tool.category === "mcp") {
@@ -698,17 +679,15 @@ const data = await response.json();`;
                             onNameChange={setName}
                             description={description}
                             onDescriptionChange={setDescription}
-                            destination={transferDestination}
-                            onDestinationChange={setTransferDestination}
-                            messageType={transferMessageType}
-                            onMessageTypeChange={setTransferMessageType}
-                            customMessage={customMessage}
-                            onCustomMessageChange={setCustomMessage}
-                            audioRecordingId={transferAudioRecordingId}
-                            onAudioRecordingIdChange={setTransferAudioRecordingId}
+                            form={transferForm}
+                            onFormChange={(next) => {
+                                setTransferForm(next);
+                                if (transferProblems.length) setTransferProblems(validateScriptLayer(next));
+                            }}
                             recordings={recordings}
-                            timeout={transferTimeout}
-                            onTimeoutChange={setTransferTimeout}
+                            readOnly={readOnly}
+                            role={ccpRole}
+                            problems={transferProblems}
                         />
                     ) : isMcpTool ? (
                         <Card>

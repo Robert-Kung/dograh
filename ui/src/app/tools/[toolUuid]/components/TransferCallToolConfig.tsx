@@ -1,33 +1,97 @@
 "use client";
 
-import {useState } from "react";
+// customer-center-platform fork（母 repo W3b tasks 5.3／5.4／5.5／5.6）：
+// transfer 工具表單重寫——**話術層 10 鍵全畫、部署層六欄只說明不畫**。
+//
+// 三格：
+//   ① 話術層：messageType 三態（沿用）、兩條必填話術（帶理由）、afterHoursAction 下拉、
+//      afterHoursMessage、unavailableAnnounceLimit（1–10）、timeout **唯讀＋說明**
+//      （LiveKit 冷轉接不使用此值，母 repo review F-8）。
+//   ② schedule 結構化編輯器：tz 下拉自 CCP_TZ_NAMES、七日多段、跨午夜標示、即時形狀驗證。
+//      MUST NOT 用自由 JSON——執行層 is_open() 對不可解析的週表 fail-open（營業時間閘消失）。
+//   ③ 部署層唯讀區塊：六欄名＋「由部署層供給」＋分角色程序；**不畫輸入框、不顯示值**
+//      （GET 回讀到的是 W3a 清除後的 null，且 GET 不 merge 部署層）。
+//
+// 送出形狀由 `lib/ccp/transfer-call-config.ts` 的 builder 負責（本元件只管畫面與狀態）。
+// 可及性契約沿用 W2d：`data-ccp-readonly`／`data-ccp-disabled` ＋ `aria-describedby`
+// 指得到（頁面級說明條）或自帶 `title`。
+
+import { useMemo } from "react";
 
 import type { RecordingResponseSchema } from "@/client/types.gen";
 import { RecordingSelect, StaticTextWarning } from "@/components/flow/TextOrAudioInput";
+import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
-
-import { type EndCallMessageType } from "../../config";
+import type { CcpRole } from "@/lib/ccp/access";
+import {
+    CCP_TRANSFER_AFTER_HOURS_ACTIONS,
+    CCP_TRANSFER_ANNOUNCE_LIMIT_RANGE,
+    CCP_TRANSFER_DEPLOYMENT_KEYS,
+    CCP_TZ_NAMES,
+} from "@/lib/ccp/feature-scope";
+import { ccpDisabledProps, ccpReadOnlyFieldProps } from "@/lib/ccp/notice-bar";
+import { isPremiumRateCandidate, parseReferUri } from "@/lib/ccp/refer-uri";
+import {
+    type AfterHoursAction,
+    DAY_KEYS,
+    type DayKey,
+    type FieldProblem,
+    type Segment,
+    segmentWrapsMidnight,
+    type TransferFormState,
+    type TransferMessageType,
+    type WeeklySchedule,
+} from "@/lib/ccp/transfer-call-config";
 
 export interface TransferCallToolConfigProps {
     name: string;
     onNameChange: (name: string) => void;
     description: string;
     onDescriptionChange: (description: string) => void;
-    destination: string;
-    onDestinationChange: (destination: string) => void;
-    messageType: EndCallMessageType;
-    onMessageTypeChange: (messageType: EndCallMessageType) => void;
-    customMessage: string;
-    onCustomMessageChange: (message: string) => void;
-    audioRecordingId: string;
-    onAudioRecordingIdChange: (id: string) => void;
+    form: TransferFormState;
+    onFormChange: (next: TransferFormState) => void;
     recordings?: RecordingResponseSchema[];
-    timeout?: number;  // Make optional to match API type
-    onTimeoutChange: (timeout: number) => void;
+    /** 主管（唯讀角色）時 true：話術層欄位全停用。 */
+    readOnly: boolean;
+    /** 已確認的角色；說明文案分角色。 */
+    role: CcpRole | null;
+    /** 表單驗證結果（頁面在存檔時算；即時形狀驗證由本元件自算）。 */
+    problems?: FieldProblem[];
+    /**
+     * 交付態（CCP）下 destination 不畫。fork 的非 CCP 路徑（沒有政策副本的部署）
+     * 才畫，並以 `refer-uri.ts` 即時驗證——`ccp#1` 的關閉點。
+     */
+    showDestination?: boolean;
+    destination?: string;
+    onDestinationChange?: (destination: string) => void;
+}
+
+const AFTER_HOURS_LABELS: Record<AfterHoursAction, string> = {
+    back_to_ai: "回到 AI 繼續服務（播完說明後不轉接）",
+    announce_and_hangup: "播完說明後結束通話",
+    alternate_queue: "轉接到替代隊列（目的地由部署層供給）",
+};
+
+const DAY_LABELS: Record<DayKey, string> = {
+    mon: "週一", tue: "週二", wed: "週三", thu: "週四", fri: "週五", sat: "週六", sun: "週日",
+};
+
+const DEPLOYMENT_KEY_LABELS: Record<(typeof CCP_TRANSFER_DEPLOYMENT_KEYS)[number], string> = {
+    destination: "轉接目的地",
+    alternateDestination: "非營業時間替代目的地",
+    queueHealthUrl: "隊列健康端點",
+    queueHealthToken: "隊列健康端點憑證",
+    queueHealthTimeoutSeconds: "健康探測逾時秒數",
+    queueHealthCacheTtlSeconds: "健康判定快取秒數",
+};
+
+function problemFor(problems: FieldProblem[] | undefined, field: string): string | undefined {
+    return problems?.find((p) => p.field === field)?.message;
 }
 
 export function TransferCallToolConfig({
@@ -35,170 +99,126 @@ export function TransferCallToolConfig({
     onNameChange,
     description,
     onDescriptionChange,
-    destination,
-    onDestinationChange,
-    messageType,
-    onMessageTypeChange,
-    customMessage,
-    onCustomMessageChange,
-    audioRecordingId,
-    onAudioRecordingIdChange,
+    form,
+    onFormChange,
     recordings = [],
-    timeout,
-    onTimeoutChange,
+    readOnly,
+    role,
+    problems,
+    showDestination = false,
+    destination = "",
+    onDestinationChange,
 }: TransferCallToolConfigProps) {
-    const [sipMode, setSipMode] = useState(() => /^(PJSIP|SIP)\//i.test(destination));
+    const set = <K extends keyof TransferFormState>(key: K, value: TransferFormState[K]) =>
+        onFormChange({ ...form, [key]: value });
+    const ro = ccpReadOnlyFieldProps(readOnly);
+    const [limitMin, limitMax] = CCP_TRANSFER_ANNOUNCE_LIMIT_RANGE;
 
-    // Validation patterns
-    const isValidPhoneNumber = (phone: string): boolean => {
-        const e164Pattern = /^\+[1-9]\d{1,14}$/;
-        return e164Pattern.test(phone);
-    };
-
-    const isValidSipEndpoint = (endpoint: string): boolean => {
-        const sipPattern = /^(PJSIP|SIP)\/[\w\-\.@]+$/i;
-        return sipPattern.test(endpoint);
-    };
-
-    const getValidationError = (): string | null => {
-        if (!destination) return null;
-
-        if (sipMode) {
-            return isValidSipEndpoint(destination)
-                ? null
-                : "Please enter a valid SIP endpoint (e.g., PJSIP/1234 or SIP/extension@domain.com)";
-        } else {
-            return isValidPhoneNumber(destination)
-                ? null
-                : "Please enter a valid phone number in E.164 format (e.g., +1234567890)";
-        }
-    };
-
-    const destinationError = getValidationError();
-
-    const handleSipModeToggle = () => {
-        setSipMode(!sipMode);
-        onDestinationChange(""); // Clear destination when switching modes
-    };
+    const destinationCheck = useMemo(
+        () => (showDestination && destination ? parseReferUri(destination) : null),
+        [showDestination, destination],
+    );
 
     return (
         <Card>
             <CardHeader>
-                <CardTitle>Transfer Call Configuration</CardTitle>
+                <CardTitle>轉接工具設定</CardTitle>
                 <CardDescription>
-                    Configure call transfer settings. Supports phone numbers (Twilio) and SIP endpoints (Asterisk ARI).
+                    話術與營業時間在此維護；轉接目的地與隊列參數由部署層供給（見最下方）。
                 </CardDescription>
             </CardHeader>
             <CardContent className="space-y-6">
                 <div className="grid gap-2">
-                    <Label>Tool Name</Label>
-                    <Label className="text-xs text-muted-foreground">
-                        A descriptive name for this tool
-                    </Label>
-                    <Input
-                        value={name}
-                        onChange={(e) => onNameChange(e.target.value)}
-                        placeholder="e.g., Transfer Call"
-                    />
+                    <Label htmlFor="transfer-name">工具名稱</Label>
+                    <Label className="text-xs text-muted-foreground">給 AI 辨識用的名稱</Label>
+                    <Input id="transfer-name" value={name} onChange={(e) => onNameChange(e.target.value)} {...ro} />
                 </div>
 
                 <div className="grid gap-2">
-                    <Label>Description</Label>
-                    <Label className="text-xs text-muted-foreground">
-                        Helps the LLM understand when to use this tool
-                    </Label>
+                    <Label htmlFor="transfer-description">說明</Label>
+                    <Label className="text-xs text-muted-foreground">幫助 AI 判斷什麼時候該轉接真人</Label>
                     <Textarea
+                        id="transfer-description"
                         value={description}
                         onChange={(e) => onDescriptionChange(e.target.value)}
-                        placeholder="When should the AI transfer the call?"
                         rows={3}
+                        {...ro}
                     />
                 </div>
 
-                <div className="grid gap-2 pt-4 border-t">
-                    <Label>Transfer Destination</Label>
-                    <Label className="text-xs text-muted-foreground">
-                        {sipMode
-                            ? "SIP endpoint to transfer the call to (e.g., PJSIP/1234 or SIP/extension@domain.com)"
-                            : "Phone number to transfer the call to (E.164 format with country code)"
-                        }
-                    </Label>
-                    <Input
-                        value={destination}
-                        onChange={(e) => onDestinationChange(e.target.value)}
-                        placeholder={sipMode ? "PJSIP/1234 or SIP/extension@domain.com" : "+1234567890"}
-                        className={destinationError ? "border-red-500 focus:border-red-500" : ""}
-                    />
-                    {destinationError && (
-                        <Label className="text-xs text-red-500">
-                            {destinationError}
+                {showDestination && (
+                    <div className="grid gap-2 pt-4 border-t" data-ccp-non-delivered-path="destination">
+                        <Label htmlFor="transfer-destination">轉接目的地</Label>
+                        <Label className="text-xs text-muted-foreground">
+                            tel:+E164（例：tel:+886223456789）或 sip:user@host（例：sip:queue@pbx.example）
                         </Label>
-                    )}
-                    <button
-                        type="button"
-                        className="text-xs text-muted-foreground hover:text-foreground underline w-fit"
-                        onClick={handleSipModeToggle}
-                    >
-                        {sipMode ? "Use phone number instead" : "Use SIP endpoint instead"}
-                    </button>
-                </div>
+                        <Input
+                            id="transfer-destination"
+                            value={destination}
+                            onChange={(e) => onDestinationChange?.(e.target.value)}
+                            placeholder="tel:+886223456789"
+                            className={destinationCheck && !destinationCheck.ok ? "border-red-500" : ""}
+                            {...ro}
+                        />
+                        {destinationCheck && !destinationCheck.ok && (
+                            <Label className="text-xs text-red-500">{destinationCheck.reason}</Label>
+                        )}
+                        {destinationCheck && isPremiumRateCandidate(destinationCheck) && (
+                            <Label className="text-xs text-amber-600">這個號段看起來是高費率號碼，請再確認。</Label>
+                        )}
+                    </div>
+                )}
 
+                {/* ── ① 話術層 ─────────────────────────────────────────────── */}
                 <div className="grid gap-4 pt-4 border-t">
-                    <Label>Pre-Transfer Message</Label>
-                    <Label className="text-xs text-muted-foreground">
-                        Choose whether to play a message before transferring
-                    </Label>
+                    <Label>轉接前的播報</Label>
+                    <Label className="text-xs text-muted-foreground">轉接真人之前要不要先對來電者說一句話</Label>
                     <RadioGroup
-                        value={messageType}
-                        onValueChange={(v) => onMessageTypeChange(v as EndCallMessageType)}
+                        value={form.messageType}
+                        onValueChange={(v) => set("messageType", v as TransferMessageType)}
                         className="space-y-3"
+                        aria-readonly={readOnly || undefined}
+                        data-ccp-readonly={readOnly ? "true" : undefined}
                     >
-                        <label
-                            htmlFor="none"
-                            className="flex items-center space-x-3 p-3 border rounded-lg hover:bg-muted/50 cursor-pointer"
-                        >
-                            <RadioGroupItem value="none" id="none" />
+                        <label htmlFor="transfer-mt-none" className="flex items-center space-x-3 p-3 border rounded-lg hover:bg-muted/50 cursor-pointer">
+                            <RadioGroupItem value="none" id="transfer-mt-none" disabled={readOnly} />
                             <div className="flex-1">
-                                <span className="font-medium">No Message</span>
-                                <p className="text-xs text-muted-foreground">
-                                    Transfer the call immediately without any message
-                                </p>
+                                <span className="font-medium">不播報</span>
+                                <p className="text-xs text-muted-foreground">直接轉接</p>
                             </div>
                         </label>
                         <div className="flex items-start space-x-3 p-3 border rounded-lg hover:bg-muted/50">
-                            <RadioGroupItem value="custom" id="custom" className="mt-1" />
-                            <label htmlFor="custom" className="flex-1 space-y-2 cursor-pointer">
-                                <span className="font-medium">Custom Message</span>
-                                <p className="text-xs text-muted-foreground">
-                                    Play a custom message before transferring
-                                </p>
+                            <RadioGroupItem value="custom" id="transfer-mt-custom" className="mt-1" disabled={readOnly} />
+                            <label htmlFor="transfer-mt-custom" className="flex-1 space-y-2 cursor-pointer">
+                                <span className="font-medium">播報文字</span>
+                                <p className="text-xs text-muted-foreground">由語音合成朗讀一段文字</p>
                             </label>
                         </div>
-                        {messageType === "custom" && (
+                        {form.messageType === "custom" && (
                             <div className="pl-8 space-y-2">
                                 <StaticTextWarning />
                                 <Textarea
-                                    value={customMessage}
-                                    onChange={(e) => onCustomMessageChange(e.target.value)}
-                                    placeholder="e.g., Please hold while I transfer your call."
+                                    aria-label="轉接前播報文字"
+                                    value={form.customMessage}
+                                    onChange={(e) => set("customMessage", e.target.value)}
+                                    placeholder="例：好的，正在為您轉接真人客服，請稍候。"
                                     rows={2}
+                                    {...ro}
                                 />
                             </div>
                         )}
                         <div className="flex items-start space-x-3 p-3 border rounded-lg hover:bg-muted/50">
-                            <RadioGroupItem value="audio" id="audio" className="mt-1" />
-                            <label htmlFor="audio" className="flex-1 space-y-2 cursor-pointer">
-                                <span className="font-medium">Pre-recorded Audio</span>
-                                <p className="text-xs text-muted-foreground">
-                                    Play a pre-recorded audio file before transferring
-                                </p>
+                            <RadioGroupItem value="audio" id="transfer-mt-audio" className="mt-1" disabled={readOnly} />
+                            <label htmlFor="transfer-mt-audio" className="flex-1 space-y-2 cursor-pointer">
+                                <span className="font-medium">播放錄音</span>
+                                <p className="text-xs text-muted-foreground">播放一段預先錄好的音檔</p>
                             </label>
                         </div>
-                        {messageType === "audio" && (
+                        {form.messageType === "audio" && (
                             <div className="pl-8">
                                 <RecordingSelect
-                                    value={audioRecordingId}
-                                    onChange={onAudioRecordingIdChange}
+                                    value={form.audioRecordingId}
+                                    onChange={(id) => set("audioRecordingId", id)}
                                     recordings={recordings}
                                 />
                             </div>
@@ -207,29 +227,302 @@ export function TransferCallToolConfig({
                 </div>
 
                 <div className="grid gap-2 pt-4 border-t">
-                    <Label>Transfer Timeout</Label>
+                    <Label htmlFor="transfer-failed-message">轉接失敗時的說明 <span className="text-red-500">*</span></Label>
                     <Label className="text-xs text-muted-foreground">
-                        Maximum time to wait for destination to answer (5-120 seconds)
+                        真人沒有接起時來電者聽到的話。必填——來電者不能聽到一片安靜。
+                    </Label>
+                    <Textarea
+                        id="transfer-failed-message"
+                        value={form.transferFailedMessage}
+                        onChange={(e) => set("transferFailedMessage", e.target.value)}
+                        rows={2}
+                        aria-invalid={problemFor(problems, "transferFailedMessage") ? true : undefined}
+                        {...ro}
+                    />
+                    {problemFor(problems, "transferFailedMessage") && (
+                        <Label className="text-xs text-red-500">{problemFor(problems, "transferFailedMessage")}</Label>
+                    )}
+                </div>
+
+                <div className="grid gap-2">
+                    <Label htmlFor="transfer-unavailable-message">真人無法接聽時的說明 <span className="text-red-500">*</span></Label>
+                    <Label className="text-xs text-muted-foreground">
+                        隊列不健康（無人上線、系統異常）時來電者聽到的話。必填。
+                    </Label>
+                    <Textarea
+                        id="transfer-unavailable-message"
+                        value={form.transferUnavailableMessage}
+                        onChange={(e) => set("transferUnavailableMessage", e.target.value)}
+                        rows={2}
+                        aria-invalid={problemFor(problems, "transferUnavailableMessage") ? true : undefined}
+                        {...ro}
+                    />
+                    {problemFor(problems, "transferUnavailableMessage") && (
+                        <Label className="text-xs text-red-500">{problemFor(problems, "transferUnavailableMessage")}</Label>
+                    )}
+                </div>
+
+                <div className="grid gap-2">
+                    <Label htmlFor="transfer-announce-limit">無法接聽時的播報次數上限</Label>
+                    <Label className="text-xs text-muted-foreground">
+                        同一通電話最多播報幾次「無法接聽」後就結束（{limitMin}–{limitMax}）。留空＝用系統預設。
                     </Label>
                     <Input
+                        id="transfer-announce-limit"
                         type="number"
-                        value={timeout ?? 30}
-                        onChange={(e) => {
-                            const value = parseInt(e.target.value) || 30;
-                            // Clamp value between 5 and 120 seconds
-                            const clampedValue = Math.min(Math.max(value, 5), 120);
-                            onTimeoutChange(clampedValue);
-                        }}
-                        placeholder="30"
-                        min="5"
-                        max="120"
+                        min={limitMin}
+                        max={limitMax}
+                        step={1}
                         className="w-32"
+                        value={form.unavailableAnnounceLimit ?? ""}
+                        onChange={(e) => {
+                            const raw = e.target.value;
+                            set("unavailableAnnounceLimit", raw === "" ? null : Number(raw));
+                        }}
+                        aria-invalid={problemFor(problems, "unavailableAnnounceLimit") ? true : undefined}
+                        {...ro}
                     />
+                    {problemFor(problems, "unavailableAnnounceLimit") && (
+                        <Label className="text-xs text-red-500">{problemFor(problems, "unavailableAnnounceLimit")}</Label>
+                    )}
+                </div>
+
+                <div className="grid gap-2 pt-4 border-t">
+                    <Label>非營業時間的行為</Label>
                     <Label className="text-xs text-muted-foreground">
-                        Default: 30 seconds
+                        依下方營業時間表判定為非營業時間時，來電者要求真人怎麼處理。未設定＝回到 AI 繼續服務。
                     </Label>
+                    <Select
+                        value={form.afterHoursAction || "__unset"}
+                        onValueChange={(v) => set("afterHoursAction", v === "__unset" ? "" : (v as AfterHoursAction))}
+                        disabled={readOnly}
+                    >
+                        <SelectTrigger aria-label="非營業時間的行為" data-ccp-readonly={readOnly ? "true" : undefined}>
+                            <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                            <SelectItem value="__unset">未設定（回到 AI）</SelectItem>
+                            {CCP_TRANSFER_AFTER_HOURS_ACTIONS.map((a) => (
+                                <SelectItem key={a} value={a}>{AFTER_HOURS_LABELS[a]}</SelectItem>
+                            ))}
+                        </SelectContent>
+                    </Select>
+                    {form.afterHoursAction === "alternate_queue" && (
+                        <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded p-2">
+                            替代隊列的目的地由部署層供給（{DEPLOYMENT_KEY_LABELS.alternateDestination}），
+                            不在此設定；部署層未供給時執行期會降級為回到 AI。
+                        </p>
+                    )}
+                </div>
+
+                <div className="grid gap-2">
+                    <Label htmlFor="transfer-after-hours-message">非營業時間的說明</Label>
+                    <Label className="text-xs text-muted-foreground">非營業時間來電者要求真人時聽到的話。留空＝用系統預設句。</Label>
+                    <Textarea
+                        id="transfer-after-hours-message"
+                        value={form.afterHoursMessage}
+                        onChange={(e) => set("afterHoursMessage", e.target.value)}
+                        rows={2}
+                        {...ro}
+                    />
+                </div>
+
+                {/* ── ② 營業時間表 ──────────────────────────────────────────── */}
+                <ScheduleEditor
+                    schedule={form.schedule}
+                    onChange={(s) => set("schedule", s)}
+                    readOnly={readOnly}
+                    problems={problems}
+                />
+
+                <div className="grid gap-2 pt-4 border-t">
+                    <Label htmlFor="transfer-timeout">等待接聽秒數（本部署不使用）</Label>
+                    <Label className="text-xs text-muted-foreground" id="transfer-timeout-why">
+                        本部署以 LiveKit 冷轉接送出 REFER 後即離線，不等待目的地接聽，故此值不生效。
+                        這裡如實顯示現值，存檔會原樣帶回（整份取代），但無法在此調整。
+                    </Label>
+                    <Input
+                        id="transfer-timeout"
+                        type="number"
+                        className="w-32"
+                        value={form.timeout}
+                        readOnly
+                        aria-readonly
+                        aria-describedby="transfer-timeout-why"
+                        data-ccp-readonly="true"
+                        title="LiveKit 冷轉接不使用此值"
+                        onChange={() => undefined}
+                    />
+                </div>
+
+                {/* ── ③ 部署層唯讀區塊 ─────────────────────────────────────── */}
+                <div className="grid gap-2 pt-4 border-t" data-ccp-deployment-layer="true">
+                    <Label>由部署層供給的設定</Label>
+                    <Label className="text-xs text-muted-foreground">
+                        下列項目不屬於這份工具設定，值不在此顯示、也不由編輯器寫入
+                        （寫入會被內容檢查擋下）。
+                    </Label>
+                    <ul className="text-sm divide-y rounded-lg border">
+                        {CCP_TRANSFER_DEPLOYMENT_KEYS.map((k) => (
+                            <li key={k} className="flex items-center justify-between px-3 py-2" data-ccp-deployment-key={k}>
+                                <span>{DEPLOYMENT_KEY_LABELS[k]}</span>
+                                <span className="text-xs text-muted-foreground" title={k}>由部署層供給</span>
+                            </li>
+                        ))}
+                    </ul>
+                    <p className="text-xs text-muted-foreground">
+                        {role === "implementer"
+                            ? "變更程序：依 deploy/RUNBOOK.md 的轉接設定程序修改部署層環境變數後重新部署；preflight 會對值做形狀與白名單檢查。"
+                            : "需要調整時，請與您的專案窗口提出，由建置單位在部署層變更。"}
+                    </p>
                 </div>
             </CardContent>
         </Card>
+    );
+}
+
+// ── 營業時間表結構化編輯器（task 5.4）────────────────────────────────────
+
+interface ScheduleEditorProps {
+    schedule: WeeklySchedule | null;
+    onChange: (next: WeeklySchedule | null) => void;
+    readOnly: boolean;
+    problems?: FieldProblem[];
+}
+
+function ScheduleEditor({ schedule, onChange, readOnly, problems }: ScheduleEditorProps) {
+    const enabled = schedule !== null;
+    const ro = ccpReadOnlyFieldProps(readOnly);
+    const tzProblem = problemFor(problems, "schedule.tz");
+
+    const update = (patch: Partial<WeeklySchedule>) => onChange({ ...(schedule ?? {}), ...patch });
+    const setSegments = (day: DayKey, segs: Segment[]) => update({ [day]: segs });
+
+    return (
+        <div className="grid gap-3 pt-4 border-t" data-ccp-schedule-editor="true">
+            <div className="flex items-center justify-between">
+                <div>
+                    <Label>營業時間表</Label>
+                    <Label className="block text-xs text-muted-foreground">
+                        未設定＝全天候可轉接。設定後，表外時間走上方「非營業時間的行為」。
+                    </Label>
+                </div>
+                {enabled ? (
+                    <Button type="button" variant="outline" size="sm" onClick={() => onChange(null)} {...ccpDisabledProps(readOnly)}>
+                        清除時間表
+                    </Button>
+                ) : (
+                    <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        onClick={() => onChange({ tz: "Asia/Taipei", mon: [["09:00", "18:00"]] })}
+                        {...ccpDisabledProps(readOnly)}
+                    >
+                        設定時間表
+                    </Button>
+                )}
+            </div>
+
+            {enabled && (
+                <div className="grid gap-3 rounded-lg border p-3">
+                    <div className="grid gap-1">
+                        <Label htmlFor="transfer-schedule-tz">時區</Label>
+                        <Select value={schedule.tz ?? "__unset"} onValueChange={(v) => update({ tz: v === "__unset" ? undefined : v })} disabled={readOnly}>
+                            <SelectTrigger id="transfer-schedule-tz" className="w-72" aria-invalid={tzProblem ? true : undefined} data-ccp-readonly={readOnly ? "true" : undefined}>
+                                <SelectValue placeholder="選擇時區" />
+                            </SelectTrigger>
+                            <SelectContent className="max-h-72">
+                                <SelectItem value="__unset">（未設定，用系統預設）</SelectItem>
+                                {CCP_TZ_NAMES.map((tz) => (
+                                    <SelectItem key={tz} value={tz}>{tz}</SelectItem>
+                                ))}
+                            </SelectContent>
+                        </Select>
+                        {tzProblem && <Label className="text-xs text-red-500">{tzProblem}</Label>}
+                    </div>
+
+                    {DAY_KEYS.map((day) => {
+                        const segs = schedule[day] ?? [];
+                        const defined = schedule[day] !== undefined;
+                        return (
+                            <div key={day} className="grid gap-1" data-ccp-schedule-day={day}>
+                                <div className="flex items-center gap-3">
+                                    <span className="w-10 text-sm font-medium">{DAY_LABELS[day]}</span>
+                                    {!defined && <span className="text-xs text-muted-foreground">未列出（依執行層＝當天不營業）</span>}
+                                    {defined && segs.length === 0 && <span className="text-xs text-muted-foreground">當天休息</span>}
+                                    <Button
+                                        type="button"
+                                        variant="ghost"
+                                        size="sm"
+                                        onClick={() => setSegments(day, [...segs, ["09:00", "18:00"]])}
+                                        {...ccpDisabledProps(readOnly)}
+                                    >
+                                        ＋ 時段
+                                    </Button>
+                                    {defined && (
+                                        <Button
+                                            type="button"
+                                            variant="ghost"
+                                            size="sm"
+                                            onClick={() => {
+                                                const next = { ...schedule };
+                                                delete next[day];
+                                                onChange(next);
+                                            }}
+                                            {...ccpDisabledProps(readOnly)}
+                                        >
+                                            移除整天
+                                        </Button>
+                                    )}
+                                </div>
+                                {segs.map((seg, i) => {
+                                    const problem = problemFor(problems, `schedule.${day}[${i}]`);
+                                    return (
+                                        <div key={i} className="ml-10 flex flex-wrap items-center gap-2" data-ccp-schedule-segment={`${day}[${i}]`}>
+                                            <Input
+                                                type="time"
+                                                step={60}
+                                                className="w-32"
+                                                aria-label={`${DAY_LABELS[day]} 第 ${i + 1} 段開始`}
+                                                value={seg[0]}
+                                                onChange={(e) => setSegments(day, segs.map((s, j) => (j === i ? [e.target.value, s[1]] : s)))}
+                                                aria-invalid={problem ? true : undefined}
+                                                {...ro}
+                                            />
+                                            <span className="text-sm">到</span>
+                                            <Input
+                                                type="time"
+                                                step={60}
+                                                className="w-32"
+                                                aria-label={`${DAY_LABELS[day]} 第 ${i + 1} 段結束`}
+                                                value={seg[1]}
+                                                onChange={(e) => setSegments(day, segs.map((s, j) => (j === i ? [s[0], e.target.value] : s)))}
+                                                aria-invalid={problem ? true : undefined}
+                                                {...ro}
+                                            />
+                                            {segmentWrapsMidnight(seg) && (
+                                                <span className="text-xs text-amber-700" data-ccp-wraps-midnight="true">跨午夜（到隔天）</span>
+                                            )}
+                                            <Button
+                                                type="button"
+                                                variant="ghost"
+                                                size="sm"
+                                                aria-label={`移除 ${DAY_LABELS[day]} 第 ${i + 1} 段`}
+                                                onClick={() => setSegments(day, segs.filter((_, j) => j !== i))}
+                                                {...ccpDisabledProps(readOnly)}
+                                            >
+                                                ×
+                                            </Button>
+                                            {problem && <Label className="basis-full text-xs text-red-500">{problem}</Label>}
+                                        </div>
+                                    );
+                                })}
+                            </div>
+                        );
+                    })}
+                </div>
+            )}
+        </div>
     );
 }

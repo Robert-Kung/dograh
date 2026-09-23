@@ -91,68 +91,6 @@ export const CCP_TOOL_TYPE_REQUIRED_KEYS: Readonly<Partial<Record<ToolCategory, 
     transfer_call: ['transferFailedMessage', 'transferUnavailableMessage'],
 };
 
-export interface CcpToolTypeAdmission {
-    /** 這個類型能不能在「建立工具」對話框裡選。 */
-    selectable: boolean;
-    /** 不能選（或選了也會失敗）的原因，繁中，直接上畫面。空字串＝沒有話要說。 */
-    reason: string;
-}
-
-/**
- * 一個工具類型在本部署的建立面待遇。
- *
- * **三種結果，不是兩種**：
- *   - 封鎖類型 → 不可選，原因是「本部署未開放這個類型」。
- *   - 允許但**預設 definition 湊不齊必要鍵**（今天只有 `transfer_call`）
- *     → 也不可選，但原因完全不同：能力有、只是不從這裡建。
- *     N3 要求這一格要**標明**，因為它是最容易被讀成 bug 的一格
- *     （UI 讓你選、送出去卻必然 403）。
- *   - 其餘允許類型 → 可選。
- *
- * **不寫死數字**（gate L-2／T16）：`TOOL_CATEGORIES` 現為 7 筆、其中 `native`
- * 與 `integration` 上游已帶 `disabled`，任何「五種／三種」式的敘述都對不上，
- * 且上游一改就錯。判準是集合運算，不是計數。
- */
-export function ccpToolTypeAdmission(category: ToolCategory): CcpToolTypeAdmission {
-    if (CCP_BLOCKED_TOOL_TYPES.includes(category)) {
-        return {
-            selectable: false,
-            reason: '本部署未開放這個工具類型：交付範圍是話術與轉接設定的維護。',
-        };
-    }
-    // W3b（母 repo review F-10）：單例型別**先於**必要鍵推導。表單補齊後
-    // 「必要欄位新建時湊不齊」對 transfer_call 已不成立，真理由是 R-AE。
-    if (CCP_SINGLETON_TOOL_TYPES.includes(category)) {
-        return {
-            selectable: false,
-            reason:
-                '本部署只能有一個轉接工具，且由建置程序建立；'
-                + '話術與營業時間請到既有的轉接工具頁面調整。',
-        };
-    }
-    const requiredKeys = CCP_TOOL_TYPE_REQUIRED_KEYS[category];
-    if (requiredKeys && requiredKeys.length > 0) {
-        return {
-            selectable: false,
-            reason:
-                `${category} 的必要欄位（${requiredKeys.join('、')}）新建時湊不齊，`
-                + '送出會被內容檢查擋下。'
-                + '轉接工具已由建置單位配置好，需要調整請與您的專案窗口提出。',
-        };
-    }
-    return { selectable: true, reason: '' };
-}
-
-/**
- * 建立對話框的預設類型（task 4.1b）。
- *
- * 上游預設是 `http_api`，而它在 `blocked_tool_types` 內——只做「不可選」會留下
- * 一個**當前值即為 disabled 項**的 Select（選單打開全灰、關起來卻顯示一個
- * 選不回去的值）。取第一個 `selectable` 的類型，**不硬編**：正本改了就跟著改，
- * 而 preflight 的比對保證正本與本檔同步。
- */
-export const CCP_DEFAULT_TOOL_CATEGORY: ToolCategory =
-    CCP_ALLOWED_TOOL_TYPES.find((c) => ccpToolTypeAdmission(c).selectable) ?? 'end_call';
 
 // ── W3b：transfer 表單的欄位層政策副本（母 repo tasks 3.4）──────────────────
 //
@@ -299,3 +237,66 @@ export const CCP_TZ_NAMES = [
     'Pacific/Tarawa', 'Pacific/Tongatapu', 'Pacific/Wake', 'Pacific/Wallis', 'Pacific/Yap',
     'UTC', 'WET', 'localtime',
 ] as const;
+
+export interface CcpToolTypeAdmission {
+    /** 這個類型能不能在「建立工具」對話框裡選。 */
+    selectable: boolean;
+    /** 不能選（或選了也會失敗）的原因，繁中，直接上畫面。空字串＝沒有話要說。 */
+    reason: string;
+}
+
+/**
+ * 一個工具類型在本部署的建立面待遇。
+ *
+ * **三種結果，不是兩種**：
+ *   - 封鎖類型 → 不可選，原因是「本部署未開放這個類型」。
+ *   - 允許但**預設 definition 湊不齊必要鍵**（今天只有 `transfer_call`）
+ *     → 也不可選，但原因完全不同：能力有、只是不從這裡建。
+ *     N3 要求這一格要**標明**，因為它是最容易被讀成 bug 的一格
+ *     （UI 讓你選、送出去卻必然 403）。
+ *   - 其餘允許類型 → 可選。
+ *
+ * **不寫死數字**（gate L-2／T16）：`TOOL_CATEGORIES` 現為 7 筆、其中 `native`
+ * 與 `integration` 上游已帶 `disabled`，任何「五種／三種」式的敘述都對不上，
+ * 且上游一改就錯。判準是集合運算，不是計數。
+ */
+export function ccpToolTypeAdmission(category: ToolCategory): CcpToolTypeAdmission {
+    if (CCP_BLOCKED_TOOL_TYPES.includes(category)) {
+        return {
+            selectable: false,
+            reason: '本部署未開放這個工具類型：交付範圍是話術與轉接設定的維護。',
+        };
+    }
+    // W3b（母 repo review F-10）：單例型別**先於**必要鍵推導。表單補齊後
+    // 「必要欄位新建時湊不齊」對 transfer_call 已不成立，真理由是 R-AE。
+    if (CCP_SINGLETON_TOOL_TYPES.includes(category)) {
+        return {
+            selectable: false,
+            reason:
+                '本部署只能有一個轉接工具，且由建置程序建立；'
+                + '話術與營業時間請到既有的轉接工具頁面調整。',
+        };
+    }
+    const requiredKeys = CCP_TOOL_TYPE_REQUIRED_KEYS[category];
+    if (requiredKeys && requiredKeys.length > 0) {
+        return {
+            selectable: false,
+            reason:
+                `${category} 的必要欄位（${requiredKeys.join('、')}）新建時湊不齊，`
+                + '送出會被內容檢查擋下。'
+                + '轉接工具已由建置單位配置好，需要調整請與您的專案窗口提出。',
+        };
+    }
+    return { selectable: true, reason: '' };
+}
+
+/**
+ * 建立對話框的預設類型（task 4.1b）。
+ *
+ * 上游預設是 `http_api`，而它在 `blocked_tool_types` 內——只做「不可選」會留下
+ * 一個**當前值即為 disabled 項**的 Select（選單打開全灰、關起來卻顯示一個
+ * 選不回去的值）。取第一個 `selectable` 的類型，**不硬編**：正本改了就跟著改，
+ * 而 preflight 的比對保證正本與本檔同步。
+ */
+export const CCP_DEFAULT_TOOL_CATEGORY: ToolCategory =
+    CCP_ALLOWED_TOOL_TYPES.find((c) => ccpToolTypeAdmission(c).selectable) ?? 'end_call';
