@@ -18,8 +18,10 @@
  *
  * 本檔只決定畫面上的即時提示；控制面是閘門的 `constrained_values.destination`
  * （`refer_uri` kind，同一份 `sip_uri.py`）。交付態下 destination 欄位根本不畫
- * （部署層六欄，`CCP_TRANSFER_DEPLOYMENT_KEYS`），本檔只在 fork 的非 CCP 路徑生效；
- * 仍做，因為 `ccp#1` 是為 fork 的其他使用者而開。漂移登記於母 repo RESIDUAL-RISKS。
+ * （部署層六欄，`CCP_TRANSFER_DEPLOYMENT_KEYS`）。**本檔目前無執行期呼叫點**（母 repo review
+ * F-9／ui review M-7：原本留給「非 CCP 路徑」的 `showDestination` 分支畫的是六欄之一，一旦啟用即破
+ * D2，已移除）——它是 `ccp#1` 的參考實作，守衛只有向量測試。日後 fork 若要畫 destination，
+ * 從這裡接。漂移登記於母 repo RESIDUAL-RISKS（R-AO）。
  *
  * ## 理由碼**不**對齊
  *

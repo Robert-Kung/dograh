@@ -11,8 +11,11 @@ import { CCP_TRANSFER_DEPLOYMENT_KEYS } from "../src/lib/ccp/feature-scope.ts";
 import {
     buildTransferCallConfig,
     formStateFromConfig,
+    segmentIsEmpty,
     segmentWrapsMidnight,
+    toolFunctionName,
     validateScriptLayer,
+    validateToolName,
 } from "../src/lib/ccp/transfer-call-config.ts";
 
 let passed = 0;
@@ -128,6 +131,33 @@ check("反例：{...spread} 回讀會帶回六欄——本 builder 不採用那�
     assert.ok(CCP_TRANSFER_DEPLOYMENT_KEYS.every((k) => k in spread), "spread 形狀確實含六欄（這正是不採用的理由）");
     const body = buildTransferCallConfig(formStateFromConfig(spread as never));
     assert.ok(CCP_TRANSFER_DEPLOYMENT_KEYS.every((k) => !(k in body)));
+});
+
+check("有日鍵無 tz → 指名 schedule.tz（security H-2）；空物件放行", () => {
+    const s = formStateFromConfig(READBACK as never);
+    s.schedule = { mon: [["09:00", "18:00"]] } as never;
+    assert.ok(validateScriptLayer(s).some((p) => p.field === "schedule.tz"));
+    s.schedule = {} as never;
+    assert.deepEqual(validateScriptLayer(s), []);
+});
+
+check("不認得的 schedule 原樣保留並指名（review F-2），不再丟成 {}", () => {
+    const s = formStateFromConfig({ ...READBACK, schedule: { tz: "Asia/Taipei", mon: [["09:00", "18:00"]], holidays: ["2026-01-01"] } } as never);
+    assert.ok("holidays" in (s.schedule as object));
+    assert.ok(validateScriptLayer(s).some((p) => p.field === "schedule.holidays"));
+    const legacy = formStateFromConfig({ ...READBACK, schedule: "09-18" } as never);
+    assert.ok(validateScriptLayer(legacy).some((p) => p.field === "schedule"));
+});
+
+check("等值段是空段不是跨午夜（ui H-3）", () => {
+    assert.ok(segmentIsEmpty(["09:00", "09:00"]) && !segmentWrapsMidnight(["09:00", "09:00"]));
+});
+
+check("工具名稱正規化（security H-1）：中文塌空即擋；含英數字放行", () => {
+    assert.equal(toolFunctionName("轉接真人客服"), "");
+    assert.equal(toolFunctionName("Transfer To Human"), "transfer_to_human");
+    assert.ok(validateToolName("轉接真人客服").length === 1);
+    assert.deepEqual(validateToolName("transfer_to_human_queue"), []);
 });
 
 console.log(`${passed} passed`);

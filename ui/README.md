@@ -42,3 +42,7 @@ docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD/..:/dograh" -w 
    的 `decision`；指向 **deny** 路由者列於 PR 描述（不移除——閘門仍拒，tree-shaking 不引用即不進 bundle）。
 3. 既有匯出簽名若有變動，逐呼叫點修正；`next build` 綠才算完成。
 4. 交付態工具型別逐鍵對照：`TransferCallConfig` 應與 `api/schemas/tool.py` 的欄位數一致（W3b 時為 16 鍵）。
+
+**本 fork 對 `tsconfig.json` 的唯一變更**：`allowImportingTsExtensions: true`（W3b）。理由：`scripts/*.test.mts`
+以 node 直接跑 `src/lib/ccp/*.ts`，node 的 ESM 解析要求相對 import 帶副檔名；`noEmit: true` 已滿足其前提，
+`next build` 不受影響。rebase 時若被上游 tsconfig 覆蓋，三支 node 測試會以 `ERR_MODULE_NOT_FOUND` 紅。

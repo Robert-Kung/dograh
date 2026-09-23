@@ -1,5 +1,7 @@
 "use client";
 
+import { useState } from "react";
+
 // customer-center-platform fork（母 repo W3b tasks 5.3／5.4／5.5／5.6）：
 // transfer 工具表單重寫——**話術層 10 鍵全畫、部署層六欄只說明不畫**。
 //
@@ -15,7 +17,6 @@
 // 送出形狀由 `lib/ccp/transfer-call-config.ts` 的 builder 負責（本元件只管畫面與狀態）。
 // 可及性契約沿用 W2d：`data-ccp-readonly`／`data-ccp-disabled` ＋ `aria-describedby`
 // 指得到（頁面級說明條）或自帶 `title`。
-
 import type { RecordingResponseSchema } from "@/client/types.gen";
 import { RecordingSelect, StaticTextWarning } from "@/components/flow/TextOrAudioInput";
 import { Button } from "@/components/ui/button";
@@ -41,6 +42,7 @@ import {
     type Segment,
     segmentIsEmpty,
     segmentWrapsMidnight,
+    toolFunctionName,
     type TransferFormState,
     type TransferMessageType,
     type WeeklySchedule,
@@ -120,8 +122,24 @@ export function TransferCallToolConfig({
             <CardContent className="space-y-6">
                 <div className="grid gap-2">
                     <Label htmlFor="transfer-name">工具名稱</Label>
-                    <Label className="text-xs text-muted-foreground">給 AI 辨識用的名稱</Label>
-                    <Input id="transfer-name" value={name} onChange={(e) => onNameChange(e.target.value)} {...ro} />
+                    <Label className="text-xs text-muted-foreground">
+                        給 AI 辨識用的名稱。AI 端只保留 a-z、0-9 與底線——請用英數字命名；中文會被整個去掉。
+                    </Label>
+                    <Input
+                        id="transfer-name"
+                        value={name}
+                        onChange={(e) => onNameChange(e.target.value)}
+                        aria-invalid={problemFor(problems, "name") ? true : undefined}
+                        aria-describedby={problemFor(problems, "name") ? "transfer-name-error" : "transfer-name-fn"}
+                        {...ro}
+                    />
+                    {/* security review H-1：就地顯示 AI 實際看到的 function name；為空時前端擋下（閘門同批擋）。 */}
+                    <Label id="transfer-name-fn" className={`text-xs ${toolFunctionName(name) ? "text-muted-foreground" : "text-red-600"}`}>
+                        AI 實際看到的名稱：{toolFunctionName(name) ? <code>{toolFunctionName(name)}</code> : "（空——AI 將叫不到這支工具）"}
+                    </Label>
+                    {problemFor(problems, "name") && (
+                        <Label id="transfer-name-error" role="alert" className="text-xs text-red-500">{problemFor(problems, "name")}</Label>
+                    )}
                 </div>
 
                 <div className="grid gap-2">
@@ -139,7 +157,9 @@ export function TransferCallToolConfig({
                 {/* ── ① 話術層 ─────────────────────────────────────────────── */}
                 <div className="grid gap-4 pt-4 border-t">
                     <Label>轉接前的播報</Label>
-                    <Label className="text-xs text-muted-foreground">轉接真人之前要不要先對來電者說一句話</Label>
+                    <Label className="text-xs text-muted-foreground">
+                        轉接真人之前要不要先對來電者說一句話。切換播報方式後存檔，另一種方式的內容（文字或錄音）不會保留。
+                    </Label>
                     <RadioGroup
                         value={form.messageType}
                         onValueChange={(v) => set("messageType", v as TransferMessageType)}
@@ -384,6 +404,15 @@ interface ScheduleEditorProps {
 
 function ScheduleEditor({ schedule, onChange, readOnly, problems, notice, ro }: ScheduleEditorProps) {
     const enabled = schedule !== null;
+    // review F-18：485 個時區一次全畫沒有搜尋；加一個純前端篩選（不改判準，選項仍只來自快照）。
+    const [tzFilter, setTzFilter] = useState("");
+    const tzOptions = tzFilter
+        ? CCP_TZ_NAMES.filter((tz) => tz.toLowerCase().includes(tzFilter.toLowerCase()))
+        : CCP_TZ_NAMES;
+    // review F-2：不認得的鍵（舊形狀、上游新增子鍵）——畫面上明說，不靜默丟。
+    const unknownKeys = enabled && schedule && typeof schedule === "object"
+        ? Object.keys(schedule).filter((k) => k !== "tz" && !(DAY_KEYS as readonly string[]).includes(k))
+        : [];
     const tzProblem = problemFor(problems, "schedule.tz");
 
     const update = (patch: Partial<WeeklySchedule>) => onChange({ ...(schedule ?? {}), ...patch });
@@ -418,20 +447,41 @@ function ScheduleEditor({ schedule, onChange, readOnly, problems, notice, ro }: 
 
             {enabled && (
                 <div className="grid gap-3 rounded-lg border p-3">
+                    {unknownKeys.length > 0 && (
+                        <p className="text-xs text-red-600 bg-red-50 border border-red-200 rounded p-2" role="alert" data-ccp-schedule-unknown-keys="true">
+                            既有的營業時間表含本部署不認得的鍵：{unknownKeys.map((k) => k.slice(0, 40)).join("、")}。
+                            這份表原樣保留，存檔會被擋下；請「清除時間表」後重新設定，或先自版控移除這些鍵。
+                        </p>
+                    )}
                     <div className="grid gap-1">
                         <Label htmlFor="transfer-schedule-tz">時區</Label>
-                        <Select value={schedule.tz ?? "__unset"} onValueChange={(v) => update({ tz: v === "__unset" ? undefined : v })} disabled={readOnly}>
+                        <Input
+                            aria-label="篩選時區"
+                            placeholder="輸入關鍵字篩選（例：Taipei、Tokyo）"
+                            className="w-72"
+                            value={tzFilter}
+                            onChange={(e) => setTzFilter(e.target.value)}
+                            {...ro}
+                        />
+                        <Select value={schedule.tz ?? ""} onValueChange={(v) => update({ tz: v })} disabled={readOnly}>
                             <SelectTrigger id="transfer-schedule-tz" className="w-72" aria-invalid={tzProblem ? true : undefined} aria-describedby={readOnly ? notice : undefined} data-ccp-readonly={readOnly ? "true" : undefined}>
                                 <SelectValue placeholder="選擇時區" />
                             </SelectTrigger>
                             <SelectContent className="max-h-72">
-                                <SelectItem value="__unset">（未設定，用系統預設）</SelectItem>
-                                {CCP_TZ_NAMES.map((tz) => (
+                                {schedule.tz && !tzOptions.includes(schedule.tz as (typeof CCP_TZ_NAMES)[number]) && (
+                                    <SelectItem value={schedule.tz}>{schedule.tz}</SelectItem>
+                                )}
+                                {tzOptions.map((tz) => (
                                     <SelectItem key={tz} value={tz}>{tz}</SelectItem>
                                 ))}
                             </SelectContent>
                         </Select>
-                        {tzProblem && <Label className="text-xs text-red-500">{tzProblem}</Label>}
+                        {tzProblem && <Label className="text-xs text-red-500" role="alert">{tzProblem}</Label>}
+                        {!schedule.tz && (
+                            <Label className="text-xs text-red-600" data-ccp-schedule-no-tz="true">
+                                尚未指定時區：執行層會以 UTC 判讀整張表（沒有「系統預設」），存檔會被擋下。
+                            </Label>
+                        )}
                     </div>
 
                     {/* ui review M-1：執行層（business_hours.py）——沒有任何一天列出＝整份等同未設定（全天候

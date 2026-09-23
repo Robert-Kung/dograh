@@ -38,12 +38,25 @@ import {
 } from './feature-scope.ts';
 
 export type DeploymentKeys = (typeof CCP_TRANSFER_DEPLOYMENT_KEYS)[number] & keyof TransferCallConfig;
+/**
+ * 話術層 10 鍵的**手寫**清單（母 repo review F-3）：原本的斷言用 `keyof ScriptLayer` 去減
+ * `keyof TransferCallConfig`，而 `ScriptLayer` 本身由 `TransferCallConfig` 推導——恆為 `never`、
+ * 零守衛力。手寫清單才是真的錨：上游新增鍵時 `_NoUnmappedKey` 紅（要決定它歸哪一層），
+ * 上游移除鍵時 `_NoStaleKey` 紅。builder 的回傳型別是第二道（漏寫一鍵 TS2741）。
+ */
+export const SCRIPT_KEYS = [
+    'messageType', 'customMessage', 'audioRecordingId', 'timeout', 'schedule',
+    'afterHoursAction', 'afterHoursMessage', 'transferFailedMessage',
+    'transferUnavailableMessage', 'unavailableAnnounceLimit',
+] as const;
+export type ScriptKeys = (typeof SCRIPT_KEYS)[number];
 /** 話術層 10 鍵，每鍵**必出現**（值可為 null）。 */
-export type ScriptLayer = Required<Omit<TransferCallConfig, DeploymentKeys>>;
-// 上游新增任一鍵（重生成後）這裡就編不過——那時要決定它歸哪一層，不是靜默漏送。
-type _Exhaustive = Exclude<keyof TransferCallConfig, DeploymentKeys | keyof ScriptLayer> extends never ? true : never;
-const _exhaustive: _Exhaustive = true;
-void _exhaustive;
+export type ScriptLayer = Required<Pick<TransferCallConfig, ScriptKeys>>;
+type _NoUnmappedKey = Exclude<keyof TransferCallConfig, DeploymentKeys | ScriptKeys> extends never ? true : never;
+type _NoStaleKey = Exclude<ScriptKeys, keyof TransferCallConfig> extends never ? true : never;
+const _noUnmappedKey: _NoUnmappedKey = true;
+const _noStaleKey: _NoStaleKey = true;
+void _noUnmappedKey; void _noStaleKey;
 
 export type AfterHoursAction = (typeof CCP_TRANSFER_AFTER_HOURS_ACTIONS)[number];
 export type TransferMessageType = (typeof CCP_TRANSFER_MESSAGE_TYPES)[number];
@@ -87,7 +100,10 @@ export function formStateFromConfig(config: TransferCallConfig | null | undefine
         customMessage: c.customMessage ?? '',
         audioRecordingId: c.audioRecordingId ?? '',
         timeout: typeof c.timeout === 'number' ? c.timeout : SCHEMA_DEFAULT_TIMEOUT,
-        schedule: isWeeklyScheduleShape(c.schedule) ? (c.schedule as WeeklySchedule) : c.schedule ? { } : null,
+        // review F-2：不認得的形狀（多出的子鍵、舊自由形狀）**原樣保留**而不是丟成 {}——
+        // 丟掉後下一次存檔會送 schedule: null，整份取代 ＋ seed-once ＝ 永久刪除。
+        // 保留後 validateSchedule 會指名 `schedule` 或 `schedule.<key>`，前端擋下存檔。
+        schedule: c.schedule == null ? null : (c.schedule as WeeklySchedule),
         afterHoursAction: (CCP_TRANSFER_AFTER_HOURS_ACTIONS as readonly string[]).includes(c.afterHoursAction ?? '')
             ? (c.afterHoursAction as AfterHoursAction)
             : '',
@@ -96,11 +112,6 @@ export function formStateFromConfig(config: TransferCallConfig | null | undefine
         transferUnavailableMessage: c.transferUnavailableMessage ?? '',
         unavailableAnnounceLimit: typeof c.unavailableAnnounceLimit === 'number' ? c.unavailableAnnounceLimit : null,
     };
-}
-
-function isWeeklyScheduleShape(value: unknown): boolean {
-    if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
-    return Object.keys(value).every((k) => k === 'tz' || (DAY_KEYS as readonly string[]).includes(k));
 }
 
 /**
@@ -134,7 +145,7 @@ function normalizeSchedule(sched: WeeklySchedule): Record<string, unknown> {
 }
 
 export interface FieldProblem {
-    field: keyof TransferFormState | `schedule.${string}`;
+    field: keyof TransferFormState | 'name' | `schedule.${string}`;
     message: string;
 }
 
@@ -143,6 +154,17 @@ export interface FieldProblem {
  * 必填非空（`required_keys`）、兩條列舉（`enum`）、播報次數（`int_range` 1–10）、
  * 週表形狀（`weekly_schedule`：tz ∈ 快照、日鍵、`HH:MM` 段）。`timeout` 不驗。
  */
+/** 上游 `custom_tool.py` 導出 LLM function name 的同一條規則（刻意複本，security H-1）。 */
+export function toolFunctionName(name: string): string {
+    return name.toLowerCase().replace(/[^a-z0-9_]/g, '_').replace(/_+/g, '_').replace(/^_+|_+$/g, '');
+}
+
+export function validateToolName(name: string): FieldProblem[] {
+    return toolFunctionName(name)
+        ? []
+        : [{ field: 'name', message: '工具名稱正規化後為空：AI 端的 function name 只保留 a-z、0-9 與底線，請用英數字命名（例：transfer_to_human_queue）' }];
+}
+
 export function validateScriptLayer(s: TransferFormState): FieldProblem[] {
     const problems: FieldProblem[] = [];
     if (!s.transferFailedMessage.trim()) {
@@ -170,6 +192,9 @@ export function validateScriptLayer(s: TransferFormState): FieldProblem[] {
 
 export function validateSchedule(sched: WeeklySchedule): FieldProblem[] {
     const problems: FieldProblem[] = [];
+    if (!sched || typeof sched !== 'object' || Array.isArray(sched)) {
+        return [{ field: 'schedule', message: '既有的營業時間表不是本部署認得的格式（存檔會被擋下，請清除後重新設定）' }];
+    }
     for (const key of Object.keys(sched)) {
         if (key === 'tz') {
             const tz = sched.tz;
@@ -179,14 +204,22 @@ export function validateSchedule(sched: WeeklySchedule): FieldProblem[] {
             continue;
         }
         if (!(DAY_KEYS as readonly string[]).includes(key)) {
-            problems.push({ field: `schedule.${key}`, message: '未知的星期鍵' });
+            problems.push({ field: `schedule.${key}`, message: `營業時間表含本部署不認得的鍵「${key.slice(0, 40)}」（存檔會被擋下；請清除後重新設定，或先把它自版控移除）` });
             continue;
         }
         const segs = sched[key as DayKey] ?? [];
+        if (!Array.isArray(segs)) {
+            problems.push({ field: `schedule.${key}`, message: '該日的時段不是清單形狀' });
+            continue;
+        }
         segs.forEach((seg, i) => {
             const ok = Array.isArray(seg) && seg.length === 2 && seg.every((t) => typeof t === 'string' && HHMM_RE.test(t));
             if (!ok) problems.push({ field: `schedule.${key}[${i}]`, message: '時段須為兩個 HH:MM（24 小時制）' });
         });
+    }
+    // security review H-2：有任一日鍵就要 tz——執行層缺 tz 時以 UTC 判讀，整張表位移而無告警。
+    if (!sched.tz && DAY_KEYS.some((d) => sched[d] !== undefined)) {
+        problems.push({ field: 'schedule.tz', message: '有營業時段時必須指定時區（未指定時執行層會以 UTC 判讀，整張表會位移）' });
     }
     return problems;
 }

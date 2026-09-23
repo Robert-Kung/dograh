@@ -55,6 +55,7 @@ import {
     formStateFromConfig,
     type TransferFormState,
     validateScriptLayer,
+    validateToolName,
 } from "@/lib/ccp/transfer-call-config";
 
 import {
@@ -332,7 +333,7 @@ export default function ToolDetailPage() {
         } else if (tool.category === "transfer_call") {
             // W3b task 5.5：舊的 E.164／PJSIP 正則副本已刪（ccp#1）——交付態不畫 destination，
             // 話術層每一項判定在閘門都有對應規則；這裡只是先擋、並指名欄位。
-            const problems = validateScriptLayer(transferForm);
+            const problems = [...validateToolName(name), ...validateScriptLayer(transferForm)];
             setTransferProblems(problems);
             if (problems.length > 0) {
                 setSaveSuccess(false);
@@ -686,7 +687,7 @@ const data = await response.json();`;
                                 setTransferForm(next);
                                 if (transferProblems.length) {
                                     // ui review M-2：修正後即時重算；全部修完時連紅橫幅一起清。
-                                    const remaining = validateScriptLayer(next);
+                                    const remaining = [...validateToolName(name), ...validateScriptLayer(next)];
                                     setTransferProblems(remaining);
                                     if (remaining.length === 0) setError(null);
                                 }
