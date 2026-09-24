@@ -13,7 +13,8 @@
     "lint:lead-flow": "bash ../../user_onboarding/scripts/check_lead_flow.sh",
     "test:ccp-access": "node scripts/ccp-access-rules.test.mts",
     "test:refer-uri": "node scripts/refer-uri-vectors.test.mts",
-    "test:transfer-config": "node scripts/transfer-call-config.test.mts"
+    "test:transfer-config": "node scripts/transfer-call-config.test.mts",
+    "test:ccp-ui-denied": "node scripts/ccp-ui-denied.test.mts"
   },
   "dependencies": {
     "@dagrejs/dagre": "^1.1.4",
