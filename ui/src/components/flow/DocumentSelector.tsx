@@ -50,22 +50,16 @@ export const DocumentSelector = ({
     };
 
     if (completedDocuments.length === 0) {
+        // customer-center-platform fork（母 repo W4a D7）：空狀態誠實說明本部署未啟用
+        // 知識庫。上游文案「Upload documents to the knowledge base first」與說明列的
+        // 「Learn more」外連一併移除——上傳頁在閘門拒絕清單內，那句話指向一條不存在
+        // 的路；「尚未上傳」式措辭會讓人以為可以自己上傳。
         return (
             <div className="space-y-2">
-                {showLabel && (
-                    <>
-                        <Label>{label}</Label>
-                        {description && (
-                            <Label className="text-xs text-muted-foreground">
-                            {description}{" "}
-                            <a href={KNOWLEDGE_BASE_DOC_URL} target="_blank" rel="noopener noreferrer" className="underline">Learn more</a>
-                        </Label>
-                        )}
-                    </>
-                )}
+                {showLabel && <Label>{label}</Label>}
                 <div className="border rounded-md p-4 space-y-3">
-                    <div className="text-sm text-muted-foreground text-center">
-                        No documents available. Upload documents to the knowledge base first.
+                    <div className="text-sm text-muted-foreground text-center" lang="zh-Hant">
+                        本部署未啟用知識庫。如需使用，請洽專案窗口。
                     </div>
                     {/* customer-center-platform fork（母 repo W2d task 3.6）：
                         上游的「Upload Documents」連到 `/files`，該頁在閘門的 UI 拒絕

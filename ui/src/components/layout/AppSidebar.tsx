@@ -3,16 +3,17 @@
 import type { Team } from "@stackframe/stack";
 import {
   AlertTriangle,
-  ArrowUpCircle,
   AudioLines,
   Brain,
   ChevronLeft,
   ChevronRight,
   CircleDollarSign,
   Database,
+  ExternalLink,
   FileText,
   Home,
   Key,
+  LayoutDashboard,
   LogOut,
   type LucideIcon,
   Megaphone,
@@ -24,7 +25,7 @@ import {
 } from "lucide-react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import React, { useRef } from "react";
+import React, { useEffect, useRef, useState } from "react";
 
 import { BrandLogo } from "@/components/BrandLogo";
 import ThemeToggle from "@/components/ThemeSwitcher";
@@ -52,11 +53,15 @@ import {
   useSidebar,
 } from "@/components/ui/sidebar";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { useAppConfig } from "@/context/AppConfigContext";
 import { useTelephonyConfigWarnings } from "@/context/TelephonyConfigWarningsContext";
-import { useLatestReleaseVersion } from "@/hooks/useLatestReleaseVersion";
 import type { LocalUser } from "@/lib/auth";
 import { useAuth } from "@/lib/auth";
+// customer-center-platform fork（母 repo W4a D7）：側欄只畫本部署可達的入口，
+// 底部加「回主控台」。清單與閘門 `_UI_DENIED_NAMES` 同源（preflight 對帳）。
+import {
+  consoleOverviewUrl,
+  filterSidebarSections,
+} from "@/lib/ccp/ui-denied";
 import { cn } from "@/lib/utils";
 
 type SidebarNavItem = {
@@ -163,7 +168,6 @@ export function AppSidebar() {
   const router = useRouter();
   const { state, isMobile, setOpenMobile } = useSidebar();
   const { provider, getSelectedTeam, logout, user } = useAuth();
-  const { config } = useAppConfig();
   const { telnyxMissingWebhookPublicKeyCount } = useTelephonyConfigWarnings();
   const hasTelephonyWarning = telnyxMissingWebhookPublicKeyCount > 0;
   const isCollapsed = !isMobile && state === "collapsed";
@@ -178,14 +182,21 @@ export function AppSidebar() {
   }
   const selectedTeam = selectedTeamRef.current;
 
-  // Version info from app config context
-  const versionInfo = config ? { ui: config.uiVersion, api: config.apiVersion } : null;
+  // customer-center-platform fork（母 repo W4a D7）：上游的版本徽章、「Update」
+  // （連 docs.dograh.com）與「Latest」提示連同 `useLatestReleaseVersion` 的查詢一併
+  // 移除——版本由部署層（映像 label／runtime 指紋）管，客戶看不到也無從升級，
+  // 而那個查詢是一條對外請求（閘門 CSP 擋掉後只剩主控台錯誤）。
 
-  // Check for updates only on self-hosted (OSS) deployments — cloud is managed for the user.
-  const { latest: latestRelease, isBehind, isLatest } = useLatestReleaseVersion(
-    versionInfo?.ui,
-    { enabled: config?.deploymentMode === "oss" },
-  );
+  // 被閘門擋的 8 個入口與上游行銷頁 Overview 不畫；分區全空則連標題一起拿掉。
+  // 過濾在渲染端做、不改 NAV_SECTIONS 本身，rebase 時上游改清單不會撞到這裡。
+  const navSections = filterSidebarSections(NAV_SECTIONS);
+
+  // 「回主控台」：console 與編輯器同主機名、console 在標準 HTTPS 埠（母 repo 殘留
+  // 風險登記此假設）。hostname 只在瀏覽器端取得，SSR 階段不畫。
+  const [consoleUrl, setConsoleUrl] = useState<string | null>(null);
+  useEffect(() => {
+    setConsoleUrl(consoleOverviewUrl(window.location.hostname));
+  }, []);
 
   const isActive = (path: string) => pathname.startsWith(path);
 
@@ -317,45 +328,7 @@ export function AppSidebar() {
               translate="no"
             >
               <BrandLogo mark className="h-6" />
-              {versionInfo && (
-                <span
-                  className="notranslate text-xs font-normal text-muted-foreground"
-                  translate="no"
-                >
-                  v{versionInfo.ui}
-                </span>
-              )}
             </Link>
-            {isBehind && latestRelease && (
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <a
-                    href="https://docs.dograh.com/deployment/update"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="inline-flex items-center gap-1 rounded-md border bg-amber-50 px-1.5 py-0.5 text-[10px] font-medium leading-none text-amber-900 transition-opacity hover:opacity-80 dark:bg-amber-950 dark:text-amber-200"
-                  >
-                    <ArrowUpCircle className="h-3 w-3" />
-                    Update
-                  </a>
-                </TooltipTrigger>
-                <TooltipContent side="bottom">
-                  <p>Latest: {latestRelease} - click to see the update guide</p>
-                </TooltipContent>
-              </Tooltip>
-            )}
-            {isLatest && (
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <span className="inline-flex items-center rounded-md border bg-emerald-50 px-1.5 py-0.5 text-[10px] font-medium leading-none text-emerald-900 dark:bg-emerald-950 dark:text-emerald-200">
-                    Latest
-                  </span>
-                </TooltipTrigger>
-                <TooltipContent side="bottom">
-                  <p>You&apos;re running the latest release</p>
-                </TooltipContent>
-              </Tooltip>
-            )}
           </div>
 
           <SidebarTrigger className={cn("hover:bg-accent", isCollapsed && "mx-auto")}>
@@ -386,7 +359,7 @@ export function AppSidebar() {
       </SidebarHeader>
 
       <SidebarContent className={cn("notranslate", isCollapsed && "px-0")} translate="no">
-        {NAV_SECTIONS.map((section, index) => (
+        {navSections.map((section, index) => (
           <SidebarGroup
             key={section.label ?? "overview"}
             className={index === 0 ? "mt-2" : "mt-6"}
@@ -418,6 +391,40 @@ export function AppSidebar() {
         translate="no"
       >
         <div className="space-y-2">
+          {consoleUrl && (
+            <SidebarMenu>
+              <SidebarMenuItem>
+                <SidebarMenuButton
+                  asChild
+                  tooltip="回主控台（另開新分頁，需重新登入）"
+                  className="rounded-xl transition-colors hover:bg-accent hover:text-accent-foreground"
+                >
+                  {/* 新分頁、需重新登入（console session 存於分頁內）。不回到既有
+                      console 分頁：console→編輯器帶 noopener，兩分頁互不相識；
+                      放寬為 opener 會讓本頁可改寫 console 分頁網址（母 repo W4a D7）。
+                      連結不帶任何憑證。 */}
+                  <a
+                    href={consoleUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    lang="zh-Hant"
+                    // 點了看到登入表單不是被登出——事先說（母 repo W4a review IU-M4）
+                    aria-label="回主控台（另開新分頁，需重新登入）"
+                    className={cn("relative", isCollapsed && "justify-center")}
+                    data-ccp-back-to-console
+                  >
+                    <LayoutDashboard className="h-4 w-4 shrink-0" aria-hidden />
+                    <span className={cn("min-w-0 flex-1 truncate", isCollapsed && "sr-only")}>
+                      回主控台
+                    </span>
+                    {!isCollapsed && (
+                      <ExternalLink className="h-3.5 w-3.5 shrink-0 opacity-70" aria-hidden />
+                    )}
+                  </a>
+                </SidebarMenuButton>
+              </SidebarMenuItem>
+            </SidebarMenu>
+          )}
           {provider !== "stack" && (
             <div
               className={cn(
