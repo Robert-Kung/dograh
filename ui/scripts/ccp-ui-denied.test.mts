@@ -5,7 +5,7 @@
 //     node scripts/ccp-ui-denied.test.mts
 // 慣例同 `ccp-access-rules.test.mts`：零依賴、node 直接跑。
 //
-// 閘門副本與正本的對帳**不在這裡**：那是部署期的事，由母 repo preflight §7c 執行。
+// 閘門副本與正本的對帳**不在這裡**：那是部署期的事，由母 repo preflight §7c2 執行。
 
 import assert from "node:assert/strict";
 

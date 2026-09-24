@@ -9,6 +9,7 @@ import {
   ChevronRight,
   CircleDollarSign,
   Database,
+  ExternalLink,
   FileText,
   Home,
   Key,
@@ -395,7 +396,7 @@ export function AppSidebar() {
               <SidebarMenuItem>
                 <SidebarMenuButton
                   asChild
-                  tooltip="回主控台"
+                  tooltip="回主控台（另開新分頁，需重新登入）"
                   className="rounded-xl transition-colors hover:bg-accent hover:text-accent-foreground"
                 >
                   {/* 新分頁、需重新登入（console session 存於分頁內）。不回到既有
@@ -407,7 +408,8 @@ export function AppSidebar() {
                     target="_blank"
                     rel="noopener noreferrer"
                     lang="zh-Hant"
-                    aria-label={isCollapsed ? "回主控台" : undefined}
+                    // 點了看到登入表單不是被登出——事先說（母 repo W4a review IU-M4）
+                    aria-label="回主控台（另開新分頁，需重新登入）"
                     className={cn("relative", isCollapsed && "justify-center")}
                     data-ccp-back-to-console
                   >
@@ -415,6 +417,9 @@ export function AppSidebar() {
                     <span className={cn("min-w-0 flex-1 truncate", isCollapsed && "sr-only")}>
                       回主控台
                     </span>
+                    {!isCollapsed && (
+                      <ExternalLink className="h-3.5 w-3.5 shrink-0 opacity-70" aria-hidden />
+                    )}
                   </a>
                 </SidebarMenuButton>
               </SidebarMenuItem>

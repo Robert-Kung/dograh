@@ -6,7 +6,7 @@
  * 1. `CCP_UI_DENIED_NAMES`——**閘門 `_UI_DENIED_NAMES` 的副本**
  *    （`services/editor-gateway/app/main.py`）。閘門是 UI 面拒絕的正本與執行點；
  *    這份副本只決定側欄畫不畫那個入口。依 U-22 慣例「硬編副本＋部署期對帳」：
- *    母 repo 的 preflight §7c 以 AST 讀閘門原文、以 regex 讀本檔，集合不等即阻擋
+ *    母 repo 的 preflight §7c2 以 AST 讀閘門原文、以 regex 讀本檔，集合不等即阻擋
  *    部署並指出差異。**改這份清單就要同批改閘門，反之亦然**——否則部署被擋。
  *    本檔的字面格式是對帳腳本的解析面：每個名稱一個單引號字串、陣列以 `] as const`
  *    結束，不要改成拼接或展開。
