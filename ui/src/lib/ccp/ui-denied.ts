@@ -66,6 +66,3 @@ export function filterSidebarSections<S extends { items: ReadonlyArray<{ url: st
 export function consoleOverviewUrl(hostname: string): string {
     return `https://${hostname}/desk/overview`;
 }
-
-/** 與 console 端 `window.name` 相同，使連結回到已開著的 console 分頁。 */
-export const CCP_CONSOLE_WINDOW = 'ccp-console';

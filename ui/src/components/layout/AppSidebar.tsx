@@ -58,7 +58,6 @@ import { useAuth } from "@/lib/auth";
 // customer-center-platform fork（母 repo W4a D7）：側欄只畫本部署可達的入口，
 // 底部加「回主控台」。清單與閘門 `_UI_DENIED_NAMES` 同源（preflight 對帳）。
 import {
-  CCP_CONSOLE_WINDOW,
   consoleOverviewUrl,
   filterSidebarSections,
 } from "@/lib/ccp/ui-denied";
@@ -399,12 +398,14 @@ export function AppSidebar() {
                   tooltip="回主控台"
                   className="rounded-xl transition-colors hover:bg-accent hover:text-accent-foreground"
                 >
-                  {/* target 具名視窗：console 開著時回到那個分頁（保留其分頁內
-                      session），否則開新分頁。連結不帶任何憑證。 */}
+                  {/* 新分頁、需重新登入（console session 存於分頁內）。不回到既有
+                      console 分頁：console→編輯器帶 noopener，兩分頁互不相識；
+                      放寬為 opener 會讓本頁可改寫 console 分頁網址（母 repo W4a D7）。
+                      連結不帶任何憑證。 */}
                   <a
                     href={consoleUrl}
-                    target={CCP_CONSOLE_WINDOW}
-                    rel="noopener"
+                    target="_blank"
+                    rel="noopener noreferrer"
                     lang="zh-Hant"
                     aria-label={isCollapsed ? "回主控台" : undefined}
                     className={cn("relative", isCollapsed && "justify-center")}

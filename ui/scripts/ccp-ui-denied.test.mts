@@ -10,7 +10,6 @@
 import assert from "node:assert/strict";
 
 import {
-    CCP_CONSOLE_WINDOW,
     CCP_UI_DENIED_NAMES,
     consoleOverviewUrl,
     filterSidebarSections,
@@ -76,9 +75,8 @@ check("閘門副本十三個名稱、無重複", () => {
     assert.equal(new Set(CCP_UI_DENIED_NAMES).size, 13);
 });
 
-check("回主控台：同主機名、標準埠、固定路徑、具名視窗", () => {
+check("回主控台：同主機名、標準埠、固定路徑", () => {
     assert.equal(consoleOverviewUrl("ops.example.com"), "https://ops.example.com/desk/overview");
-    assert.equal(CCP_CONSOLE_WINDOW, "ccp-console");
 });
 
 console.log(`${passed} passed`);
