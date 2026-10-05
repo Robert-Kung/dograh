@@ -212,6 +212,7 @@ def test_active_calls_route_rejects_wrong_secret(monkeypatch):
 
 
 def test_active_calls_route_returns_count_with_secret(monkeypatch):
+    monkeypatch.delenv("LIVEKIT_MAX_CONCURRENT_CALLS", raising=False)
     active_calls.register_active_call(42)
     client = _make_active_calls_client(monkeypatch)
 
@@ -225,4 +226,21 @@ def test_active_calls_route_returns_count_with_secret(monkeypatch):
         "active_calls": 1,
         "livekit_active_calls": 0,
         "reserved_slots": 0,
+        "max_concurrent": 6,
     }
+
+
+@pytest.mark.parametrize("configured, expected", [("12", 12), ("0", 0)])
+def test_active_calls_route_reports_admission_limit(monkeypatch, configured, expected):
+    # the queue overview draws in-use／limit from this one response; a missing
+    # limit rendered the bar as「未設定上限」forever (W4b D13)
+    monkeypatch.setenv("LIVEKIT_MAX_CONCURRENT_CALLS", configured)
+    client = _make_active_calls_client(monkeypatch)
+
+    response = client.get(
+        "/api/v1/health/active-calls",
+        headers={"X-Dograh-Devops-Secret": "test-dograh-devops-secret"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["max_concurrent"] == expected

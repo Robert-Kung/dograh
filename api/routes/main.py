@@ -138,6 +138,9 @@ class ActiveCallsResponse(BaseModel):
     # not-yet-converted admission reservations (reconciliation/autoscale signal).
     livekit_active_calls: int
     reserved_slots: int
+    # The admission limit itself (LIVEKIT_MAX_CONCURRENT_CALLS; 0 = gate off),
+    # so consumers draw in-use／limit from one source (queue overview, W4b D13).
+    max_concurrent: int
 
 
 DOGRAH_DEVOPS_SECRET_HEADER = "X-Dograh-Devops-Secret"
@@ -183,10 +186,12 @@ async def active_calls(
         livekit_active_call_count,
         reserved_slot_count,
     )
+    from api.services.pipecat.capacity_gate import max_concurrent_calls
 
     _verify_devops_secret(DOGRAH_DEVOPS_SECRET, x_dograh_devops_secret)
     return ActiveCallsResponse(
         active_calls=active_call_count(),
         livekit_active_calls=livekit_active_call_count(),
         reserved_slots=reserved_slot_count(),
+        max_concurrent=max_concurrent_calls(),
     )
