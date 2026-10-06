@@ -55,6 +55,8 @@ STACK_PUBLISHABLE_CLIENT_KEY = os.getenv("STACK_PUBLISHABLE_CLIENT_KEY")
 DOGRAH_MPS_SECRET_KEY = os.getenv("DOGRAH_MPS_SECRET_KEY", None)
 MPS_API_URL = os.getenv("MPS_API_URL", "https://services.dograh.com")
 DOGRAH_DEVOPS_SECRET = os.getenv("DOGRAH_DEVOPS_SECRET") or None
+# ccp W4c: call-records endpoints only (queue holds it; never the devops secret).
+DOGRAH_CALL_RECORDS_SECRET = os.getenv("DOGRAH_CALL_RECORDS_SECRET") or None
 
 # Built-in ticket MCP server (S-L4-SCREENPOP). Off by default: when unset,
 # the ticket tools are not registered on the MCP surface at all.

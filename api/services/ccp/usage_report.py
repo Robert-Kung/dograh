@@ -11,39 +11,21 @@ never participates) and bucketed with ``width_bucket``. The query runs under a
 5 s statement timeout because it shares the connection pool with live calls.
 """
 
-import re
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, time, timedelta
-from functools import cache
-from zoneinfo import ZoneInfo, available_timezones
+from datetime import date, datetime, timedelta
 
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 
 from api.db import db_client
+from api.services.ccp import call_scope as cs
+from api.services.ccp.call_scope import MAX_CALL_SECONDS as MAX_CALL_SECONDS
+from api.services.ccp.call_scope import OUTCOME_CLASSES
 
 MAX_DAYS = 92
-EARLIEST = date(2020, 1, 1)
-MAX_CODES = 20
-STALE_AFTER = timedelta(hours=6)
 STATEMENT_TIMEOUT = "5s"
-OUTCOME_CLASSES = (
-    "ai_completed",
-    "transferred",
-    "transfer_failed",
-    "system_error",
-    "unrecorded",
-)
-_CODE_RE = re.compile(r"[a-z0-9_]{1,40}")  # fullmatch: `$` would let "x\n" through
-# One call never runs a day; a dirty row past this must not fail the report.
-MAX_CALL_SECONDS = 86400
-# available_timezones() also lists these on Debian images: /etc/localtime's
-# symlink and the "-00" placeholder — neither is a deployment's local time.
-_NON_GEOGRAPHIC = frozenset({"localtime", "Factory", "posixrules"})
 
-
-class UsageReportInvalid(ValueError):
-    """Input rejected; the message names the field, never echoes the value."""
+UsageReportInvalid = cs.ScopeInvalid
 
 
 class UsageReportTimeout(Exception):
@@ -58,16 +40,6 @@ class UsageReportQuery:
     codes: tuple[str, ...]
 
 
-@cache
-def _zones() -> frozenset[str]:
-    # available_timezones() walks the tz database on disk on every call
-    return frozenset(available_timezones())
-
-
-def is_valid_timezone(name: str) -> bool:
-    return name not in _NON_GEOGRAPHIC and name in _zones()
-
-
 def validate_query(
     date_from: date,
     date_to: date,
@@ -76,79 +48,33 @@ def validate_query(
     *,
     now: datetime | None = None,
 ) -> UsageReportQuery:
-    if not is_valid_timezone(timezone):
-        raise UsageReportInvalid("timezone")
-    if date_from < EARLIEST:
-        raise UsageReportInvalid("from")
-    if date_from > date_to:
-        raise UsageReportInvalid("from")
-    if (date_to - date_from).days + 1 > MAX_DAYS:
-        raise UsageReportInvalid("to")
-    today = (now or datetime.now(UTC)).astimezone(ZoneInfo(timezone)).date()
-    if date_to > today:
-        raise UsageReportInvalid("to")
-    if len(codes) > MAX_CODES or len(set(codes)) != len(codes):
-        raise UsageReportInvalid("codes")
-    if not all(_CODE_RE.fullmatch(code) for code in codes):
-        raise UsageReportInvalid("codes")
-    return UsageReportQuery(date_from, date_to, timezone, tuple(codes))
+    cs.validate_period(date_from, date_to, timezone, max_days=MAX_DAYS, now=now)
+    return UsageReportQuery(date_from, date_to, timezone, cs.validate_codes(codes))
 
 
 def day_boundaries(query: UsageReportQuery) -> list[datetime]:
     """UTC instants of each local midnight from ``date_from`` to ``date_to + 1``."""
-    tz = ZoneInfo(query.timezone)
-    days = (query.date_to - query.date_from).days + 1
-    return [
-        datetime.combine(query.date_from + timedelta(days=i), time(), tz).astimezone(
-            UTC
-        )
-        for i in range(days + 1)
-    ]
+    return cs.day_boundaries(query.date_from, query.date_to, query.timezone)
 
 
-# Outcome classes (W4b 設計 C): transferred:safetynet is a system error, and the
-# two setup-defect markers written at call start are "unrecorded", not a
-# transfer attempt.
+# Scope, outcome classes and category folding are shared with call records
+# (ccp W4c) so a filtered list always matches the report cell.
 _SQL = text(
-    """
+    f"""
 WITH scoped AS (
     SELECT
         width_bucket(created_at, CAST(:bounds AS timestamptz[])) AS day_idx,
         annotations->>'call_outcome' AS outcome,
-        CASE WHEN json_typeof(usage_info->'call_duration_seconds') = 'number'
-             THEN LEAST(GREATEST((usage_info->>'call_duration_seconds')::double precision, 0),
-                        :max_secs)
-             ELSE 0 END AS secs,
-        -- btrim() alone strips only spaces; an LLM value often ends in a newline
-        CASE WHEN lower(btrim(gathered_context->>'mapped_call_disposition', :blank))
-                  = ANY(CAST(:codes AS text[]))
-             THEN lower(btrim(gathered_context->>'mapped_call_disposition', :blank))
-        END AS code
+        {cs.seconds_expr()} AS secs,
+        {cs.category_expr()} AS code
     FROM workflow_runs
-    WHERE mode = 'livekit'
-      AND call_type = 'inbound'
-      AND created_at >= :start AND created_at < :end
-      AND (
-          COALESCE(is_completed, false)
-          OR starts_with(annotations->>'call_outcome', 'transferred:')
-          OR annotations->>'call_outcome' = 'safetynet_terminated'
-          OR created_at < :stale_before
-      )
+    WHERE created_at >= :start AND created_at < :end
+      AND {cs.scope_clause()}
 )
 SELECT
     day_idx,
     code,
-    CASE
-        WHEN outcome = 'ai_completed' THEN 'ai_completed'
-        WHEN outcome IN ('safetynet_terminated', 'transferred:safetynet')
-            THEN 'system_error'
-        WHEN starts_with(outcome, 'transferred:') THEN 'transferred'
-        WHEN outcome IN ('transfer_failed:press0_not_installed',
-                         'transfer_failed:config_unresolvable')
-            THEN 'unrecorded'
-        WHEN starts_with(outcome, 'transfer_failed:') THEN 'transfer_failed'
-        ELSE 'unrecorded'
-    END AS cls,
+    {cs.outcome_class_expr("outcome")} AS cls,
     count(*) AS n,
     COALESCE(sum(secs), 0) AS secs
 FROM scoped
@@ -178,13 +104,11 @@ async def build_usage_report(
     bounds = day_boundaries(query)
     params = {
         "bounds": bounds,
-        "codes": list(query.codes),
         "start": bounds[0],
         "end": bounds[-1],
-        "stale_before": (now or datetime.now(UTC)) - STALE_AFTER,
-        "max_secs": MAX_CALL_SECONDS,
-        # whitespace Python's str.strip() removes, incl. the ideographic space
-        "blank": " \t\n\r\f\v\u3000",
+        **cs.scope_params(now),
+        **cs.category_params(query.codes),
+        **cs.seconds_params(),
     }
     try:
         # Read-only: the autobegun transaction carries SET LOCAL and is rolled

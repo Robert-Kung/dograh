@@ -1,10 +1,12 @@
 import asyncio
+from datetime import UTC, datetime
 
 from loguru import logger
 
 from api.db import db_client
 from api.enums import PostHogEvent, WorkflowRunState
 from api.services.campaign.circuit_breaker import circuit_breaker
+from api.services.ccp import call_meta
 from api.services.integrations import IntegrationRuntimeSession
 from api.services.pipecat.audio_config import AudioConfig
 from api.services.pipecat.audio_playback import play_audio_loop
@@ -176,6 +178,10 @@ def register_event_handlers(
     async def on_caller_connected(*_args):
         logger.debug("In caller-connected handler")
         await audio_buffer.start_recording()
+        if consent_gate is not None:  # ccp W4c: LIVEKIT inbound only
+            call_meta.on_connected(
+                workflow_run_id, consent_gate.room_name, datetime.now(UTC)
+            )
         ready_state["client_connected"] = True
         await maybe_trigger_initial_response()
 
