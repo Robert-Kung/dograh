@@ -782,10 +782,12 @@ async def test_both_setup_markers_land_on_the_same_engine(monkeypatch):
         annotations.append(kwargs["annotations"])
 
     async def fake_get(run_id):
-        return types.SimpleNamespace(annotations={})
+        return None
+
+    from api.services.observability import call_outcome as call_outcome_module
 
     monkeypatch.setattr(db_client, "update_workflow_run", fake_update)
-    monkeypatch.setattr(db_client, "get_workflow_run_by_id", fake_get)
+    monkeypatch.setattr(call_outcome_module, "_persisted_outcome", fake_get)
 
     async def resolve_transfer_call_config():
         return {"destination": "tel:+886912345678"}

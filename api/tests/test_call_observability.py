@@ -7,6 +7,7 @@ import types
 import pytest
 
 from api.services.observability import alerts, call_events
+from api.services.observability import call_outcome as call_outcome_module
 from api.services.observability.call_outcome import record_call_outcome
 
 
@@ -281,7 +282,7 @@ def db_updates(monkeypatch):
         return None
 
     monkeypatch.setattr(db_client, "update_workflow_run", fake_update)
-    monkeypatch.setattr(db_client, "get_workflow_run_by_id", nothing_persisted)
+    monkeypatch.setattr(call_outcome_module, "_persisted_outcome", nothing_persisted)
     return captured
 
 
@@ -467,10 +468,10 @@ async def test_engine_free_outcome_respects_db_precedence(monkeypatch):
         updates.append(kwargs)
 
     async def fake_get(run_id):
-        return types.SimpleNamespace(annotations={"call_outcome": "transferred:press0"})
+        return "transferred:press0"
 
     monkeypatch.setattr(db_client, "update_workflow_run", fake_update)
-    monkeypatch.setattr(db_client, "get_workflow_run_by_id", fake_get)
+    monkeypatch.setattr(call_outcome_module, "_persisted_outcome", fake_get)
     await record_call_outcome(None, 7, outcome="safetynet_terminated")
     assert updates == []  # equal rank, first wins — no overwrite
 
@@ -486,10 +487,10 @@ def run_store(monkeypatch):
         store.setdefault(run_id, {}).update(kwargs.get("annotations") or {})
 
     async def fake_get(run_id):
-        return types.SimpleNamespace(annotations=dict(store.get(run_id, {})))
+        return store.get(run_id, {}).get("call_outcome")
 
     monkeypatch.setattr(db_client, "update_workflow_run", fake_update)
-    monkeypatch.setattr(db_client, "get_workflow_run_by_id", fake_get)
+    monkeypatch.setattr(call_outcome_module, "_persisted_outcome", fake_get)
     return store
 
 
@@ -508,16 +509,14 @@ async def test_engine_completion_does_not_clobber_server_side_safetynet(run_stor
 
 @pytest.mark.asyncio
 async def test_engine_reads_back_only_when_memory_is_empty(run_store, monkeypatch):
-    from api.db import db_client
-
     reads = []
-    original = db_client.get_workflow_run_by_id
+    original = call_outcome_module._persisted_outcome
 
     async def counting_get(run_id):
         reads.append(run_id)
         return await original(run_id)
 
-    monkeypatch.setattr(db_client, "get_workflow_run_by_id", counting_get)
+    monkeypatch.setattr(call_outcome_module, "_persisted_outcome", counting_get)
     engine = types.SimpleNamespace()
     await record_call_outcome(
         engine, 7, outcome="transfer_failed:no_agent", transfer_reason="no_agent"
@@ -525,3 +524,29 @@ async def test_engine_reads_back_only_when_memory_is_empty(run_store, monkeypatc
     await record_call_outcome(engine, 7, outcome="ai_completed")
     assert reads == [7]
     assert run_store[7]["call_outcome"] == "transfer_failed:no_agent"
+
+
+@pytest.mark.asyncio
+async def test_failed_read_back_still_records_the_outcome(monkeypatch):
+    """W4b review 8.1 M2: the read-back is new on the engine path; if it fails
+    the outcome must still be written and kept in memory, as before W4b."""
+    from api.db import db_client
+
+    writes = []
+
+    async def fake_update(run_id, **kwargs):
+        writes.append(kwargs["annotations"]["call_outcome"])
+
+    async def broken_read(run_id):
+        raise TimeoutError("pool exhausted")
+
+    monkeypatch.setattr(db_client, "update_workflow_run", fake_update)
+    monkeypatch.setattr(call_outcome_module, "_persisted_outcome", broken_read)
+    engine = types.SimpleNamespace()
+    await record_call_outcome(
+        engine, 7, outcome="transferred:voice_tool", transfer_reason="voice_tool"
+    )
+    assert writes == ["transferred:voice_tool"]
+    assert engine._call_outcome == "transferred:voice_tool"
+    await record_call_outcome(engine, 7, outcome="ai_completed")
+    assert writes == ["transferred:voice_tool"]  # memory now guards it

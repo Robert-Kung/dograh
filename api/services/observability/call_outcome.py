@@ -25,6 +25,24 @@ def _rank(outcome: str) -> int:
     return _RANKS.get(outcome.split(":", 1)[0], 1)
 
 
+async def _persisted_outcome(workflow_run_id: int) -> str | None:
+    """The run's stored call_outcome — one column, no joined workflow/user."""
+    from sqlalchemy import select
+
+    from api.db import db_client
+    from api.db.models import WorkflowRunModel
+
+    async with db_client.async_session() as session:
+        annotations = (
+            await session.execute(
+                select(WorkflowRunModel.annotations).where(
+                    WorkflowRunModel.id == workflow_run_id
+                )
+            )
+        ).scalar_one_or_none()
+    return (annotations or {}).get("call_outcome")
+
+
 async def record_call_outcome(
     engine,
     workflow_run_id: int | None,
@@ -38,10 +56,15 @@ async def record_call_outcome(
             # Nothing in memory: an engine-free path (server-side safetynet)
             # may already have persisted a terminal outcome this engine never
             # saw — read it back so a late ai_completed can't overwrite it.
-            from api.db import db_client
-
-            run = await db_client.get_workflow_run_by_id(workflow_run_id)
-            previous = ((run.annotations or {}) if run else {}).get("call_outcome")
+            # A failed read must not lose this outcome (W4b review 8.1 M2):
+            # write as before rather than record nothing.
+            try:
+                previous = await _persisted_outcome(workflow_run_id)
+            except Exception as e:
+                logger.warning(
+                    f"call outcome read-back failed for run {workflow_run_id}: "
+                    f"{type(e).__name__}"
+                )
         if previous is not None and _rank(outcome) <= _rank(previous):
             return
         if engine is not None:

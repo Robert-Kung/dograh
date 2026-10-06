@@ -14,6 +14,7 @@ never participates) and bucketed with ``width_bucket``. The query runs under a
 import re
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
+from functools import cache
 from zoneinfo import ZoneInfo, available_timezones
 
 from sqlalchemy import text
@@ -33,7 +34,9 @@ OUTCOME_CLASSES = (
     "system_error",
     "unrecorded",
 )
-_CODE_RE = re.compile(r"^[a-z0-9_]{1,40}$")
+_CODE_RE = re.compile(r"[a-z0-9_]{1,40}")  # fullmatch: `$` would let "x\n" through
+# One call never runs a day; a dirty row past this must not fail the report.
+MAX_CALL_SECONDS = 86400
 # available_timezones() also lists these on Debian images: /etc/localtime's
 # symlink and the "-00" placeholder — neither is a deployment's local time.
 _NON_GEOGRAPHIC = frozenset({"localtime", "Factory", "posixrules"})
@@ -55,8 +58,14 @@ class UsageReportQuery:
     codes: tuple[str, ...]
 
 
+@cache
+def _zones() -> frozenset[str]:
+    # available_timezones() walks the tz database on disk on every call
+    return frozenset(available_timezones())
+
+
 def is_valid_timezone(name: str) -> bool:
-    return name not in _NON_GEOGRAPHIC and name in available_timezones()
+    return name not in _NON_GEOGRAPHIC and name in _zones()
 
 
 def validate_query(
@@ -80,7 +89,7 @@ def validate_query(
         raise UsageReportInvalid("to")
     if len(codes) > MAX_CODES or len(set(codes)) != len(codes):
         raise UsageReportInvalid("codes")
-    if not all(_CODE_RE.match(code) for code in codes):
+    if not all(_CODE_RE.fullmatch(code) for code in codes):
         raise UsageReportInvalid("codes")
     return UsageReportQuery(date_from, date_to, timezone, tuple(codes))
 
@@ -107,11 +116,13 @@ WITH scoped AS (
         width_bucket(created_at, CAST(:bounds AS timestamptz[])) AS day_idx,
         annotations->>'call_outcome' AS outcome,
         CASE WHEN json_typeof(usage_info->'call_duration_seconds') = 'number'
-             THEN GREATEST((usage_info->>'call_duration_seconds')::double precision, 0)
+             THEN LEAST(GREATEST((usage_info->>'call_duration_seconds')::double precision, 0),
+                        :max_secs)
              ELSE 0 END AS secs,
-        CASE WHEN lower(btrim(gathered_context->>'mapped_call_disposition'))
+        -- btrim() alone strips only spaces; an LLM value often ends in a newline
+        CASE WHEN lower(btrim(gathered_context->>'mapped_call_disposition', :blank))
                   = ANY(CAST(:codes AS text[]))
-             THEN lower(btrim(gathered_context->>'mapped_call_disposition'))
+             THEN lower(btrim(gathered_context->>'mapped_call_disposition', :blank))
         END AS code
     FROM workflow_runs
     WHERE mode = 'livekit'
@@ -171,6 +182,9 @@ async def build_usage_report(
         "start": bounds[0],
         "end": bounds[-1],
         "stale_before": (now or datetime.now(UTC)) - STALE_AFTER,
+        "max_secs": MAX_CALL_SECONDS,
+        # whitespace Python's str.strip() removes, incl. the ideographic space
+        "blank": " \t\n\r\f\v\u3000",
     }
     try:
         # Read-only: the autobegun transaction carries SET LOCAL and is rolled
