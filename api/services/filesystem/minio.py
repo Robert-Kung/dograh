@@ -1,12 +1,18 @@
 import asyncio
-import json
+from datetime import timedelta
 from typing import Any, BinaryIO, Dict, Optional
+from urllib.parse import urlsplit
 
 from loguru import logger
 from minio import Minio
 from minio.error import S3Error
 
 from .base import BaseFileSystem
+
+
+# MinIO's default region; fixed so signing never queries the server.
+SIGNING_REGION = "us-east-1"
+_INLINE_TYPES = {"txt": "text/plain", "wav": "audio/wav", "mp3": "audio/mpeg"}
 
 
 class MinioFileSystem(BaseFileSystem):
@@ -53,41 +59,35 @@ class MinioFileSystem(BaseFileSystem):
             endpoint, access_key=access_key, secret_key=secret_key, secure=secure
         )
 
-        # Ensure bucket exists and configure anonymous access (using internal client)
+        # Signs URLs for the public endpoint without a network call: the SDK
+        # only looks a region up when none is given.
+        public = urlsplit(self.public_endpoint)
+        self.public_signer = Minio(
+            public.netloc,
+            access_key=access_key,
+            secret_key=secret_key,
+            secure=public.scheme == "https",
+            region=SIGNING_REGION,
+        )
+        self.internal_signer = Minio(
+            endpoint,
+            access_key=access_key,
+            secret_key=secret_key,
+            secure=secure,
+            region=SIGNING_REGION,
+        )
+
+        # ccp W4c: the bucket holds call recordings and transcripts — no
+        # anonymous access. Upstream set a public read/write/list policy on
+        # every start; removing that line would leave the policy already on an
+        # existing bucket, so delete it explicitly. URLs below are signed.
         try:
             if not self.client.bucket_exists(self.bucket_name):
                 self.client.make_bucket(self.bucket_name)
-
-            # Set public read/write policy for local development
-            # This allows:
-            # 1. Anonymous downloads (s3:GetObject)
-            # 2. Anonymous uploads (s3:PutObject) - bypasses presigned URL signature issues
-            # 3. List bucket contents (s3:ListBucket) for debugging
-            # Note: This is set on every initialization to ensure policy is correct
-            # WARNING: Only use in local development, not production!
-            policy = {
-                "Version": "2012-10-17",
-                "Statement": [
-                    {
-                        "Effect": "Allow",
-                        "Principal": {"AWS": "*"},
-                        "Action": ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"],
-                        "Resource": [f"arn:aws:s3:::{self.bucket_name}/*"],
-                    },
-                    {
-                        "Effect": "Allow",
-                        "Principal": {"AWS": "*"},
-                        "Action": ["s3:ListBucket"],
-                        "Resource": [f"arn:aws:s3:::{self.bucket_name}"],
-                    },
-                ],
-            }
-
-            self.client.set_bucket_policy(self.bucket_name, json.dumps(policy))
+            self.client.delete_bucket_policy(self.bucket_name)
         except Exception as e:
             # Bucket might already exist or we might be in a restricted environment
             logger.debug(f"Bucket setup note: {e}")
-            pass
 
     async def acreate_file(self, file_path: str, content: BinaryIO) -> bool:
         try:
@@ -135,15 +135,22 @@ class MinioFileSystem(BaseFileSystem):
         force_inline: bool = False,
         use_internal_endpoint: bool = False,
     ) -> Optional[str]:
+        signer = self.internal_signer if use_internal_endpoint else self.public_signer
+        response_headers = None
+        if force_inline:
+            response_headers = {"response-content-disposition": "inline"}
+            content_type = _INLINE_TYPES.get(file_path.rsplit(".", 1)[-1])
+            if content_type:
+                response_headers["response-content-type"] = content_type
         try:
-            if use_internal_endpoint:
-                protocol = "https" if self.secure else "http"
-                base = f"{protocol}://{self.endpoint}"
-            else:
-                base = self.public_endpoint
-            return f"{base}/{self.bucket_name}/{file_path}"
+            return signer.presigned_get_object(
+                self.bucket_name,
+                file_path,
+                expires=timedelta(seconds=expiration),
+                response_headers=response_headers,
+            )
         except Exception as e:
-            logger.error(f"Error generating MinIO URL: {e}")
+            logger.error(f"Error generating MinIO URL: {type(e).__name__}")
             return None
 
     async def aget_file_metadata(self, file_path: str) -> Optional[Dict[str, Any]]:
@@ -172,21 +179,14 @@ class MinioFileSystem(BaseFileSystem):
         content_type: str = "text/csv",
         max_size: int = 10_485_760,
     ) -> Optional[str]:
-        """Generate an unsigned URL for direct file upload.
-
-        For local MinIO development with anonymous upload enabled, we return
-        a simple unsigned URL instead of a presigned URL. This avoids signature
-        mismatch issues when the internal endpoint (minio:9000) differs from
-        the public endpoint (localhost:9000).
-
-        The bucket policy allows anonymous s3:PutObject, so no signature is needed.
-        """
+        """Presigned PUT URL on the public endpoint (the bucket is not writable
+        anonymously)."""
         try:
-            url = f"{self.public_endpoint}/{self.bucket_name}/{file_path}"
-            logger.debug(f"Generated unsigned upload URL: {url}")
-            return url
+            return self.public_signer.presigned_put_object(
+                self.bucket_name, file_path, expires=timedelta(seconds=expiration)
+            )
         except Exception as e:
-            logger.error(f"Error generating MinIO upload URL: {e}")
+            logger.error(f"Error generating MinIO upload URL: {type(e).__name__}")
             return None
 
     async def adownload_file(self, source_path: str, local_path: str) -> bool:

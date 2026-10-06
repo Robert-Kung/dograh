@@ -5,6 +5,7 @@ from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
     JSON,
     Boolean,
+    CheckConstraint,
     Column,
     DateTime,
     Enum,
@@ -1417,3 +1418,43 @@ class RecordingRetentionAuditModel(Base):
     object_keys = Column(JSON, nullable=False, default=list)
     retention_days = Column(Integer, nullable=False)
     result = Column(String, nullable=False, default="ok")
+    # "audio" | "transcript" (ccp W4c). NULL on rows written before the split —
+    # read those by their object key prefix.
+    scope = Column(String, nullable=True)
+
+
+class CcpCallMetaModel(Base):
+    """Per-call data prepared for the customer-visible call records (ccp W4c).
+
+    Never the caller number in clear: only its mask, last 4 digits and a keyed
+    HMAC. ``audio_started_at`` is the recording's time origin.
+    """
+
+    __tablename__ = "ccp_call_meta"
+
+    workflow_run_id = Column(
+        Integer,
+        ForeignKey("workflow_runs.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    caller_masked = Column(String(7), nullable=True)
+    caller_last4 = Column(String(4), nullable=True, index=True)
+    caller_hmac = Column(String(64), nullable=True, index=True)
+    audio_started_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+        server_default=func.now(),
+    )
+
+
+class CcpSettingsModel(Base):
+    """Single-row deployment state for ccp (W4c: caller HMAC key fingerprint)."""
+
+    __tablename__ = "ccp_settings"
+
+    id = Column(Integer, primary_key=True, autoincrement=False, default=1)
+    key_fingerprint = Column(String(8), nullable=True)
+
+    __table_args__ = (CheckConstraint("id = 1", name="ccp_settings_single_row"),)

@@ -1,5 +1,6 @@
 import logging
 import os
+import re
 import sys
 
 import loguru
@@ -70,6 +71,18 @@ def install_access_log_masking() -> None:
         access.addFilter(MaskSecretPathFilter())
 
 
+# A SIP participant's identity is ``sip_<caller number>`` and pipecat logs it
+# on every join (ccp W4c): keep only the last 4 digits.
+_SIP_NUMBER = re.compile(
+    r"""(sip_|sip\.phoneNumber['"]?\s*[:=]\s*['"]?)\+?\d*(\d{4})(?!\d)"""
+)
+
+
+def mask_sip_numbers(record) -> None:
+    """loguru patcher: ``sip_+886912345678`` → ``sip_***5678``."""
+    record["message"] = _SIP_NUMBER.sub(r"\1***\2", record["message"])
+
+
 def inject_run_id(record):
     """Inject run_id from context variable into log record"""
     record["extra"]["run_id"] = run_id_var.get()
@@ -98,7 +111,9 @@ def setup_logging():
 
     # Set default extra values on the shared core so ALL logger references
     # (including ones imported before this runs) have run_id available.
-    loguru.logger.configure(extra={"run_id": None})
+    # The core-level patcher also covers modules that imported the logger
+    # before this ran (pipecat's transport among them).
+    loguru.logger.configure(extra={"run_id": None}, patcher=mask_sip_numbers)
 
     # Patch loguru to inject run_id
     patched = loguru.logger.patch(inject_run_id)
