@@ -42,6 +42,9 @@ DISPATCH_DEDUP_TTL_SECONDS = 30 * 60
 # at once and never 5xx'd, so a LiveKit redelivery is not the retry path.
 RESOLVER_RETRY_DELAYS_SECONDS = (0.5, 1.0)
 
+# Upper bound on one dispatch attempt; past it the call goes to the fallback.
+DISPATCH_TIMEOUT_SECONDS = 15.0
+
 # DID -> (workflow_id, user_id). Storage/owner is an open question
 # (relates to S-L6-ROUTING); injected so this layer makes no assumption.
 DidResolver = Callable[[str], Awaitable[Optional[tuple[int, int]]]]
@@ -50,9 +53,18 @@ Fallback = Callable[[str, str, Optional[int]], Awaitable[None]]
 
 def did_from_sip_attributes(attributes: dict) -> str | None:
     """E.164 DID from the SIP caller's ``sip.trunkPhoneNumber`` (C6), or None."""
-    raw = (attributes or {}).get(SIP_DIALED_ATTRIBUTE, "")
+    raw = ((attributes or {}).get(SIP_DIALED_ATTRIBUTE) or "").strip()
+    # The hint only for national format ("0…"): the normalizer strips "+"
+    # before comparing dial codes, so hinting "+1555…" or "001555…" would
+    # prefix 886 to a foreign number (review D-02).
+    if raw.startswith("00"):
+        raw, hint = "+" + raw[2:], None
+    elif raw.startswith("0"):
+        hint = DID_COUNTRY_HINT
+    else:
+        hint = None
     try:
-        normalized = normalize_telephony_address(raw, country_hint=DID_COUNTRY_HINT)
+        normalized = normalize_telephony_address(raw, country_hint=hint)
     except ValueError:
         return None
     if normalized.address_type != "pstn":
@@ -166,8 +178,12 @@ async def dispatch_livekit_call(
     dedup = dedup or dispatch_dedup
     handed_off = False
     try:
-        handed_off = await _dispatch(
-            room_name, sip_attributes, resolver, fallback, livekit_url
+        # Bounded (review D-05): a DB await that hangs without raising would
+        # otherwise hold the claim — and the reconciler skips claimed calls —
+        # leaving the caller in silence until the trunk's max duration (C4).
+        handed_off = await asyncio.wait_for(
+            _dispatch(room_name, sip_attributes, resolver, fallback, livekit_url),
+            timeout=DISPATCH_TIMEOUT_SECONDS,
         )
     except Exception as e:
         logger.exception(f"LiveKit dispatch failed for {room_name}: {e}")

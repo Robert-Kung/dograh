@@ -370,6 +370,12 @@ async def midcall_safetynet(
             # A voice/press-0 transfer is mid-flight; it owns the call's exit.
             logger.info(f"safetynet yielded to in-flight transfer for {room_name}")
             return
+        if getattr(engine, "is_call_disposed", lambda: False)() is True:
+            # The caller left during the transfer and the flow already ended
+            # the call (livekit-event-wiring 設計 B): nobody to announce to,
+            # and not a safetynet termination (review D-09).
+            logger.info(f"safetynet transfer ended by caller hangup for {room_name}")
+            return
         log_event(
             "safetynet.transfer_failed",
             room_name=room_name,
@@ -681,8 +687,11 @@ async def reconcile_undispatched_rooms(
     has a SIP participant, no ``agent-*`` participant, the caller joined more
     than ``RECONCILE_MIN_AGE_SECONDS`` ago, and the call is not claimed by the
     dispatcher (in flight or done). Claimed here before the safetynet runs, so
-    a late webhook cannot dispatch the same call concurrently. Returns how many
-    rooms were handed off; LiveKit API errors propagate to the loop.
+    a late webhook cannot dispatch the same call concurrently. One room's
+    error (e.g. deleted between the two listings) skips that room only, and
+    the hand-offs run concurrently so N stranded callers do not queue behind
+    each other's REFER (review D-04/D-06). Returns how many rooms were handed
+    off; a failed room listing propagates to the loop.
     """
     from livekit.protocol.room import ListParticipantsRequest, ListRoomsRequest
 
@@ -691,17 +700,35 @@ async def reconcile_undispatched_rooms(
 
     dedup = dedup or livekit_dispatcher.dispatch_dedup
     now = time.time() if now is None else now
-    handed = 0
+
+    async def _hand_off(client, room_name: str, key: str) -> bool:
+        try:
+            await server_side_safetynet(room_name, "undispatched", None, lk=client)
+        except BaseException:
+            dedup.release(key)
+            raise
+        dedup.commit(key)
+        return True
+
     async with livekit_api(lk) as client:
         rooms = (await client.room.list_rooms(ListRoomsRequest())).rooms
+        jobs = []
         for room in rooms:
             if not room.name.startswith(DEFAULT_ROOM_PREFIX):
                 continue
-            participants = (
-                await client.room.list_participants(
-                    ListParticipantsRequest(room=room.name)
+            try:
+                participants = (
+                    await client.room.list_participants(
+                        ListParticipantsRequest(room=room.name)
+                    )
+                ).participants
+            except Exception as e:
+                call_events.emit(
+                    RECONCILE_FAILED_EVENT,
+                    room_name=room.name,
+                    reason=type(e).__name__,
                 )
-            ).participants
+                continue
             if any(p.identity.startswith("agent-") for p in participants):
                 continue
             caller = next((p for p in participants if p.kind == SIP_KIND), None)
@@ -710,14 +737,9 @@ async def reconcile_undispatched_rooms(
             key = livekit_dispatcher.dispatch_key(caller)
             if not dedup.claim(key):
                 continue
-            try:
-                await server_side_safetynet(room.name, "undispatched", None, lk=client)
-            except BaseException:
-                dedup.release(key)
-                raise
-            dedup.commit(key)
-            handed += 1
-    return handed
+            jobs.append(_hand_off(client, room.name, key))
+        results = await asyncio.gather(*jobs, return_exceptions=True)
+    return sum(1 for r in results if r is True)
 
 
 async def run_reconciler(interval_seconds: float = RECONCILE_INTERVAL_SECONDS) -> None:
@@ -749,7 +771,22 @@ def start_reconciler() -> Optional[asyncio.Task]:
 
     if not os.environ.get("LIVEKIT_URL"):
         return None
-    argv = sys.argv
-    if "--port" in argv and argv[argv.index("--port") + 1 :][:1] != ["8000"]:
+    port = _uvicorn_port(sys.argv)
+    webhook_port = os.environ.get("LIVEKIT_WEBHOOK_PORT", "8000")
+    if port is not None and port != webhook_port:
+        logger.info(
+            f"undispatched-room reconciler not started on :{port} "
+            f"(webhooks go to :{webhook_port})"
+        )
         return None
     return spawn(run_reconciler())
+
+
+def _uvicorn_port(argv: list[str]) -> str | None:
+    """The ``--port`` uvicorn was started with (``--port N`` or ``--port=N``)."""
+    for i, arg in enumerate(argv):
+        if arg == "--port" and i + 1 < len(argv):
+            return argv[i + 1]
+        if arg.startswith("--port="):
+            return arg.split("=", 1)[1]
+    return None

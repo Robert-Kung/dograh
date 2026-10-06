@@ -43,6 +43,7 @@ ROOM_DELETE_FAILED_EVENT = "livekit.room_delete_failed"
 LIVEKIT_EVENT_NAMES = (
     "on_connected",
     "on_first_participant_joined",
+    "on_participant_connected",
     "on_participant_disconnected",
     "on_disconnected",
 )
@@ -92,6 +93,9 @@ class LiveKitCallEvents:
             "on_first_participant_joined", self._on_first_participant_joined
         )
         self._transport.add_event_handler(
+            "on_participant_connected", self._on_participant_connected
+        )
+        self._transport.add_event_handler(
             "on_participant_disconnected", self._on_participant_disconnected
         )
         self._transport.add_event_handler("on_disconnected", self._on_disconnected)
@@ -130,6 +134,13 @@ class LiveKitCallEvents:
             )
         await self._on_caller_connected()
 
+    async def _on_participant_connected(self, _transport, participant_sid) -> None:
+        # The first participant may not have been the caller (review D-10).
+        if self.caller_sid is None and is_sip_participant(
+            self._transport, participant_sid
+        ):
+            self.caller_sid = participant_sid
+
     async def _on_participant_disconnected(self, _transport, participant_sid) -> None:
         if self.caller_sid is None or participant_sid != self.caller_sid:
             return
@@ -161,6 +172,7 @@ async def delete_room_at_run_end(
     trunk's ``max_call_duration`` stays the backstop when the delete fails.
     Never raises.
     """
+    from livekit.api.twirp_client import TwirpError
     from livekit.protocol.room import DeleteRoomRequest
 
     from api.services.observability.call_events import emit
@@ -169,6 +181,15 @@ async def delete_room_at_run_end(
     try:
         async with livekit_api(lk) as client:
             await client.room.delete_room(DeleteRoomRequest(room=room_name))
+    except TwirpError as e:
+        if e.code == "not_found":
+            return  # already deleted by the safetynet/overflow path (review D-03)
+        emit(
+            ROOM_DELETE_FAILED_EVENT,
+            room_name=room_name,
+            reason=e.code or type(e).__name__,
+            workflow_run_id=workflow_run_id,
+        )
     except Exception as e:
         emit(
             ROOM_DELETE_FAILED_EVENT,

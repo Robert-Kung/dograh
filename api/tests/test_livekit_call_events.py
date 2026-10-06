@@ -494,7 +494,7 @@ async def test_stuck_transfer_records_transfer_unknown(no_db):
             await asyncio.sleep(0.02)
         flow.cancel()
 
-    assert engine.ended == [(livekit_transfer_flow.TRANSFER_UNKNOWN_REASON, False)]
+    assert engine.ended == [(livekit_transfer_flow.TRANSFER_UNKNOWN_REASON, True)]
     assert no_db.await_args.kwargs["outcome"] == "transfer_unknown"
 
 
@@ -590,3 +590,22 @@ async def test_run_pipeline_livekit_deletes_room_on_every_ending(ending):
             pass
 
     delete.assert_awaited_once_with("cs-_+886212345678_abc", 42)
+
+
+async def test_sip_caller_joining_after_a_non_sip_participant_is_tracked():
+    """review D-10: the first participant need not be the caller."""
+    other = _participant("PA_x", "someone", STANDARD)
+    caller = _participant("PA_sip", "sip_+886911000001", SIP)
+    transport = _transport(other, caller)
+    engine = FakeEngine()
+    events, _, hangup = _call_events(transport, engine)
+    client = transport._client
+
+    await client._async_on_participant_connected(other)
+    await client._async_on_participant_connected(caller)
+    await _drain(transport)
+    assert events.caller_sid == "PA_sip"
+
+    await client._async_on_participant_disconnected(caller)
+    await _drain(transport)
+    hangup.assert_awaited_once()

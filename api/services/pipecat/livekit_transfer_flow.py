@@ -457,9 +457,13 @@ async def execute_cold_transfer(
             return {"status": "after_hours", "action": "announced_hangup"}
         return {"status": "after_hours", "action": "back_to_ai"}
     finally:
-        settle_watchdog.cancel()
-        await _settle_after_transfer(engine)
-        engine._livekit_transfer_in_progress = False
+        try:
+            settle_watchdog.cancel()
+            await _settle_after_transfer(engine)
+        except Exception as e:  # never-raises contract (C4); the flag must clear
+            logger.warning(f"transfer settle failed: {e}")
+        finally:
+            engine._livekit_transfer_in_progress = False
 
 
 async def _settle_after_transfer(engine) -> None:
@@ -520,4 +524,11 @@ async def _transfer_settle_watchdog(engine, room_name: str, transfer_reason: str
         outcome="transfer_unknown",
         transfer_reason=transfer_reason,
     )
-    await engine.end_call_with_reason(TRANSFER_UNKNOWN_REASON, abort_immediately=False)
+    # Shielded: the transfer flow's finally cancels this task when it finally
+    # returns, which would otherwise land between "_call_disposed=True" and the
+    # frame push inside end_call_with_reason — a disposed call with no end
+    # frame, every later ending a no-op (review D-01). CancelFrame, not
+    # EndFrame: whatever stalled the flow may also be holding the pipeline.
+    await asyncio.shield(
+        engine.end_call_with_reason(TRANSFER_UNKNOWN_REASON, abort_immediately=True)
+    )
