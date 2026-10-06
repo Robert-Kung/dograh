@@ -20,6 +20,7 @@ primitive): this is exactly where a near-simultaneous voice + press-0 race
 would otherwise issue two REFERs.
 """
 
+import asyncio
 import logging
 import re
 from collections.abc import Awaitable, Callable
@@ -29,6 +30,11 @@ from enum import Enum
 from api.services.pipecat.business_hours import is_open
 
 logger = logging.getLogger(__name__)
+
+# Upper bound on a cold transfer's in-flight window (livekit-event-wiring
+# 設計 B); must exceed the LiveKit API's 10 s total timeout (security L2).
+TRANSFER_SETTLE_TIMEOUT_SECONDS = 30.0
+TRANSFER_UNKNOWN_REASON = "transfer_unknown"
 
 # The pipecat frame / enum and the SIP REFER primitive are imported lazily inside
 # the executor so the pure decision logic (plan_transfer / valid_destination)
@@ -350,6 +356,9 @@ async def execute_cold_transfer(
             "reason": "already_transferring",
         }
     engine._livekit_transfer_in_progress = True
+    settle_watchdog = asyncio.create_task(
+        _transfer_settle_watchdog(engine, room_name, transfer_reason)
+    )
     try:
         decision = await resolve_transfer_decision(
             schedule,
@@ -448,4 +457,67 @@ async def execute_cold_transfer(
             return {"status": "after_hours", "action": "announced_hangup"}
         return {"status": "after_hours", "action": "back_to_ai"}
     finally:
+        settle_watchdog.cancel()
+        await _settle_after_transfer(engine)
         engine._livekit_transfer_in_progress = False
+
+
+async def _settle_after_transfer(engine) -> None:
+    """End the call now if the caller left while the transfer was in flight.
+
+    The LiveKit hangup handler defers to this flow while
+    ``_livekit_transfer_in_progress`` is set (livekit-event-wiring 設計 B): a
+    successful REFER has already ended the call with TRANSFER_CALL, so this
+    only acts when the transfer did not end it (REFER failed, after-hours
+    back-to-AI) — and then the AI must not talk to, or call tools in, an empty
+    room. ``abort_immediately=False`` keeps the final extraction.
+    """
+    if getattr(engine, "_livekit_caller_left", False) is not True:
+        return
+    if engine.is_call_disposed():
+        return
+    from pipecat.utils.enums import EndTaskReason
+
+    logger.info("caller left during transfer; ending call as user hangup")
+    await engine.end_call_with_reason(
+        EndTaskReason.USER_HANGUP.value, abort_immediately=False
+    )
+
+
+async def _transfer_settle_watchdog(engine, room_name: str, transfer_reason: str):
+    """Bound the transfer window (設計 B): past it, record ``transfer_unknown``.
+
+    Longer than the LiveKit API's 10 s total timeout, so it only fires when
+    the flow is stuck somewhere unbounded. The outcome is unknown — the REFER
+    may or may not have landed — so it is recorded as such, never as success.
+    """
+    await asyncio.sleep(TRANSFER_SETTLE_TIMEOUT_SECONDS)
+    if engine.is_call_disposed():
+        return
+    from api.services.observability.call_events import emit
+    from api.services.observability.call_outcome import record_call_outcome
+    from pipecat.utils.run_context import get_current_run_id
+
+    try:
+        run_id = get_current_run_id()
+        workflow_run_id = int(run_id) if run_id is not None else None
+    except (TypeError, ValueError):
+        workflow_run_id = None
+    logger.warning(
+        f"transfer still in progress after {TRANSFER_SETTLE_TIMEOUT_SECONDS:.0f}s "
+        f"for room {room_name}; ending call with outcome transfer_unknown"
+    )
+    emit(
+        "transfer.failed",
+        room_name=room_name,
+        reason="transfer_timeout",
+        workflow_run_id=workflow_run_id,
+        transfer_reason=transfer_reason,
+    )
+    await record_call_outcome(
+        engine,
+        workflow_run_id,
+        outcome="transfer_unknown",
+        transfer_reason=transfer_reason,
+    )
+    await engine.end_call_with_reason(TRANSFER_UNKNOWN_REASON, abort_immediately=False)

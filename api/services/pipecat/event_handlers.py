@@ -12,6 +12,7 @@ from api.services.pipecat.in_memory_buffers import (
     InMemoryLogsBuffer,
     InMemoryRecordingBuffers,
 )
+from api.services.pipecat.livekit_call_events import LiveKitCallEvents
 from api.services.pipecat.pipeline_metrics_aggregator import PipelineMetricsAggregator
 from api.services.pipecat.tracing_config import get_trace_url
 from api.services.posthog_client import capture_event
@@ -23,6 +24,7 @@ from pipecat.frames.frames import (
 )
 from pipecat.pipeline.worker import PipelineWorker
 from pipecat.processors.audio.audio_buffer_processor import AudioBufferProcessor
+from pipecat.transports.livekit.transport import LiveKitTransport
 from pipecat.utils.enums import EndTaskReason
 
 
@@ -167,20 +169,20 @@ def register_event_handlers(
                 generate_if_no_greeting=True,
             )
 
-    @transport.event_handler("on_client_connected")
-    async def on_client_connected(_transport, _participant):
-        logger.debug("In on_client_connected callback handler")
+    # Shared "caller connected" / "caller hung up" actions. They take *args
+    # because the event that drives them differs per transport (livekit-event-
+    # wiring 設計 A): an event name the transport never declared is dropped
+    # silently, which is how LIVEKIT lost its opening and hangup handling.
+    async def on_caller_connected(*_args):
+        logger.debug("In caller-connected handler")
         await audio_buffer.start_recording()
         ready_state["client_connected"] = True
         await maybe_trigger_initial_response()
 
-    @transport.event_handler("on_client_disconnected")
-    async def on_client_disconnected(_transport, _participant):
+    async def on_caller_hangup(*_args):
         call_disposed = engine.is_call_disposed()
 
-        logger.debug(
-            f"In on_client_disconnected callback handler. Call disposed: {call_disposed}"
-        )
+        logger.debug(f"In caller-hangup handler. Call disposed: {call_disposed}")
 
         # Stop recordings
         await audio_buffer.stop_recording()
@@ -188,6 +190,19 @@ def register_event_handlers(
         await engine.end_call_with_reason(
             EndTaskReason.USER_HANGUP.value, abort_immediately=True
         )
+
+    livekit_call_events = None
+    if isinstance(transport, LiveKitTransport):
+        livekit_call_events = LiveKitCallEvents(
+            transport,
+            engine,
+            on_caller_connected=on_caller_connected,
+            on_caller_hangup=on_caller_hangup,
+        )
+        livekit_call_events.register()
+    else:
+        transport.add_event_handler("on_client_connected", on_caller_connected)
+        transport.add_event_handler("on_client_disconnected", on_caller_hangup)
 
     @task.event_handler("on_pipeline_started")
     async def on_pipeline_started(_task: PipelineWorker, _frame: Frame):
@@ -228,6 +243,9 @@ def register_event_handlers(
         _frame: Frame,
     ):
         logger.debug(f"In on_pipeline_finished callback handler")
+
+        if livekit_call_events is not None:
+            livekit_call_events.close()
 
         workflow_run = await db_client.get_workflow_run_by_id(workflow_run_id)
 

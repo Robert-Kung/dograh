@@ -21,6 +21,9 @@ IMMEDIATE_EVENTS = {
     "safetynet.transfer_failed",
     "safetynet.terminated",
     "transfer.failed",
+    # The run ended but its room could not be deleted: the caller may be left
+    # on a silent SIP leg until the trunk's max_call_duration (C4).
+    "livekit.room_delete_failed",
     # The deployment-config verdict (platform review gate F-12). It was
     # previously only ``logger.bind(call_event=...)`` -- which is the event's
     # *shape*, not its *path*: nothing outside IMMEDIATE/WINDOWED ever reaches
