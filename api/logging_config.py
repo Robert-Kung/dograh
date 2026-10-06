@@ -150,6 +150,9 @@ def setup_logging():
             format=log_format,
             level=log_level,
             colorize=True,
+            # ccp W4c: tracebacks must not dump frame locals (participants,
+            # transcripts, caller numbers) past the masking patcher
+            diagnose=False,
         )
 
     loguru.logger = patched

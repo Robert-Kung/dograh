@@ -53,7 +53,7 @@ AUDIO_CHUNK = 64 * 1024
 _RUN_ID = re.compile(r"[1-9]\d{0,9}")
 _LAST4 = re.compile(r"\d{4}")
 _RECORDING_KEY = re.compile(r"recordings/\d+\.wav")
-_RANGE = re.compile(r"bytes=(\d*)-(\d*)")
+_RANGE = re.compile(r"bytes=(\d{0,15})-(\d{0,15})")
 
 
 class CallRecordsInvalid(ValueError):
@@ -412,18 +412,22 @@ SEEKABLE = False
 
 def build_segments(rows, audio_started_at: datetime | None) -> tuple[list, bool]:
     segments, truncated, total_bytes = [], len(rows) > MAX_SEGMENTS, 0
-    queued_ai_text = None
+    # TTS lines persisted when queued (no payload timestamp), awaiting their
+    # second, spoken copy
+    queued_ai: list[str] = []
     for kind, ts, payload_ts, body in rows[:MAX_SEGMENTS]:
         if not isinstance(body, str) or not body.strip():
             continue
         speaker = _SPEAKERS[kind]
-        # A TTSSpeakFrame persisted when queued (no payload timestamp: the
-        # consent notice, transfer and fallback lines) is logged again by the
-        # assistant aggregator once spoken — one utterance, one segment.
-        if speaker == "ai" and payload_ts and body == queued_ai_text:
-            queued_ai_text = None
+        # A TTSSpeakFrame persisted when queued (the consent notice, transfer
+        # and fallback lines) is logged again by the assistant aggregator once
+        # spoken — one utterance, one segment, even when the caller spoke in
+        # between.
+        if speaker == "ai" and payload_ts and body in queued_ai:
+            queued_ai.remove(body)
             continue
-        queued_ai_text = body if speaker == "ai" and not payload_ts else None
+        if speaker == "ai" and not payload_ts:
+            queued_ai.append(body)
         if len(body) > MAX_SEGMENT_CHARS:
             body, truncated = body[:MAX_SEGMENT_CHARS], True
         size = len(body.encode())
@@ -456,21 +460,22 @@ def _depth(value, level=0) -> int:
     return level
 
 
-def _display(value) -> str | int | float | bool:
+def _display(value) -> tuple[str | int | float | bool, bool]:
+    """Shown value and whether it was cut."""
     if isinstance(value, bool) or isinstance(value, int):
-        return value
+        return value, False
     if isinstance(value, float):
-        return value if math.isfinite(value) else UNDISPLAYABLE
+        return (value if math.isfinite(value) else UNDISPLAYABLE), False
     if isinstance(value, str):
         out = value
     else:
         try:
             if _depth(value) > MAX_EXTRACTED_DEPTH:
-                return UNDISPLAYABLE
+                return UNDISPLAYABLE, False
             out = json.dumps(value, ensure_ascii=False)
         except (TypeError, ValueError, RecursionError):
-            return UNDISPLAYABLE
-    return out[:MAX_EXTRACTED_CHARS]
+            return UNDISPLAYABLE, False
+    return out[:MAX_EXTRACTED_CHARS], len(out) > MAX_EXTRACTED_CHARS
 
 
 def build_extracted(raw) -> tuple[list, bool]:
@@ -480,10 +485,10 @@ def build_extracted(raw) -> tuple[list, bool]:
     truncated = len(items) > MAX_EXTRACTED_KEYS
     out = []
     for key, value in items[:MAX_EXTRACTED_KEYS]:
-        shown = _display(value)
-        if isinstance(value, str) and len(value) > MAX_EXTRACTED_CHARS:
-            truncated = True
-        out.append({"key": str(key)[:MAX_EXTRACTED_CHARS], "value": shown})
+        shown, cut = _display(value)
+        name = str(key)
+        truncated = truncated or cut or len(name) > MAX_EXTRACTED_CHARS
+        out.append({"key": name[:MAX_EXTRACTED_CHARS], "value": shown})
     return out, truncated
 
 
@@ -546,6 +551,23 @@ _AUDIO_SQL = text(
 )
 
 _audio_slots = asyncio.Semaphore(AUDIO_CONCURRENCY)
+_storages: dict = {}
+
+
+async def _storage(backend):
+    """One filesystem per backend, built off the event loop.
+
+    ``get_storage_for_backend`` builds a new client each call and the MinIO
+    constructor makes blocking bucket calls — on the loop the live calls run
+    on, per Range request (review M1).
+    """
+    from api.services.storage import get_storage_for_backend
+
+    fs = _storages.get(backend)
+    if fs is None:
+        fs = await asyncio.to_thread(get_storage_for_backend, backend)
+        _storages[backend] = fs
+    return fs
 
 
 def parse_range(header: str | None, size: int) -> tuple[int, int] | None:
@@ -613,7 +635,6 @@ async def open_audio(
     holds a connection the live calls share.
     """
     from api.services.filesystem.minio import MinioFileSystem
-    from api.services.storage import get_storage_for_backend
 
     async def run(session):
         return (
@@ -629,7 +650,7 @@ async def open_audio(
     if not _RECORDING_KEY.fullmatch(key):
         return None
     try:
-        fs = get_storage_for_backend(row.storage_backend)
+        fs = await _storage(row.storage_backend)
     except ValueError:
         return None
     if not isinstance(fs, MinioFileSystem):

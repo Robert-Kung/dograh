@@ -83,10 +83,17 @@ class MinioFileSystem(BaseFileSystem):
         try:
             if not self.client.bucket_exists(self.bucket_name):
                 self.client.make_bucket(self.bucket_name)
-            self.client.delete_bucket_policy(self.bucket_name)
         except Exception as e:
             # Bucket might already exist or we might be in a restricted environment
             logger.debug(f"Bucket setup note: {e}")
+        try:
+            self.client.delete_bucket_policy(self.bucket_name)
+        except Exception as e:
+            # recordings must never stay anonymously readable unnoticed
+            logger.error(
+                f"MinIO: could not remove the bucket policy of {self.bucket_name}: "
+                f"{type(e).__name__}"
+            )
 
     async def acreate_file(self, file_path: str, content: BinaryIO) -> bool:
         try:

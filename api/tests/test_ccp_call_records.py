@@ -587,6 +587,21 @@ async def test_no_extracted_variables(add_run):
     assert d["transcript_status"] == "none" and d["segments"] == []
 
 
+def test_tts_line_repeated_after_the_caller_spoke_is_one_segment():
+    rows = [
+        ("rtf-bot-text", "2021-11-05T02:00:01+00:00", None, "本通話將錄音"),
+        ("rtf-user-transcription", None, "2021-11-05T02:00:02+00:00", "喂"),
+        ("rtf-bot-text", None, "2021-11-05T02:00:03+00:00", "本通話將錄音"),
+    ]
+    segments, _ = cr.build_segments(rows, None)
+    assert [s["text"] for s in segments] == ["本通話將錄音", "喂"]
+
+
+def test_json_value_cut_marks_truncated():
+    extracted, truncated = cr.build_extracted({"items": ["x" * 300, "y" * 300]})
+    assert len(extracted[0]["value"]) == cr.MAX_EXTRACTED_CHARS and truncated
+
+
 def test_too_many_extracted_keys():
     extracted, truncated = cr.build_extracted({f"k{i}": i for i in range(60)})
     assert len(extracted) == cr.MAX_EXTRACTED_KEYS and truncated
@@ -665,6 +680,7 @@ def fake_minio(monkeypatch):
     fs.aget_file_metadata = metadata
     fs.client = types.SimpleNamespace(get_object=get_object)
     monkeypatch.setattr(storage, "get_storage_for_backend", lambda backend: fs)
+    monkeypatch.setattr(cr, "_storages", {})
     return state
 
 

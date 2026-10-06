@@ -52,32 +52,22 @@ def _transcript_keys(run) -> list[str]:
     return [run.transcript_url] if run.transcript_url else []
 
 
-async def _sweep(scope: str, days: int, runs, keys_of, clear) -> int:
-    deleted = 0
-    for run in runs:
-        keys = keys_of(run)
-        try:
-            fs = get_storage_for_backend(run.storage_backend)
-            failures = [key for key in keys if not await fs.adelete_file(key)]
-            if failures:
-                raise RuntimeError(f"storage delete failed for {failures}")
-            await clear(run.id)
-            await db_client.create_recording_retention_audit(
-                run.id, object_keys=keys, retention_days=days, result="ok", scope=scope
-            )
-            log_retention_event(run.id, keys, days, scope)
-            deleted += 1
-        except Exception as e:
-            # Leave the row intact — still pending means the next sweep
-            # retries. The audit row records the failed attempt.
-            logger.error(f"{scope} retention failed for run {run.id}: {e}")
-            await db_client.create_recording_retention_audit(
-                run.id,
-                object_keys=keys,
-                retention_days=days,
-                result=f"failed: {str(e)[:200]}",
-                scope=scope,
-            )
+BATCH = 500
+# A day's sweep stops after this many batches (500 000 runs) and resumes the
+# next day; failed runs are passed over by id so they cannot hold a batch.
+MAX_BATCHES = 1000
+
+
+async def _sweep(scope: str, days: int, fetch, keys_of, clear) -> int:
+    deleted, after_id = 0, 0
+    for _ in range(MAX_BATCHES):
+        runs = await fetch(days, limit=BATCH, after_id=after_id)
+        for run in runs:
+            if await _expire(scope, days, run, keys_of(run), clear):
+                deleted += 1
+        if len(runs) < BATCH:
+            break
+        after_id = runs[-1].id
     if deleted:
         logger.info(
             f"recording_retention: {scope} deleted for {deleted} runs "
@@ -86,12 +76,43 @@ async def _sweep(scope: str, days: int, runs, keys_of, clear) -> int:
     return deleted
 
 
+async def _expire(scope: str, days: int, run, keys: list[str], clear) -> bool:
+    try:
+        # nothing in storage (DB copy, number, extracted values only): no
+        # backend to resolve
+        if keys:
+            fs = get_storage_for_backend(run.storage_backend)
+            failures = [key for key in keys if not await fs.adelete_file(key)]
+            if failures:
+                raise RuntimeError(f"storage delete failed for {len(failures)} objects")
+        await clear(run.id)
+        await db_client.create_recording_retention_audit(
+            run.id, object_keys=keys, retention_days=days, result="ok", scope=scope
+        )
+        log_retention_event(run.id, keys, days, scope)
+        return True
+    except Exception as e:
+        # Leave the row intact — still pending means the next sweep retries.
+        # Type only: a DB error's text quotes bound parameters (logs,
+        # gathered_context) into an insert-only table no retention reaches.
+        reason = type(e).__name__
+        logger.error(f"{scope} retention failed for run {run.id}: {reason}")
+        await db_client.create_recording_retention_audit(
+            run.id,
+            object_keys=keys,
+            retention_days=days,
+            result=f"failed: {reason}",
+            scope=scope,
+        )
+        return False
+
+
 async def enforce_recording_retention(_ctx) -> None:
     days = audio_retention_days()
     await _sweep(
         "audio",
         days,
-        await db_client.get_expired_audio_runs(days),
+        db_client.get_expired_audio_runs,
         _audio_keys,
         db_client.clear_audio_artifacts,
     )
@@ -109,7 +130,7 @@ async def enforce_recording_retention(_ctx) -> None:
     await _sweep(
         "transcript",
         setting,
-        await db_client.get_expired_transcript_runs(setting),
+        db_client.get_expired_transcript_runs,
         _transcript_keys,
         db_client.clear_transcript_artifacts,
     )
