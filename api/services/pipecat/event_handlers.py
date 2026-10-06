@@ -284,18 +284,10 @@ def register_event_handlers(
 
         gathered_context["call_tags"] = call_tags
 
-        # Store disposition code in workflow for dynamic filtering
-        disposition_code = gathered_context.get("mapped_call_disposition")
-        if disposition_code and workflow_run:
-            try:
-                await db_client.add_call_disposition_code(
-                    workflow_run.workflow_id, disposition_code
-                )
-            except Exception as e:
-                logger.error(
-                    f"Error storing disposition code in workflow: {e}",
-                    exc_info=True,
-                )
+        # ccp W4b: mapped_call_disposition is not copied onto the workflow's
+        # call_disposition_codes — it can be LLM free text carrying caller PII,
+        # and the workflow read endpoint is open to the customer's read-only
+        # account. The value stays on the run's gathered_context.
 
         # Clean up engine resources (including voicemail detector)
         integration_logs: dict[str, object] = {}

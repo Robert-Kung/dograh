@@ -8,6 +8,7 @@ from pydantic import BaseModel
 from api.routes.agent_stream import router as agent_stream_router
 from api.routes.auth import router as auth_router
 from api.routes.campaign import router as campaign_router
+from api.routes.ccp_usage_report import router as ccp_usage_report_router
 from api.routes.credentials import router as credentials_router
 from api.routes.folder import router as folder_router
 from api.routes.knowledge_base import router as knowledge_base_router
@@ -52,6 +53,7 @@ router.include_router(s3_router)
 router.include_router(service_keys_router)
 router.include_router(organization_usage_router)
 router.include_router(reports_router)
+router.include_router(ccp_usage_report_router)
 router.include_router(webrtc_signaling_router)
 router.include_router(turn_credentials_router)
 router.include_router(public_embed_router)
@@ -155,9 +157,11 @@ def _verify_devops_secret(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Devops secret is not configured",
         )
+    # Bytes, not str: compare_digest raises TypeError on non-ASCII str, and a
+    # header value is caller-controlled (non-ASCII must be a 403, not a 500).
     if not provided_secret or not secrets.compare_digest(
-        provided_secret,
-        configured_secret,
+        provided_secret.encode("utf-8"),
+        configured_secret.encode("utf-8"),
     ):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,

@@ -277,7 +277,11 @@ def db_updates(monkeypatch):
     async def fake_update(run_id, **kwargs):
         captured.append({"run_id": run_id, **kwargs})
 
+    async def nothing_persisted(run_id):
+        return None
+
     monkeypatch.setattr(db_client, "update_workflow_run", fake_update)
+    monkeypatch.setattr(db_client, "get_workflow_run_by_id", nothing_persisted)
     return captured
 
 
@@ -469,3 +473,55 @@ async def test_engine_free_outcome_respects_db_precedence(monkeypatch):
     monkeypatch.setattr(db_client, "get_workflow_run_by_id", fake_get)
     await record_call_outcome(None, 7, outcome="safetynet_terminated")
     assert updates == []  # equal rank, first wins — no overwrite
+
+
+@pytest.fixture
+def run_store(monkeypatch):
+    """Persisted annotations shared across engine instances, like the real row."""
+    from api.db import db_client
+
+    store: dict[int, dict] = {}
+
+    async def fake_update(run_id, **kwargs):
+        store.setdefault(run_id, {}).update(kwargs.get("annotations") or {})
+
+    async def fake_get(run_id):
+        return types.SimpleNamespace(annotations=dict(store.get(run_id, {})))
+
+    monkeypatch.setattr(db_client, "update_workflow_run", fake_update)
+    monkeypatch.setattr(db_client, "get_workflow_run_by_id", fake_get)
+    return store
+
+
+@pytest.mark.asyncio
+async def test_engine_completion_does_not_clobber_server_side_safetynet(run_store):
+    """Mid-call safetynet fails → server-side exit writes without an engine →
+    the pipeline then winds down normally and tags ai_completed with the
+    engine, whose in-memory outcome is still empty (W4b 設計 C)."""
+    engine = types.SimpleNamespace()
+    await record_call_outcome(
+        None, 7, outcome="transferred:safetynet", transfer_reason="safetynet"
+    )
+    await record_call_outcome(engine, 7, outcome="ai_completed")
+    assert run_store[7]["call_outcome"] == "transferred:safetynet"
+
+
+@pytest.mark.asyncio
+async def test_engine_reads_back_only_when_memory_is_empty(run_store, monkeypatch):
+    from api.db import db_client
+
+    reads = []
+    original = db_client.get_workflow_run_by_id
+
+    async def counting_get(run_id):
+        reads.append(run_id)
+        return await original(run_id)
+
+    monkeypatch.setattr(db_client, "get_workflow_run_by_id", counting_get)
+    engine = types.SimpleNamespace()
+    await record_call_outcome(
+        engine, 7, outcome="transfer_failed:no_agent", transfer_reason="no_agent"
+    )
+    await record_call_outcome(engine, 7, outcome="ai_completed")
+    assert reads == [7]
+    assert run_store[7]["call_outcome"] == "transfer_failed:no_agent"
