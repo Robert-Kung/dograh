@@ -139,7 +139,10 @@ class RecordingConsentGate:
             workflow_run_id=self._workflow_run_id,
         )
         await self._persist(
-            {"failed_at": datetime.now(timezone.utc).isoformat(), "failed_reason": reason}
+            {
+                "failed_at": datetime.now(timezone.utc).isoformat(),
+                "failed_reason": reason,
+            }
         )
 
     async def play_notice(self) -> None:

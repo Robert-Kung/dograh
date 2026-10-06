@@ -9,7 +9,6 @@ from minio.error import S3Error
 
 from .base import BaseFileSystem
 
-
 # MinIO's default region; fixed so signing never queries the server.
 SIGNING_REGION = "us-east-1"
 _INLINE_TYPES = {"txt": "text/plain", "wav": "audio/wav", "mp3": "audio/mpeg"}

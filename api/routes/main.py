@@ -8,6 +8,7 @@ from pydantic import BaseModel
 from api.routes.agent_stream import router as agent_stream_router
 from api.routes.auth import router as auth_router
 from api.routes.campaign import router as campaign_router
+from api.routes.ccp_call_records import router as ccp_call_records_router
 from api.routes.ccp_usage_report import router as ccp_usage_report_router
 from api.routes.credentials import router as credentials_router
 from api.routes.folder import router as folder_router
@@ -54,6 +55,7 @@ router.include_router(service_keys_router)
 router.include_router(organization_usage_router)
 router.include_router(reports_router)
 router.include_router(ccp_usage_report_router)
+router.include_router(ccp_call_records_router)
 router.include_router(webrtc_signaling_router)
 router.include_router(turn_credentials_router)
 router.include_router(public_embed_router)

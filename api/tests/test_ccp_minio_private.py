@@ -48,7 +48,9 @@ def test_policy_removal_failure_does_not_break_startup(bucket_calls, monkeypatch
 
 
 async def test_get_url_is_signed_on_the_public_endpoint(bucket_calls):
-    url = await _fs().aget_signed_url("recordings/1.wav", expiration=600, force_inline=True)
+    url = await _fs().aget_signed_url(
+        "recordings/1.wav", expiration=600, force_inline=True
+    )
     parts = urlsplit(url)
     q = parse_qs(parts.query)
     assert parts.scheme == "https" and parts.netloc == "files.example.com"

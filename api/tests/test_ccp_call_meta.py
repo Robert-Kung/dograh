@@ -35,7 +35,9 @@ def _lk(*participants, error=None):
             raise error
         return types.SimpleNamespace(participants=list(participants))
 
-    return types.SimpleNamespace(room=types.SimpleNamespace(list_participants=list_participants))
+    return types.SimpleNamespace(
+        room=types.SimpleNamespace(list_participants=list_participants)
+    )
 
 
 @pytest.fixture
@@ -109,7 +111,9 @@ async def test_shared_room_writes_no_number(run_id, key, async_session):
 
 async def test_missing_key_writes_no_number(run_id, monkeypatch, async_session):
     monkeypatch.delenv("CALLER_NUMBER_HMAC_KEY", raising=False)
-    await call_meta.record_call_meta(run_id, "r", STARTED, lk=_lk(_p(SIP, "0912345678")))
+    await call_meta.record_call_meta(
+        run_id, "r", STARTED, lk=_lk(_p(SIP, "0912345678"))
+    )
     meta = await _meta(async_session, run_id)
     assert meta.caller_last4 is None and meta.audio_started_at == STARTED
 
@@ -131,24 +135,32 @@ async def test_db_failure_does_not_raise(key, logs):
 
 
 async def test_first_write_wins(run_id, key, async_session):
-    await call_meta.record_call_meta(run_id, "r", STARTED, lk=_lk(_p(SIP, "0912345678")))
+    await call_meta.record_call_meta(
+        run_id, "r", STARTED, lk=_lk(_p(SIP, "0912345678"))
+    )
     later = datetime(2026, 10, 6, 2, tzinfo=UTC)
     await call_meta.record_call_meta(run_id, "r", later, lk=_lk(_p(SIP, "0922333444")))
     meta = await _meta(async_session, run_id)
     assert meta.caller_last4 == "5678" and meta.audio_started_at == STARTED
 
 
-async def test_key_change_is_flagged_but_still_written(run_id, key, async_session, logs):
+async def test_key_change_is_flagged_but_still_written(
+    run_id, key, async_session, logs
+):
     await async_session.execute(
         text("INSERT INTO ccp_settings (id, key_fingerprint) VALUES (1, 'deadbeef')")
     )
-    await call_meta.record_call_meta(run_id, "r", STARTED, lk=_lk(_p(SIP, "0912345678")))
+    await call_meta.record_call_meta(
+        run_id, "r", STARTED, lk=_lk(_p(SIP, "0912345678"))
+    )
     assert (await _meta(async_session, run_id)).caller_last4 == "5678"
     assert any("CALLER_NUMBER_HMAC_KEY changed" in line for line in logs)
 
 
 async def test_fingerprint_recorded_on_first_use(run_id, key, async_session):
-    await call_meta.record_call_meta(run_id, "r", STARTED, lk=_lk(_p(SIP, "0912345678")))
+    await call_meta.record_call_meta(
+        run_id, "r", STARTED, lk=_lk(_p(SIP, "0912345678"))
+    )
     stored = (
         await async_session.execute(text("SELECT key_fingerprint FROM ccp_settings"))
     ).scalar_one()
@@ -166,7 +178,7 @@ def _register(consent_gate):
         add_event_handler=lambda name, fn: handlers.__setitem__(name, fn)
     )
     task = types.SimpleNamespace(
-        event_handler=lambda name: (lambda fn: fn), turn_trace_observer=None
+        event_handler=lambda name: lambda fn: fn, turn_trace_observer=None
     )
     audio_buffer = MagicMock()
     audio_buffer.start_recording = AsyncMock()

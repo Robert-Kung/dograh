@@ -2,7 +2,6 @@
 no-notice-no-recording, retention sweep, audit trail."""
 
 import types
-from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -288,9 +287,7 @@ def retention_env(monkeypatch):
         db_client, "get_expired_transcript_runs", fake_expired_transcript
     )
     monkeypatch.setattr(db_client, "clear_audio_artifacts", fake_clear)
-    monkeypatch.setattr(
-        db_client, "clear_transcript_artifacts", fake_clear_transcript
-    )
+    monkeypatch.setattr(db_client, "clear_transcript_artifacts", fake_clear_transcript)
     monkeypatch.setattr(db_client, "create_recording_retention_audit", fake_audit)
     monkeypatch.setattr(rr, "get_storage_for_backend", lambda backend: state["fs"])
     state["events"] = []
@@ -358,7 +355,9 @@ async def test_transcript_sweep_uses_its_own_setting(retention_env):
     assert retention_env["queried"] == {"audio": 180, "transcript": 30}
     assert retention_env["fs"].deleted == ["transcripts/3.txt"]
     assert retention_env["transcript_cleared"] == [3, 4]
-    assert {(a["run_id"], a["scope"], a["retention_days"]) for a in retention_env["audits"]} == {
+    assert {
+        (a["run_id"], a["scope"], a["retention_days"]) for a in retention_env["audits"]
+    } == {
         (3, "transcript", 30),
         (4, "transcript", 30),
     }
@@ -377,7 +376,9 @@ async def test_transcript_never_skips_the_sweep(retention_env, monkeypatch):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("value", [None, "0", "soon"])
-async def test_transcript_setting_missing_skips_and_logs(retention_env, monkeypatch, value):
+async def test_transcript_setting_missing_skips_and_logs(
+    retention_env, monkeypatch, value
+):
     from loguru import logger
 
     from api.tasks.recording_retention import enforce_recording_retention

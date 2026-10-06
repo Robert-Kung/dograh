@@ -81,7 +81,9 @@ async def test_audio_candidates(make_run, db_session):
         181, extra={"recordings": {"user": "recordings/u.wav"}}, meta=False
     )
     fresh = await make_run(179, recording_url="recordings/b.wav", meta=False)
-    transcript_only = await make_run(181, transcript_url="transcripts/c.txt", meta=False)
+    transcript_only = await make_run(
+        181, transcript_url="transcripts/c.txt", meta=False
+    )
 
     picked = await _ids(db_session.get_expired_audio_runs(180, limit=10_000))
     assert {old, tracks} <= picked
@@ -101,7 +103,9 @@ async def test_transcript_expiry_clears_every_copy(make_run, db_session, async_s
         logs=dict(LOGS),
         gathered_context=dict(GATHERED),
     )
-    fresh = await make_run(29, transcript_url="t/2.txt", gathered_context=dict(GATHERED))
+    fresh = await make_run(
+        29, transcript_url="t/2.txt", gathered_context=dict(GATHERED)
+    )
     editor = await make_run(31, mode="smallwebrtc", meta=False, logs=dict(LOGS))
     clean = await make_run(
         31, meta=False, gathered_context={"mapped_call_disposition": "x"}
@@ -142,7 +146,9 @@ async def test_transcript_expiry_clears_every_copy(make_run, db_session, async_s
 
 async def test_number_only_run_is_a_transcript_candidate(make_run, db_session):
     run_id = await make_run(31)
-    assert run_id in await _ids(db_session.get_expired_transcript_runs(30, limit=10_000))
+    assert run_id in await _ids(
+        db_session.get_expired_transcript_runs(30, limit=10_000)
+    )
 
 
 async def test_audit_scope_is_written(make_run, db_session, async_session):
