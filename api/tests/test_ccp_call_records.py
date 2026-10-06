@@ -484,8 +484,8 @@ async def test_transcript_segments(add_run):
     assert [
         (s["speaker"], s["text"], s["offset_ms"], s["seekable"]) for s in d["segments"]
     ] == [
-        ("ai", "本通話將錄音", 1500, True),
-        ("caller", "<img src=x onerror=alert(1)>", 4250, True),
+        ("ai", "本通話將錄音", 1500, False),
+        ("caller", "<img src=x onerror=alert(1)>", 4250, False),
     ]
     assert d["segments"][1]["at"] == "2021-11-05T02:00:04.250000+00:00"
     assert {s["source"] for s in d["segments"]} == {"ai_leg"}
@@ -501,6 +501,37 @@ async def test_segments_without_origin_are_not_seekable(add_run):
     run_id = await add_run(_at(2021, 11, 5), logs=logs)
     seg = (await _detail(run_id))["segments"][0]
     assert (seg["offset_ms"], seg["seekable"]) == (None, False)
+
+
+def test_queued_tts_line_logged_twice_is_one_segment():
+    notice = "本通話將錄音"
+    rows = [
+        ("rtf-bot-text", "2021-11-05T02:00:01+00:00", None, notice),  # queued
+        (
+            "rtf-bot-text",
+            "2021-11-05T02:00:03+00:00",
+            "2021-11-05T02:00:03+00:00",
+            notice,
+        ),
+        ("rtf-user-transcription", None, "2021-11-05T02:00:05+00:00", "嗨"),
+        ("rtf-bot-text", None, "2021-11-05T02:00:06+00:00", "了解"),
+        ("rtf-bot-text", None, "2021-11-05T02:00:08+00:00", "了解"),  # said twice
+    ]
+    segments, _ = cr.build_segments(rows, None)
+    assert [(s["speaker"], s["text"]) for s in segments] == [
+        ("ai", notice),
+        ("caller", "嗨"),
+        ("ai", "了解"),
+        ("ai", "了解"),
+    ]
+    assert segments[0]["at"] == "2021-11-05T02:00:01+00:00"
+
+
+def test_segments_are_never_seekable_while_the_recording_drifts():
+    origin = datetime(2021, 11, 5, 2, 0, tzinfo=UTC)
+    rows = [("rtf-bot-text", None, "2021-11-05T02:00:06+00:00", "了解")]
+    (seg,), _ = cr.build_segments(rows, origin)
+    assert (seg["offset_ms"], seg["seekable"]) == (6000, False)
 
 
 def test_segment_limits():

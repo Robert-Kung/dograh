@@ -41,6 +41,16 @@ def test_foreign_numbers_keep_their_country_code(raw, expected):
 
 
 @pytest.mark.parametrize(
+    "raw,expected",
+    [("0911000001", "+886911000001"), ("+886911000002", "+886911000002")],
+)
+def test_sip_phone_number_as_measured(raw, expected):
+    # task 0.5: livekit-sip passes the From user part as is (identity
+    # ``sip_<raw>``); the harness sent both spellings and both matched
+    assert ci.normalize_caller(raw) == expected
+
+
+@pytest.mark.parametrize(
     "raw",
     [
         None,

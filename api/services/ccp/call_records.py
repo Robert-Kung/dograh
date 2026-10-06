@@ -400,11 +400,30 @@ def _parse_ts(value) -> datetime | None:
     return parsed if parsed.tzinfo else None
 
 
+# Segments are not seekable (task 0.3, 2026-10-06, real INVITE): the event
+# times track the wall clock (caller ≈ +0.35 s after speech onset, AI text
+# ≈ 1.2 s before it is heard), but pipecat's AudioBufferProcessor adds silence
+# on wall-clock gaps on top of padding to the other track, so the recording's
+# time axis runs ahead of the wall clock by about a second per AI turn (+2 to
+# +4 s within a minute). No fixed correction exists; ``offset_ms`` stays as
+# "time since the call connected" for display only.
+SEEKABLE = False
+
+
 def build_segments(rows, audio_started_at: datetime | None) -> tuple[list, bool]:
     segments, truncated, total_bytes = [], len(rows) > MAX_SEGMENTS, 0
+    queued_ai_text = None
     for kind, ts, payload_ts, body in rows[:MAX_SEGMENTS]:
         if not isinstance(body, str) or not body.strip():
             continue
+        speaker = _SPEAKERS[kind]
+        # A TTSSpeakFrame persisted when queued (no payload timestamp: the
+        # consent notice, transfer and fallback lines) is logged again by the
+        # assistant aggregator once spoken — one utterance, one segment.
+        if speaker == "ai" and payload_ts and body == queued_ai_text:
+            queued_ai_text = None
+            continue
+        queued_ai_text = body if speaker == "ai" and not payload_ts else None
         if len(body) > MAX_SEGMENT_CHARS:
             body, truncated = body[:MAX_SEGMENT_CHARS], True
         size = len(body.encode())
@@ -420,8 +439,8 @@ def build_segments(rows, audio_started_at: datetime | None) -> tuple[list, bool]
             {
                 "at": _iso(at),
                 "offset_ms": offset_ms,
-                "seekable": offset_ms is not None,
-                "speaker": _SPEAKERS[kind],
+                "seekable": SEEKABLE and offset_ms is not None,
+                "speaker": speaker,
                 "text": body,
                 "source": "ai_leg",
             }
