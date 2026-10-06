@@ -381,6 +381,13 @@ async def midcall_safetynet(
         await engine.end_call_with_reason(
             EndTaskReason.PIPELINE_ERROR.value, abort_immediately=False
         )
+        # The announcement and the EndFrame enter at the pipeline source and
+        # queue behind whatever stalled the bot — the usual reason this path
+        # runs at all is a hung LLM stream. Measured (livekit-event-wiring
+        # 5.3): the caller sat in silence for the full 30 s stall before the
+        # message and the BYE. Bound it: past the deadline the room is deleted
+        # server-side (the SIP leg gets its BYE) and the pipeline cancelled.
+        spawn(_force_end_after_deadline(engine, room_name, workflow_run_id))
         log_event(
             "safetynet.terminated",
             room_name=room_name,
@@ -401,6 +408,33 @@ async def midcall_safetynet(
         await server_side_safetynet(
             room_name, "midcall_safetynet_error", workflow_run_id
         )
+
+
+SAFETYNET_END_DEADLINE_SECONDS = 10.0
+SAFETYNET_END_FORCED_EVENT = "safetynet.end_forced"
+
+
+async def _force_end_after_deadline(
+    engine, room_name: str, workflow_run_id: Optional[int]
+) -> None:
+    """Explicit end within a bound when the graceful end is stuck (C4)."""
+    await asyncio.sleep(SAFETYNET_END_DEADLINE_SECONDS)
+    task = getattr(engine, "task", None)
+    if task is None or task.has_finished():
+        return
+    log_event(
+        SAFETYNET_END_FORCED_EVENT,
+        room_name=room_name,
+        reason="graceful_end_stalled",
+        workflow_run_id=workflow_run_id,
+    )
+    from api.services.pipecat.livekit_call_events import delete_room_at_run_end
+
+    await delete_room_at_run_end(room_name, workflow_run_id)
+    try:
+        await task.cancel(reason="safetynet_end_deadline")
+    except Exception as e:
+        logger.warning(f"safetynet forced cancel failed for {room_name}: {e}")
 
 
 class SafetynetWatchdog(BaseObserver):

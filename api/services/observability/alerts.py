@@ -20,6 +20,9 @@ IMMEDIATE_EVENTS = {
     "safetynet.triggered",
     "safetynet.transfer_failed",
     "safetynet.terminated",
+    # The graceful end after a failed safetynet transfer was stuck past its
+    # deadline (hung LLM); the room was deleted server-side.
+    "safetynet.end_forced",
     "transfer.failed",
     # The run ended but its room could not be deleted: the caller may be left
     # on a silent SIP leg until the trunk's max_call_duration (C4).

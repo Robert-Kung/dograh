@@ -1003,3 +1003,59 @@ def test_reconciler_runs_only_in_the_webhook_worker(monkeypatch):
     assert livekit_safetynet.start_reconciler() == "task"
     monkeypatch.delenv("LIVEKIT_URL")
     assert livekit_safetynet.start_reconciler() is None
+
+
+# --- forced end after a stalled graceful end (livekit-event-wiring 5.3) -----
+
+
+async def test_force_end_after_deadline_deletes_room_and_cancels(monkeypatch):
+    import types
+    from unittest.mock import AsyncMock
+
+    from api.services.pipecat import livekit_safetynet
+
+    monkeypatch.setattr(livekit_safetynet, "SAFETYNET_END_DEADLINE_SECONDS", 0)
+    deleted = AsyncMock()
+    monkeypatch.setattr(
+        "api.services.pipecat.livekit_call_events.delete_room_at_run_end", deleted
+    )
+    emitted = []
+    monkeypatch.setattr(
+        livekit_safetynet, "log_event", lambda event, **kw: emitted.append(event)
+    )
+    task = types.SimpleNamespace(has_finished=lambda: False, cancel=AsyncMock())
+    engine = types.SimpleNamespace(task=task)
+
+    await livekit_safetynet._force_end_after_deadline(engine, "cs-x", 9)
+
+    deleted.assert_awaited_once_with("cs-x", 9)
+    task.cancel.assert_awaited_once()
+    assert emitted == [livekit_safetynet.SAFETYNET_END_FORCED_EVENT]
+
+
+async def test_force_end_is_noop_once_pipeline_finished(monkeypatch):
+    import types
+    from unittest.mock import AsyncMock
+
+    from api.services.pipecat import livekit_safetynet
+
+    monkeypatch.setattr(livekit_safetynet, "SAFETYNET_END_DEADLINE_SECONDS", 0)
+    deleted = AsyncMock()
+    monkeypatch.setattr(
+        "api.services.pipecat.livekit_call_events.delete_room_at_run_end", deleted
+    )
+    task = types.SimpleNamespace(has_finished=lambda: True, cancel=AsyncMock())
+
+    await livekit_safetynet._force_end_after_deadline(
+        types.SimpleNamespace(task=task), "cs-x", 9
+    )
+
+    deleted.assert_not_awaited()
+    task.cancel.assert_not_awaited()
+
+
+def test_forced_end_alerts_immediately():
+    from api.services.observability.alerts import IMMEDIATE_EVENTS
+    from api.services.pipecat.livekit_safetynet import SAFETYNET_END_FORCED_EVENT
+
+    assert SAFETYNET_END_FORCED_EVENT in IMMEDIATE_EVENTS
