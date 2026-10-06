@@ -781,7 +781,11 @@ async def test_both_setup_markers_land_on_the_same_engine(monkeypatch):
     async def fake_update(run_id, **kwargs):
         annotations.append(kwargs["annotations"])
 
+    async def fake_get(run_id):
+        return types.SimpleNamespace(annotations={})
+
     monkeypatch.setattr(db_client, "update_workflow_run", fake_update)
+    monkeypatch.setattr(db_client, "get_workflow_run_by_id", fake_get)
 
     async def resolve_transfer_call_config():
         return {"destination": "tel:+886912345678"}

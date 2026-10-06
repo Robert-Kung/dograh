@@ -155,9 +155,11 @@ def _verify_devops_secret(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Devops secret is not configured",
         )
+    # Bytes, not str: compare_digest raises TypeError on non-ASCII str, and a
+    # header value is caller-controlled (non-ASCII must be a 403, not a 500).
     if not provided_secret or not secrets.compare_digest(
-        provided_secret,
-        configured_secret,
+        provided_secret.encode("utf-8"),
+        configured_secret.encode("utf-8"),
     ):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,

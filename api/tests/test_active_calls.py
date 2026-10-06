@@ -211,6 +211,19 @@ def test_active_calls_route_rejects_wrong_secret(monkeypatch):
     assert response.status_code == 403
 
 
+def test_active_calls_route_rejects_non_ascii_secret(monkeypatch):
+    # Starlette decodes header bytes as latin-1; a str compare_digest on
+    # non-ASCII raised TypeError → 500 instead of 403.
+    client = _make_active_calls_client(monkeypatch)
+
+    response = client.get(
+        "/api/v1/health/active-calls",
+        headers={"X-Dograh-Devops-Secret": "test-dograh-devops-secrét".encode()},
+    )
+
+    assert response.status_code == 403
+
+
 def test_active_calls_route_returns_count_with_secret(monkeypatch):
     monkeypatch.delenv("LIVEKIT_MAX_CONCURRENT_CALLS", raising=False)
     active_calls.register_active_call(42)

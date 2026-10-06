@@ -135,3 +135,53 @@ async def test_run_pipeline_fires_initial_response_and_completes_run(
     # on_pipeline_finished merges call_tags into gathered_context.
     assert "Start" in refreshed.gathered_context.get("nodes_visited", [])
     assert "call_tags" in refreshed.gathered_context
+
+
+@pytest.mark.asyncio
+async def test_call_end_does_not_accumulate_disposition_on_workflow(
+    workflow_run_setup, db_session
+):
+    """W4b: mapped_call_disposition may be LLM free text carrying caller PII,
+    and the workflow read endpoint is reachable by the customer's read-only
+    account through the editor gateway — the call end must not copy it into
+    workflows.call_disposition_codes."""
+    workflow_run, user, workflow = workflow_run_setup
+    transport = MockTransport(
+        TransportParams(audio_in_enabled=True, audio_out_enabled=True)
+    )
+
+    captured_task: list = []
+    audio_config = create_audio_config(WorkflowRunMode.SMALLWEBRTC.value)
+    with patch_run_pipeline_externals(captured_task):
+        run_task = asyncio.create_task(
+            _run_pipeline(
+                transport=transport,
+                workflow_id=workflow.id,
+                workflow_run_id=workflow_run.id,
+                user_id=user.id,
+                audio_config=audio_config,
+                user_provider_id=user.provider_id,
+            )
+        )
+        for _ in range(60):
+            if captured_task or run_task.done():
+                break
+            await asyncio.sleep(0.05)
+        if run_task.done() and not captured_task:
+            run_task.result()
+        assert captured_task, "create_pipeline_task was never invoked"
+        pipeline_task = captured_task[0]
+        await wait_for_pipeline_worker_started(
+            pipeline_task, timeout=3.0, run_task=run_task
+        )
+        await asyncio.sleep(0.1)
+        await pipeline_task.cancel()
+        await asyncio.wait_for(run_task, timeout=5.0)
+
+    refreshed_run = await db_session.get_workflow_run_by_id(workflow_run.id)
+    assert refreshed_run.is_completed is True
+    # The run itself keeps its disposition (the report reads it from here) ...
+    assert refreshed_run.gathered_context.get("mapped_call_disposition")
+    # ... but nothing is copied onto the workflow.
+    refreshed = await db_session.get_workflow_by_id(workflow.id)
+    assert not (refreshed.call_disposition_codes or {}).get("disposition_codes")
