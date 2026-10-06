@@ -15,11 +15,11 @@ press-0 transfers don't cover:
   bypassed, because ``back_to_ai`` with a dead pipeline *is* dead air.
 
 The safetynet fires at most once per call. The latch is keyed by
-``workflow_run_id`` — room names repeat across calls (the SIP dispatch rule
-templates them on the dialed DID: ``cs-{call.to}``), so a room-name key would
-poison a phone number after its first incident. Pre-run failures
-(``no_did``/``unmapped_did``) have no run id and no concurrent second trigger
-path, so they skip the latch. The latch is per-process by design: every
+``workflow_run_id``, not the room name: rules are required to randomize
+room names (``cs-_<dialed>_<random>``), but a room-name key would poison a
+phone number after its first incident the day one does not. Pre-run failures
+(``no_did``/``unmapped_did``) have no run id and skip the latch; their
+redelivery is absorbed upstream by the dispatcher's per-call dedup. The latch is per-process by design: every
 trigger path for a given run (watchdog, crash catch-all, task done callback)
 executes in the process that launched the pipeline. It must NOT reuse
 ``_livekit_transfer_in_progress`` — that flag is an in-progress guard that
@@ -225,9 +225,9 @@ async def server_side_safetynet(
         async with livekit_api(lk) as client:
             destination = fallback_queue()
             if destination is not None:
-                # room_started-triggered failures (no_did/unmapped_did) can
-                # outrun the SIP caller joining the room — bounded wait, then
-                # REFER with the found identity (no second list, no TOCTOU).
+                # Bounded wait for the SIP caller (the reconciler and crash
+                # paths do not start from its join event), then REFER with the
+                # found identity (no second list, no TOCTOU).
                 identity = await wait_for_sip_participant(room_name, lk=client)
                 if identity is None:
                     result = {"status": "failed", "reason": "no_sip_caller"}
@@ -339,6 +339,8 @@ async def midcall_safetynet(
 
         from api.services.pipecat.livekit_transfer_flow import execute_cold_transfer
 
+        await _interrupt_stalled_turn(engine)
+
         destination = fallback_queue()
         if destination is None:
             # The resolver never raises (ccp#7 D4) — a failed lookup comes
@@ -368,6 +370,12 @@ async def midcall_safetynet(
             # A voice/press-0 transfer is mid-flight; it owns the call's exit.
             logger.info(f"safetynet yielded to in-flight transfer for {room_name}")
             return
+        if getattr(engine, "_livekit_caller_left", False) is True:
+            # The caller left during the transfer and the flow already ended
+            # the call (livekit-event-wiring 設計 B): nobody to announce to,
+            # and not a safetynet termination (review D-09).
+            logger.info(f"safetynet transfer ended by caller hangup for {room_name}")
+            return
         log_event(
             "safetynet.transfer_failed",
             room_name=room_name,
@@ -381,6 +389,13 @@ async def midcall_safetynet(
         await engine.end_call_with_reason(
             EndTaskReason.PIPELINE_ERROR.value, abort_immediately=False
         )
+        # The announcement and the EndFrame enter at the pipeline source and
+        # queue behind whatever stalled the bot — the usual reason this path
+        # runs at all is a hung LLM stream. Measured (livekit-event-wiring
+        # 5.3): the caller sat in silence for the full 30 s stall before the
+        # message and the BYE. Bound it: past the deadline the room is deleted
+        # server-side (the SIP leg gets its BYE) and the pipeline cancelled.
+        spawn(_force_end_after_deadline(engine, room_name, workflow_run_id))
         log_event(
             "safetynet.terminated",
             room_name=room_name,
@@ -401,6 +416,59 @@ async def midcall_safetynet(
         await server_side_safetynet(
             room_name, "midcall_safetynet_error", workflow_run_id
         )
+
+
+async def _interrupt_stalled_turn(engine) -> None:
+    """Cut whatever holds the floor before the safetynet speaks.
+
+    The announcements are TTSSpeakFrames queued at the pipeline source; a
+    stalled LLM stream (the usual cause of ``bot_silence``) blocks them in its
+    processor. An upstream ``InterruptionWorkerFrame`` bypasses the push
+    queue and becomes an ``InterruptionFrame`` inside the pipeline, which
+    cancels the in-flight generation. Best effort: never raises.
+    """
+    try:
+        from pipecat.frames.frames import InterruptionWorkerFrame
+        from pipecat.processors.frame_processor import FrameDirection
+
+        await engine.task.queue_frame(
+            InterruptionWorkerFrame(), FrameDirection.UPSTREAM
+        )
+    except Exception as e:
+        logger.warning(f"safetynet interruption skipped: {e}")
+
+
+SAFETYNET_END_DEADLINE_SECONDS = 10.0
+SAFETYNET_END_FORCED_EVENT = "safetynet.end_forced"
+
+
+async def _force_end_after_deadline(
+    engine, room_name: str, workflow_run_id: Optional[int]
+) -> None:
+    """Explicit end within a bound when the graceful end is stuck (C4)."""
+    await asyncio.sleep(SAFETYNET_END_DEADLINE_SECONDS)
+    task = getattr(engine, "task", None)
+    if task is None or task.has_finished():
+        return
+    log_event(
+        SAFETYNET_END_FORCED_EVENT,
+        room_name=room_name,
+        reason="graceful_end_stalled",
+        workflow_run_id=workflow_run_id,
+    )
+    from api.services.pipecat.livekit_call_events import delete_room_at_run_end
+
+    await delete_room_at_run_end(room_name, workflow_run_id)
+    try:
+        # Not task.cancel(): that queues CancelFrame on the worker's push
+        # queue, which is exactly what the stuck EndFrame is blocking
+        # (re-review F1, reproduced). Straight into the pipeline, the way
+        # the worker itself delivers InterruptionWorkerFrame.
+        from pipecat.frames.frames import CancelFrame
+
+        await task._pipeline.queue_frame(CancelFrame(reason="safetynet_end_deadline"))
+    except Exception as e:
+        logger.warning(f"safetynet forced cancel failed for {room_name}: {e}")
 
 
 class SafetynetWatchdog(BaseObserver):
@@ -605,3 +673,131 @@ async def resolve_safetynet_watchdog(
     return SafetynetWatchdog(
         on_fatal=_on_fatal, room_name=room_name, workflow_run_id=workflow_run.id
     )
+
+
+# --- reconciliation of undispatched rooms (livekit-event-wiring 設計 C) -----
+
+RECONCILE_INTERVAL_SECONDS = 30.0
+RECONCILE_MIN_AGE_SECONDS = 15.0
+RECONCILE_FAILED_EVENT = "livekit.reconcile_failed"
+
+
+async def reconcile_undispatched_rooms(
+    lk=None, *, now: float | None = None, dedup=None
+) -> int:
+    """Hand every ``cs-`` room whose SIP caller waits with no agent to the safetynet.
+
+    Covers a lost dispatch webhook — dograh restarting or down when the caller
+    joined, a path-secret or key mismatch, a rejected signature — which would
+    otherwise leave the caller in a silent room (C4). A room qualifies when it
+    has a SIP participant, no ``agent-*`` participant, the caller joined more
+    than ``RECONCILE_MIN_AGE_SECONDS`` ago, and the call is not claimed by the
+    dispatcher (in flight or done). Claimed here before the safetynet runs, so
+    a late webhook cannot dispatch the same call concurrently. One room's
+    error (e.g. deleted between the two listings) skips that room only, and
+    the hand-offs run concurrently so N stranded callers do not queue behind
+    each other's REFER (review D-04/D-06). Returns how many rooms were handed
+    off; a failed room listing propagates to the loop.
+    """
+    from livekit.protocol.room import ListParticipantsRequest, ListRoomsRequest
+
+    from api.services.pipecat import livekit_dispatcher
+    from api.services.pipecat.livekit_cold_transfer import SIP_KIND, livekit_api
+
+    dedup = dedup or livekit_dispatcher.dispatch_dedup
+    now = time.time() if now is None else now
+
+    async def _hand_off(client, room_name: str, key: str) -> bool:
+        try:
+            await server_side_safetynet(room_name, "undispatched", None, lk=client)
+        except BaseException:
+            dedup.release(key)
+            raise
+        dedup.commit(key)
+        return True
+
+    async with livekit_api(lk) as client:
+        rooms = (await client.room.list_rooms(ListRoomsRequest())).rooms
+        jobs = []
+        for room in rooms:
+            if not room.name.startswith(DEFAULT_ROOM_PREFIX):
+                continue
+            try:
+                participants = (
+                    await client.room.list_participants(
+                        ListParticipantsRequest(room=room.name)
+                    )
+                ).participants
+            except Exception as e:
+                if getattr(e, "code", None) == "not_found":
+                    continue  # the call ended between the two listings
+                call_events.emit(
+                    RECONCILE_FAILED_EVENT,
+                    room_name=room.name,
+                    reason=type(e).__name__,
+                )
+                continue
+            if any(p.identity.startswith("agent-") for p in participants):
+                continue
+            caller = next((p for p in participants if p.kind == SIP_KIND), None)
+            if caller is None or now - caller.joined_at < RECONCILE_MIN_AGE_SECONDS:
+                continue
+            key = livekit_dispatcher.dispatch_key(caller)
+            if not dedup.claim(key):
+                continue
+            jobs.append(_hand_off(client, room.name, key))
+        results = await asyncio.gather(*jobs, return_exceptions=True)
+    for r in results:
+        if isinstance(r, BaseException):
+            logger.warning(f"reconcile hand-off failed: {type(r).__name__}: {r}")
+    return sum(1 for r in results if r is True)
+
+
+async def run_reconciler(interval_seconds: float = RECONCILE_INTERVAL_SECONDS) -> None:
+    """Reconcile at startup and every ``interval_seconds``; never raises.
+
+    A failed listing affects neither dispatch nor live calls: it is reported
+    as an event and the next round tries again.
+    """
+    while True:
+        try:
+            await reconcile_undispatched_rooms()
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            call_events.emit(
+                RECONCILE_FAILED_EVENT, room_name="", reason=type(e).__name__
+            )
+        await asyncio.sleep(interval_seconds)
+
+
+def start_reconciler() -> Optional[asyncio.Task]:
+    """Start the loop in the process that receives the webhooks.
+
+    The dispatch dedup is per process and LiveKit only posts to :8000, so a
+    reconciler in another uvicorn worker could not see in-flight dispatches.
+    No LiveKit configured → nothing to reconcile.
+    """
+    import sys
+
+    if not os.environ.get("LIVEKIT_URL"):
+        return None
+    port = _uvicorn_port(sys.argv)
+    webhook_port = os.environ.get("LIVEKIT_WEBHOOK_PORT", "8000")
+    if port is not None and port != webhook_port:
+        logger.info(
+            f"undispatched-room reconciler not started on :{port} "
+            f"(webhooks go to :{webhook_port})"
+        )
+        return None
+    return spawn(run_reconciler())
+
+
+def _uvicorn_port(argv: list[str]) -> str | None:
+    """The ``--port`` uvicorn was started with (``--port N`` or ``--port=N``)."""
+    for i, arg in enumerate(argv):
+        if arg == "--port" and i + 1 < len(argv):
+            return argv[i + 1]
+        if arg.startswith("--port="):
+            return arg.split("=", 1)[1]
+    return None

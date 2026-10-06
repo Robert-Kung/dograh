@@ -899,6 +899,10 @@ class PipecatEngine:
         if reason not in (
             EndTaskReason.PIPELINE_ERROR.value,
             EndTaskReason.VOICEMAIL_DETECTED.value,
+            # ccp livekit-event-wiring: the transfer watchdog fires because the
+            # flow stalled, often on the same LLM the extraction would call —
+            # an unbounded extraction here re-creates the stuck ending.
+            "transfer_unknown",
         ):
             # Await any in-flight background extractions from previous nodes
             await self._await_pending_extractions()

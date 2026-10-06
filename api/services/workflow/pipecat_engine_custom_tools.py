@@ -1133,5 +1133,12 @@ class CustomToolManager:
                 },
                 properties=FunctionCallResultProperties(run_llm=False),
             )
+        elif self._engine.is_call_disposed():
+            # The caller left while the transfer was in flight and the flow
+            # already ended the call: no LLM turn for an empty room
+            # (livekit-event-wiring 設計 B).
+            await function_call_params.result_callback(
+                result, properties=FunctionCallResultProperties(run_llm=False)
+            )
         else:
             await self._handle_transfer_result(result, function_call_params, properties)

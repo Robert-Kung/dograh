@@ -491,7 +491,10 @@ async def test_full_capacity_skips_run_and_spawns_overflow(monkeypatch):
     _wire_dispatch(monkeypatch, created, piped)
 
     await livekit_dispatcher.dispatch_livekit_call(
-        "cs-+886912345678", _resolver, _fallback_fails
+        "cs-+886912345678",
+        {"sip.trunkPhoneNumber": "+886912345678"},
+        _resolver,
+        _fallback_fails,
     )
     await _drain()
     assert created == [] and piped == {}
@@ -520,7 +523,10 @@ async def test_dispatch_acks_before_overflow_completes(monkeypatch):
     # if it awaited the chain this would deadlock and time out
     await asyncio.wait_for(
         livekit_dispatcher.dispatch_livekit_call(
-            "cs-+886912345678", _resolver, _fallback_fails
+            "cs-+886912345678",
+            {"sip.trunkPhoneNumber": "+886912345678"},
+            _resolver,
+            _fallback_fails,
         ),
         timeout=1.0,
     )
@@ -547,14 +553,20 @@ async def test_dispatch_resumes_after_slot_release(monkeypatch):
     _wire_dispatch(monkeypatch, created, piped)
 
     await livekit_dispatcher.dispatch_livekit_call(
-        "cs-+886912345678", _resolver, _fallback_fails
+        "cs-+886912345678",
+        {"sip.trunkPhoneNumber": "+886912345678"},
+        _resolver,
+        _fallback_fails,
     )
     await _drain()
     assert overflowed == ["cs-+886912345678"] and created == []
 
     active_calls.unregister_active_call(1000)  # the occupying call ends
     await livekit_dispatcher.dispatch_livekit_call(
-        "cs-+886912345678", _resolver, _fallback_fails
+        "cs-+886912345678",
+        {"sip.trunkPhoneNumber": "+886912345678"},
+        _resolver,
+        _fallback_fails,
     )
     await _drain()
     assert len(created) == 1
@@ -575,7 +587,10 @@ async def test_gate_disabled_dispatch_unchanged(monkeypatch):
     _wire_dispatch(monkeypatch, created, piped)
 
     await livekit_dispatcher.dispatch_livekit_call(
-        "cs-+886912345678", _resolver, _fallback_fails
+        "cs-+886912345678",
+        {"sip.trunkPhoneNumber": "+886912345678"},
+        _resolver,
+        _fallback_fails,
     )
     await _drain()
     assert len(created) == 1
@@ -598,7 +613,10 @@ async def test_midway_failure_releases_reservation(monkeypatch):
         fb["reason"] = reason
 
     await livekit_dispatcher.dispatch_livekit_call(
-        "cs-+886912345678", _resolver, fallback
+        "cs-+886912345678",
+        {"sip.trunkPhoneNumber": "+886912345678"},
+        _resolver,
+        fallback,
     )
     assert fb == {"reason": "launch_failed"}
     assert active_calls.reserved_slot_count() == 0  # no slot leak (D2 try/finally)

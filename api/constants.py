@@ -152,6 +152,9 @@ COUNTRY_CODES = {
     "BE": "32",  # Belgium
     "LU": "352",  # Luxembourg
     "IE": "353",  # Ireland
+    # ccp: the LiveKit inbound DID hint (livekit-event-wiring 設計 C) — carriers
+    # may send the dialed number in national format ("0212345678").
+    "TW": "886",  # Taiwan
 }
 
 DEFAULT_ORG_CONCURRENCY_LIMIT = os.getenv("DEFAULT_ORG_CONCURRENCY_LIMIT", 2)

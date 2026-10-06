@@ -429,6 +429,11 @@ async def run_pipeline_livekit(
         raise
     finally:
         unregister_active_call(workflow_run_id)
+        # Every ending, whatever the reason, deletes the room so the SIP leg
+        # gets a BYE — the agent leaving alone is not an explicit end (C4).
+        from api.services.pipecat.livekit_call_events import delete_room_at_run_end
+
+        await delete_room_at_run_end(room_name, workflow_run_id)
 
 
 async def _run_pipeline_livekit_impl(

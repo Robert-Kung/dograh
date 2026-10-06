@@ -192,6 +192,10 @@ export type ActiveCallsResponse = {
      * Reserved Slots
      */
     reserved_slots: number;
+    /**
+     * Max Concurrent
+     */
+    max_concurrent: number;
 };
 
 /**
@@ -7657,21 +7661,32 @@ export type HandleVonageEventsApiV1TelephonyVonageEventsWorkflowRunIdPostRespons
     200: unknown;
 };
 
-export type LivekitInboundApiV1LivekitInboundPostData = {
+export type LivekitInboundApiV1LivekitInboundSecretPostData = {
     body?: never;
-    path?: never;
+    path: {
+        /**
+         * Secret
+         */
+        secret: string;
+    };
     query?: never;
-    url: '/api/v1/livekit/inbound';
+    url: '/api/v1/livekit/inbound/{secret}';
 };
 
-export type LivekitInboundApiV1LivekitInboundPostErrors = {
+export type LivekitInboundApiV1LivekitInboundSecretPostErrors = {
     /**
      * Not found
      */
     404: unknown;
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
 };
 
-export type LivekitInboundApiV1LivekitInboundPostResponses = {
+export type LivekitInboundApiV1LivekitInboundSecretPostError = LivekitInboundApiV1LivekitInboundSecretPostErrors[keyof LivekitInboundApiV1LivekitInboundSecretPostErrors];
+
+export type LivekitInboundApiV1LivekitInboundSecretPostResponses = {
     /**
      * Successful Response
      */

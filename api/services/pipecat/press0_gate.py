@@ -128,6 +128,8 @@ class Press0Gate(FrameProcessor):
         if (
             result.get("status") == "failed"
             and result.get("reason") != "already_transferring"
+            # caller left mid-transfer: the flow already ended the call
+            and getattr(self._engine, "_livekit_caller_left", False) is not True
         ):
             await self._engine.task.queue_frame(
                 TTSSpeakFrame(self._failure_message, persist_to_logs=True)

@@ -47,9 +47,11 @@ async def wait_for_sip_participant(
 ) -> str | None:
     """Short-poll until the room's SIP caller appears; return their identity.
 
-    ``room_started`` fires before the SIP participant has necessarily joined,
-    so REFER paths that start from the webhook (capacity overflow, dispatch
-    safetynet) race the caller into the room. Bounded: ``attempts`` polls,
+    Dispatch is triggered by the SIP caller's own ``participant_joined``
+    (livekit-event-wiring), so the caller is normally already listed; the
+    wait stays for the engine-free paths that start elsewhere (the
+    undispatched-room reconciler, a crashed pipeline) and for list lag.
+    Bounded: ``attempts`` polls,
     ``interval_seconds`` apart, then None — callers take their explicit-end
     leg (C4). Returning the identity lets callers hand it straight to
     :func:`cold_transfer_to_human`, avoiding a second list and its TOCTOU.

@@ -41,6 +41,35 @@ class InterceptHandler(logging.Handler):
         ).log(level, record.getMessage())
 
 
+# Request paths whose last segment is a secret (livekit-event-wiring,
+# security M8): the LiveKit webhook path secret must not reach the access log.
+SECRET_PATH_PREFIXES = ("/api/v1/livekit/inbound/",)
+
+
+class MaskSecretPathFilter(logging.Filter):
+    """Rewrite ``uvicorn.access`` records so secret path segments read ``<redacted>``.
+
+    uvicorn's access record args are ``(client, method, path, http_version,
+    status)``; the path includes the query string, so everything after the
+    prefix is masked.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        args = record.args
+        if isinstance(args, tuple) and len(args) >= 3 and isinstance(args[2], str):
+            for prefix in SECRET_PATH_PREFIXES:
+                if args[2].startswith(prefix):
+                    record.args = (*args[:2], f"{prefix}<redacted>", *args[3:])
+                    break
+        return True
+
+
+def install_access_log_masking() -> None:
+    access = logging.getLogger("uvicorn.access")
+    if not any(isinstance(f, MaskSecretPathFilter) for f in access.filters):
+        access.addFilter(MaskSecretPathFilter())
+
+
 def inject_run_id(record):
     """Inject run_id from context variable into log record"""
     record["extra"]["run_id"] = run_id_var.get()
@@ -120,6 +149,8 @@ def setup_logging():
         logging_logger.handlers = [InterceptHandler()]
         logging_logger.setLevel(logging.INFO)
         logging_logger.propagate = False
+
+    install_access_log_masking()
 
     # MCP SDK logs a line per request lifecycle event; child loggers inherit.
     logging.getLogger("mcp").setLevel(logging.WARNING)
