@@ -325,3 +325,53 @@ def test_boundaries_are_local_midnights():
         datetime(2021, 11, 1, 16, tzinfo=UTC),
         datetime(2021, 11, 2, 16, tzinfo=UTC),
     ]
+
+
+# --- review 8.1 ---
+
+
+@pytest.mark.asyncio
+async def test_disposition_tolerates_newlines_tabs_and_ideographic_space(add_run):
+    for value in ("billing_inquiry\n", "\tbilling_inquiry", "　Billing_Inquiry　"):
+        await add_run(_at(2021, 11, 9), disposition=value)
+
+    report = await ur.build_usage_report(
+        _query(date(2021, 11, 9), date(2021, 11, 9)), now=NOW
+    )
+
+    assert report["categories"]["billing_inquiry"]["calls"] == 3
+    assert report["unclassified"]["calls"] == 0
+
+
+@pytest.mark.asyncio
+async def test_one_dirty_duration_is_capped_not_fatal(add_run):
+    await add_run(_at(2021, 11, 10), seconds=1e10)
+    await add_run(_at(2021, 11, 10), seconds=30)
+
+    report = await ur.build_usage_report(
+        _query(date(2021, 11, 10), date(2021, 11, 10)), now=NOW
+    )
+
+    assert report["ai_seconds"] == ur.MAX_CALL_SECONDS + 30
+
+
+def test_code_with_trailing_newline_rejected():
+    with pytest.raises(ur.UsageReportInvalid):
+        ur.validate_query(
+            date(2021, 11, 1), date(2021, 11, 1), TZ, ["billing\n"], now=NOW
+        )
+
+
+@pytest.mark.asyncio
+async def test_persisted_outcome_reads_the_annotation(add_run, db_session):
+    from api.services.observability.call_outcome import _persisted_outcome
+
+    await add_run(_at(2021, 11, 11), outcome="transferred:safetynet", completed=False)
+    run_id = (
+        await db_session.execute_raw_query(
+            "select id from workflow_runs where name='usage-report-run' order by id desc limit 1"
+        )
+    )[0]["id"]
+
+    assert await _persisted_outcome(run_id) == "transferred:safetynet"
+    assert await _persisted_outcome(-1) is None
