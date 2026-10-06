@@ -116,7 +116,16 @@ async def lifespan(app: FastAPI):
 
         validate_recording_config()
 
+        # livekit-event-wiring: hand callers left in an agent-less cs- room by
+        # a lost dispatch webhook to the safetynet (startup + every 30 s).
+        from api.services.pipecat.livekit_safetynet import start_reconciler
+
+        reconciler = start_reconciler()
+
         yield  # Run app
+
+        if reconciler is not None:
+            reconciler.cancel()
 
         # Shutdown sequence - this runs when FastAPI is shutting down
         logger.info("Starting graceful shutdown...")

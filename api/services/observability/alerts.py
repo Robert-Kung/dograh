@@ -24,6 +24,10 @@ IMMEDIATE_EVENTS = {
     # The run ended but its room could not be deleted: the caller may be left
     # on a silent SIP leg until the trunk's max_call_duration (C4).
     "livekit.room_delete_failed",
+    # A signature failure on the dograh webhook path: the path secret was
+    # right, so calls are not being dispatched (key drift) or someone inside
+    # the deployment is forging. Already folded to one per minute at source.
+    "livekit.webhook_rejected",
     # The deployment-config verdict (platform review gate F-12). It was
     # previously only ``logger.bind(call_event=...)`` -- which is the event's
     # *shape*, not its *path*: nothing outside IMMEDIATE/WINDOWED ever reaches
@@ -79,6 +83,9 @@ WINDOWED_EVENTS = {
     "capacity.rejected",
     "transfer.config_rejected",
     "transfer.config_unvalidatable",
+    # The undispatched-room reconciler retries every 30 s; a LiveKit outage
+    # should page as one summary, not every round.
+    "livekit.reconcile_failed",
 }
 
 _redis = None

@@ -54,8 +54,13 @@ async def test_unmapped_did_routes_to_fallback():
     async def fallback(room, reason, workflow_run_id=None):
         fb["room"], fb["reason"] = room, reason
 
-    await dispatch_livekit_call("cs-+886912345678", resolver, fallback)
-    assert fb == {"room": "cs-+886912345678", "reason": "unmapped_did"}
+    await dispatch_livekit_call(
+        "cs-_+886912345678_abc",
+        {"sip.trunkPhoneNumber": "+886912345678"},
+        resolver,
+        fallback,
+    )
+    assert fb == {"room": "cs-_+886912345678_abc", "reason": "unmapped_did"}
 
 
 @pytest.mark.asyncio
@@ -68,5 +73,5 @@ async def test_no_did_routes_to_fallback():
     async def fallback(room, reason, workflow_run_id=None):
         fb["reason"] = reason
 
-    await dispatch_livekit_call("garbage-room", resolver, fallback)
+    await dispatch_livekit_call("cs-_+886912345678_abc", {}, resolver, fallback)
     assert fb["reason"] == "no_did"

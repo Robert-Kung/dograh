@@ -284,7 +284,10 @@ async def test_launch_failed_via_done_callback(monkeypatch):
     monkeypatch.setenv("LIVEKIT_URL", "ws://test")
 
     await livekit_dispatcher.dispatch_livekit_call(
-        "cs-+886912345678", resolver, fallback
+        "cs-+886912345678",
+        {"sip.trunkPhoneNumber": "+886912345678"},
+        resolver,
+        fallback,
     )
     for _ in range(10):  # let the task die and the callback's task run
         await asyncio.sleep(0)
@@ -316,7 +319,10 @@ async def test_prelaunch_failure_routes_to_fallback(monkeypatch):
 
     monkeypatch.setattr(db_client, "create_workflow_run", broken_create_workflow_run)
     await livekit_dispatcher.dispatch_livekit_call(
-        "cs-+886912345678", resolver, fallback
+        "cs-+886912345678",
+        {"sip.trunkPhoneNumber": "+886912345678"},
+        resolver,
+        fallback,
     )
     assert fb == {"reason": "launch_failed", "workflow_run_id": None}
 
@@ -862,3 +868,138 @@ async def test_midcall_survives_resolver_returning_none(monkeypatch, events):
     )
     assert captured["destination"] == ""
     assert calls  # explicit end, not silence
+
+
+# --- reconciliation of undispatched rooms (livekit-event-wiring §2.4) -------
+
+
+def _recon_lk(rooms: dict, *, fail=False):
+    """rooms: name -> list of (identity, kind, joined_at, attributes)."""
+    import types
+
+    async def list_rooms(req):
+        if fail:
+            raise ConnectionError("livekit unreachable")
+        return types.SimpleNamespace(
+            rooms=[types.SimpleNamespace(name=n) for n in rooms]
+        )
+
+    async def list_participants(req):
+        return types.SimpleNamespace(
+            participants=[
+                types.SimpleNamespace(
+                    identity=i, kind=k, joined_at=j, attributes=a, sid=f"PA_{i}"
+                )
+                for i, k, j, a in rooms[req.room]
+            ]
+        )
+
+    return types.SimpleNamespace(
+        room=types.SimpleNamespace(
+            list_rooms=list_rooms, list_participants=list_participants
+        )
+    )
+
+
+NOW = 1_791_250_000.0
+SIP = 3
+STANDARD = 0
+
+
+@pytest.fixture
+def recon(monkeypatch):
+    from api.services.pipecat import livekit_safetynet
+    from api.services.pipecat.livekit_dispatcher import DispatchDedup
+
+    handed = []
+
+    async def fake_safetynet(room, reason, run_id=None, lk=None):
+        handed.append((room, reason))
+
+    monkeypatch.setattr(livekit_safetynet, "server_side_safetynet", fake_safetynet)
+    return livekit_safetynet, DispatchDedup(), handed
+
+
+async def test_reconcile_hands_stranded_caller_to_safetynet(recon):
+    sn, dedup, handed = recon
+    lk = _recon_lk(
+        {"cs-_+886212345678_a": [("sip_x", SIP, NOW - 20, {"sip.callID": "SCL_1"})]}
+    )
+    n = await sn.reconcile_undispatched_rooms(lk, now=NOW, dedup=dedup)
+    assert n == 1
+    assert handed == [("cs-_+886212345678_a", "undispatched")]
+    assert not dedup.claim("SCL_1")  # committed: a late webhook won't dispatch
+
+
+async def test_reconcile_skips_rooms_that_need_no_rescue(recon):
+    sn, dedup, handed = recon
+    lk = _recon_lk(
+        {
+            # agent present
+            "cs-_a": [
+                ("sip_x", SIP, NOW - 60, {"sip.callID": "SCL_a"}),
+                ("agent-7", STANDARD, NOW - 50, {}),
+            ],
+            # caller joined 5 s ago: normal dispatch still has time
+            "cs-_b": [("sip_y", SIP, NOW - 5, {"sip.callID": "SCL_b"})],
+            # no SIP caller left (e.g. transferred)
+            "cs-_c": [],
+            # not ours
+            "queue-_d": [("sip_z", SIP, NOW - 60, {"sip.callID": "SCL_d"})],
+        }
+    )
+    assert await sn.reconcile_undispatched_rooms(lk, now=NOW, dedup=dedup) == 0
+    assert handed == []
+
+
+async def test_reconcile_leaves_in_flight_dispatch_alone(recon):
+    """派工進行中不誤收: the dispatcher's claim is the in-flight marker."""
+    sn, dedup, handed = recon
+    assert dedup.claim("SCL_1")  # webhook dispatch in progress, agent not in yet
+    lk = _recon_lk({"cs-_a": [("sip_x", SIP, NOW - 20, {"sip.callID": "SCL_1"})]})
+    assert await sn.reconcile_undispatched_rooms(lk, now=NOW, dedup=dedup) == 0
+    assert handed == []
+
+
+async def test_reconciler_loop_reports_listing_failure_and_continues(monkeypatch):
+    import asyncio
+
+    from api.services.pipecat import livekit_safetynet
+
+    rounds = []
+    emitted = []
+
+    async def failing(lk=None, **kw):
+        rounds.append(1)
+        raise ConnectionError("livekit unreachable")
+
+    monkeypatch.setattr(livekit_safetynet, "reconcile_undispatched_rooms", failing)
+    monkeypatch.setattr(
+        livekit_safetynet.call_events,
+        "emit",
+        lambda event, **kw: emitted.append(event),
+    )
+    task = asyncio.create_task(livekit_safetynet.run_reconciler(interval_seconds=0.01))
+    for _ in range(50):
+        if len(rounds) >= 2:
+            break
+        await asyncio.sleep(0.01)
+    task.cancel()
+    assert len(rounds) >= 2
+    assert set(emitted) == {livekit_safetynet.RECONCILE_FAILED_EVENT}
+
+
+def test_reconciler_runs_only_in_the_webhook_worker(monkeypatch):
+    from api.services.pipecat import livekit_safetynet
+
+    started = []
+    monkeypatch.setattr(
+        livekit_safetynet, "spawn", lambda coro: started.append(coro.close()) or "task"
+    )
+    monkeypatch.setenv("LIVEKIT_URL", "ws://livekit-server:7880")
+    monkeypatch.setattr("sys.argv", ["uvicorn", "api.app:app", "--port", "8001"])
+    assert livekit_safetynet.start_reconciler() is None
+    monkeypatch.setattr("sys.argv", ["uvicorn", "api.app:app", "--port", "8000"])
+    assert livekit_safetynet.start_reconciler() == "task"
+    monkeypatch.delenv("LIVEKIT_URL")
+    assert livekit_safetynet.start_reconciler() is None

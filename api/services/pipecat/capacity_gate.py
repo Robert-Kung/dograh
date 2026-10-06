@@ -55,9 +55,11 @@ PREMIUM_RATE_PREFIXES = ("1900", "1976", "886204")
 OVERFLOW_ACTION_TIMEOUT_SECONDS = 15.0
 
 # Rooms with an overflow action currently in flight. An in-progress guard, NOT
-# a permanent fired-set (security F1): room names repeat across calls (the SIP
-# dispatch rule templates them on the DID, ``cs-{call.to}``), so a permanent
-# latch would poison every later legitimate overflow on the same DID. Safe
+# a permanent fired-set (security F1): room names used to repeat across calls
+# (``cs-{call.to}``); they are randomized now (``cs-_<dialed>_<random>``,
+# livekit-event-wiring), but a permanent latch would still be wrong if a rule
+# ever drops the randomness — preflight rejects that, this guard does not rely
+# on it. Safe
 # here because the chain always terminates in transferred-or-deleted — there
 # is no failure-retry loop to guard against. Naturally bounded by the number
 # of concurrent overflows.
@@ -332,8 +334,8 @@ async def capacity_overflow(
     guard → flood valve → target → 營運中 ∧ 隊列健康 gate → wait for the SIP
     caller → REFER; any non-viable step deletes the room so the caller hears a
     hangup (C4). Emits exactly one ``capacity.rejected`` per rejection with
-    the final outcome; a redelivered ``room_started`` blocked by the guard
-    emits nothing.
+    the final outcome; a redelivered dispatch trigger (the SIP caller's
+    ``participant_joined``) blocked by the guard emits nothing.
     """
     if room_name in _overflow_in_progress:
         logger.info(
