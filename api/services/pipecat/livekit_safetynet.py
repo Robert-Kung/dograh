@@ -370,7 +370,7 @@ async def midcall_safetynet(
             # A voice/press-0 transfer is mid-flight; it owns the call's exit.
             logger.info(f"safetynet yielded to in-flight transfer for {room_name}")
             return
-        if getattr(engine, "is_call_disposed", lambda: False)() is True:
+        if getattr(engine, "_livekit_caller_left", False) is True:
             # The caller left during the transfer and the flow already ended
             # the call (livekit-event-wiring 設計 B): nobody to announce to,
             # and not a safetynet termination (review D-09).
@@ -460,7 +460,13 @@ async def _force_end_after_deadline(
 
     await delete_room_at_run_end(room_name, workflow_run_id)
     try:
-        await task.cancel(reason="safetynet_end_deadline")
+        # Not task.cancel(): that queues CancelFrame on the worker's push
+        # queue, which is exactly what the stuck EndFrame is blocking
+        # (re-review F1, reproduced). Straight into the pipeline, the way
+        # the worker itself delivers InterruptionWorkerFrame.
+        from pipecat.frames.frames import CancelFrame
+
+        await task._pipeline.queue_frame(CancelFrame(reason="safetynet_end_deadline"))
     except Exception as e:
         logger.warning(f"safetynet forced cancel failed for {room_name}: {e}")
 
@@ -723,6 +729,8 @@ async def reconcile_undispatched_rooms(
                     )
                 ).participants
             except Exception as e:
+                if getattr(e, "code", None) == "not_found":
+                    continue  # the call ended between the two listings
                 call_events.emit(
                     RECONCILE_FAILED_EVENT,
                     room_name=room.name,
@@ -739,6 +747,9 @@ async def reconcile_undispatched_rooms(
                 continue
             jobs.append(_hand_off(client, room.name, key))
         results = await asyncio.gather(*jobs, return_exceptions=True)
+    for r in results:
+        if isinstance(r, BaseException):
+            logger.warning(f"reconcile hand-off failed: {type(r).__name__}: {r}")
     return sum(1 for r in results if r is True)
 
 

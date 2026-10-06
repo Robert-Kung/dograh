@@ -18,6 +18,7 @@ the route.
 
 import asyncio
 import os
+import re
 import time
 from typing import Awaitable, Callable, Optional
 
@@ -54,15 +55,18 @@ Fallback = Callable[[str, str, Optional[int]], Awaitable[None]]
 def did_from_sip_attributes(attributes: dict) -> str | None:
     """E.164 DID from the SIP caller's ``sip.trunkPhoneNumber`` (C6), or None."""
     raw = ((attributes or {}).get(SIP_DIALED_ATTRIBUTE) or "").strip()
-    # The hint only for national format ("0…"): the normalizer strips "+"
-    # before comparing dial codes, so hinting "+1555…" or "001555…" would
-    # prefix 886 to a foreign number (review D-02).
-    if raw.startswith("00"):
-        raw, hint = "+" + raw[2:], None
-    elif raw.startswith("0"):
-        hint = DID_COUNTRY_HINT
-    else:
+    # No hint for an explicitly international number: the normalizer strips
+    # "+" before comparing dial codes, so hinting "+1555…" or "001555…" would
+    # prefix 886 to a foreign number (review D-02). Everything else — "02…",
+    # "2…" without the trunk prefix, "886…" without "+" — keeps the hint
+    # (re-review F13).
+    digits = re.sub(r"\D", "", raw)
+    if raw.startswith("+"):
         hint = None
+    elif digits.startswith("00"):
+        raw, hint = "+" + digits[2:], None
+    else:
+        hint = DID_COUNTRY_HINT
     try:
         normalized = normalize_telephony_address(raw, country_hint=hint)
     except ValueError:
@@ -125,6 +129,10 @@ class DispatchDedup:
 dispatch_dedup = DispatchDedup()
 
 
+async def _bounded(coro):
+    return await asyncio.wait_for(coro, timeout=DISPATCH_TIMEOUT_SECONDS)
+
+
 async def _resolve_with_retry(resolver: DidResolver, did: str):
     for delay in (*RESOLVER_RETRY_DELAYS_SECONDS, None):
         try:
@@ -178,12 +186,8 @@ async def dispatch_livekit_call(
     dedup = dedup or dispatch_dedup
     handed_off = False
     try:
-        # Bounded (review D-05): a DB await that hangs without raising would
-        # otherwise hold the claim — and the reconciler skips claimed calls —
-        # leaving the caller in silence until the trunk's max duration (C4).
-        handed_off = await asyncio.wait_for(
-            _dispatch(room_name, sip_attributes, resolver, fallback, livekit_url),
-            timeout=DISPATCH_TIMEOUT_SECONDS,
+        handed_off = await _dispatch(
+            room_name, sip_attributes, resolver, fallback, livekit_url
         )
     except Exception as e:
         logger.exception(f"LiveKit dispatch failed for {room_name}: {e}")
@@ -211,7 +215,14 @@ async def _dispatch(
         await fallback(room_name, "no_did", None)
         return True
 
-    resolved = await _resolve_with_retry(resolver, did)
+    # Bounded (review D-05): a DB await that hangs without raising would hold
+    # the claim — and the reconciler skips claimed calls — leaving the caller
+    # in silence (C4). Only the lookups are bounded, never a fallback: a
+    # fallback cut short mid-REFER would be retried as "dispatch_error" and
+    # fire twice (re-review F5).
+    resolved = await asyncio.wait_for(
+        _resolve_with_retry(resolver, did), timeout=DISPATCH_TIMEOUT_SECONDS
+    )
     if not resolved:
         await fallback(room_name, "unmapped_did", None)
         return True
@@ -253,17 +264,19 @@ async def _dispatch(
     workflow_run_id: Optional[int] = None
     slot_reserved = gate_enabled
     try:
-        workflow_run = await db_client.create_workflow_run(
-            name=f"livekit-{room_name}",
-            workflow_id=workflow_id,
-            mode=WorkflowRunMode.LIVEKIT.value,
-            user_id=user_id,
-            call_type=CallType.INBOUND,
-            initial_context={
-                "did": did,
-                "room_name": room_name,
-                "direction": "inbound",
-            },
+        workflow_run = await _bounded(
+            db_client.create_workflow_run(
+                name=f"livekit-{room_name}",
+                workflow_id=workflow_id,
+                mode=WorkflowRunMode.LIVEKIT.value,
+                user_id=user_id,
+                call_type=CallType.INBOUND,
+                initial_context={
+                    "did": did,
+                    "room_name": room_name,
+                    "direction": "inbound",
+                },
+            )
         )
         workflow_run_id = workflow_run.id
 

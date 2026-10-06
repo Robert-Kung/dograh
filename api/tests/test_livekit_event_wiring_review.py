@@ -21,6 +21,9 @@ from api.services.pipecat.livekit_dispatcher import DispatchDedup
         ("0015551234567", "+15551234567"),
         ("0212345678", "+886212345678"),
         ("+886212345678", "+886212345678"),
+        ("212345678", "+886212345678"),  # national without trunk prefix (F13)
+        ("886212345678", "+886212345678"),
+        ("(02)1234-5678", "+886212345678"),
     ],
 )
 def test_did_hint_does_not_rewrite_foreign_numbers(raw, expected):
@@ -32,20 +35,25 @@ def test_did_hint_does_not_rewrite_foreign_numbers(raw, expected):
 
 
 async def test_hung_dispatch_times_out_to_fallback(monkeypatch):
-    async def hang(*a, **kw):
+    async def hanging_resolver(did):
         await asyncio.sleep(3600)
 
     fallbacks = []
 
     async def fallback(room, reason, run_id=None):
+        await asyncio.sleep(0.1)  # longer than the budget: must not be cut (F5)
         fallbacks.append(reason)
 
-    monkeypatch.setattr(livekit_dispatcher, "_dispatch", hang)
     monkeypatch.setattr(livekit_dispatcher, "DISPATCH_TIMEOUT_SECONDS", 0.05)
     dedup = DispatchDedup()
     assert dedup.claim("SCL_1")
     await livekit_dispatcher.dispatch_livekit_call(
-        "cs-x", {}, None, fallback, dedup_key="SCL_1", dedup=dedup
+        "cs-x",
+        {"sip.trunkPhoneNumber": "+886212345678"},
+        hanging_resolver,
+        fallback,
+        dedup_key="SCL_1",
+        dedup=dedup,
     )
     assert fallbacks == ["dispatch_error"]
     assert not dedup.claim("SCL_1")  # handed off = committed
@@ -222,8 +230,10 @@ async def test_midcall_safetynet_quiet_when_caller_left_during_transfer(monkeypa
             self.task = types.SimpleNamespace(queue_frame=AsyncMock())
             self.end_call_with_reason = AsyncMock()
 
+        _livekit_caller_left = True  # the hangup handler deferred to the flow
+
         def is_call_disposed(self):
-            return True  # settle ended it as user hangup
+            return True
 
     async def failed_transfer(engine, **kw):
         return {"status": "failed", "reason": "no_sip_caller"}

@@ -241,7 +241,7 @@ async def test_first_participant_not_sip_disables_hangup_detection(warnings):
     connected.assert_awaited_once()
     hangup.assert_not_awaited()
     assert events.caller_sid is None
-    assert [w for w in warnings if "not SIP" in w]
+    assert [w for w in warnings if "no SIP participant" in w]
 
 
 async def test_agent_disconnect_ends_call():
@@ -607,5 +607,21 @@ async def test_sip_caller_joining_after_a_non_sip_participant_is_tracked():
     assert events.caller_sid == "PA_sip"
 
     await client._async_on_participant_disconnected(caller)
+    await _drain(transport)
+    hangup.assert_awaited_once()
+
+
+async def test_caller_present_but_not_first_is_found_on_connect():
+    """re-review F8: participants[0] is not necessarily the caller."""
+    other = _participant("PA_x", "someone", STANDARD)
+    caller = _participant("PA_sip", "sip_+886911000001", SIP)
+    transport = _transport(other, caller)
+    engine = FakeEngine()
+    events, _, hangup = _call_events(transport, engine)
+
+    await transport._client._callbacks.on_first_participant_joined("PA_x")
+    await _drain(transport)
+    assert events.caller_sid == "PA_sip"
+    await transport._client._async_on_participant_disconnected(caller)
     await _drain(transport)
     hangup.assert_awaited_once()

@@ -1023,13 +1023,20 @@ async def test_force_end_after_deadline_deletes_room_and_cancels(monkeypatch):
     monkeypatch.setattr(
         livekit_safetynet, "log_event", lambda event, **kw: emitted.append(event)
     )
-    task = types.SimpleNamespace(has_finished=lambda: False, cancel=AsyncMock())
+    pipeline = types.SimpleNamespace(queue_frame=AsyncMock())
+    task = types.SimpleNamespace(
+        has_finished=lambda: False, cancel=AsyncMock(), _pipeline=pipeline
+    )
     engine = types.SimpleNamespace(task=task)
 
     await livekit_safetynet._force_end_after_deadline(engine, "cs-x", 9)
 
     deleted.assert_awaited_once_with("cs-x", 9)
-    task.cancel.assert_awaited_once()
+    from pipecat.frames.frames import CancelFrame
+
+    # straight into the pipeline, not the worker's (blocked) push queue (F1)
+    assert isinstance(pipeline.queue_frame.await_args.args[0], CancelFrame)
+    task.cancel.assert_not_awaited()
     assert emitted == [livekit_safetynet.SAFETYNET_END_FORCED_EVENT]
 
 

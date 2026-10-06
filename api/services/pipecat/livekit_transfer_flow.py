@@ -529,6 +529,7 @@ async def _transfer_settle_watchdog(engine, room_name: str, transfer_reason: str
     # frame push inside end_call_with_reason — a disposed call with no end
     # frame, every later ending a no-op (review D-01). CancelFrame, not
     # EndFrame: whatever stalled the flow may also be holding the pipeline.
-    await asyncio.shield(
+    ending = asyncio.ensure_future(
         engine.end_call_with_reason(TRANSFER_UNKNOWN_REASON, abort_immediately=True)
     )
+    await asyncio.shield(ending)

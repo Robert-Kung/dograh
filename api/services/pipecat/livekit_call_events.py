@@ -128,9 +128,20 @@ class LiveKitCallEvents:
         if is_sip_participant(self._transport, participant_sid):
             self.caller_sid = participant_sid
         else:
+            # The transport hands over participants[0] only; the caller may be
+            # in the room already under another index (re-review F8).
+            self.caller_sid = next(
+                (
+                    sid
+                    for sid in self._transport.get_participants()
+                    if is_sip_participant(self._transport, sid)
+                ),
+                None,
+            )
+        if self.caller_sid is None:
             logger.warning(
-                f"first LiveKit participant {participant_sid} is not SIP; "
-                "hangup detection disabled for this call"
+                f"no SIP participant in the room when {participant_sid} joined; "
+                "hangup detection waits for a SIP participant to connect"
             )
         await self._on_caller_connected()
 
