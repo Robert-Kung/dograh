@@ -13,6 +13,7 @@ consent. The consent record (``consent_notice`` in workflow_run annotations)
 is compliance evidence and is never deleted with the recording.
 """
 
+import asyncio
 import os
 from datetime import datetime, timezone
 from typing import Optional
@@ -77,6 +78,9 @@ def log_consent_event(
     emit(event, room_name=room_name, reason=reason, workflow_run_id=workflow_run_id)
 
 
+# consent-record writes in flight (kept referenced until done)
+_pending_writes: set = set()
+
 NOTICE_FAILURE_REASONS = (
     "realtime_no_tts_path",
     "audio_greeting_ordering_unsupported",
@@ -120,18 +124,30 @@ class RecordingConsentGate:
             return False
 
     async def _persist(self, record: dict) -> None:
-        """Write the consent record on the run; a failure never reaches the call."""
-        try:
-            from api.db import db_client
+        """Write the consent record on the run in the background.
 
-            await db_client.update_workflow_run(
-                self._workflow_run_id, annotations={"consent_notice": record}
-            )
-        except Exception as e:
-            logger.error(f"failed to persist consent record: {type(e).__name__}")
+        It runs before the greeting on the call path: a slow or locked row
+        must not lengthen the caller's opening silence (C4). A failure only logs.
+        """
+
+        async def write():
+            try:
+                from api.db import db_client
+
+                await db_client.update_workflow_run(
+                    self._workflow_run_id, annotations={"consent_notice": record}
+                )
+            except Exception as e:
+                logger.error(f"failed to persist consent record: {type(e).__name__}")
+
+        task = asyncio.create_task(write())
+        _pending_writes.add(task)
+        task.add_done_callback(_pending_writes.discard)
 
     async def _failed(self, reason: str) -> None:
-        # reason is one of NOTICE_FAILURE_REASONS — never an exception message
+        # a fixed code, never an exception message
+        if reason not in NOTICE_FAILURE_REASONS:
+            reason = "playback_error"
         log_consent_event(
             "consent.notice_failed",
             room_name=self._room_name,

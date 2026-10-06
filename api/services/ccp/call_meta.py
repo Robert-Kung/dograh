@@ -27,10 +27,14 @@ _background: set[asyncio.Task] = set()
 def on_connected(
     workflow_run_id: int, room_name: str, audio_started_at: datetime
 ) -> None:
-    """Schedule the write; returns immediately."""
-    task = asyncio.create_task(
-        record_call_meta(workflow_run_id, room_name, audio_started_at)
-    )
+    """Schedule the write; returns immediately and never raises (C4)."""
+    try:
+        task = asyncio.create_task(
+            record_call_meta(workflow_run_id, room_name, audio_started_at)
+        )
+    except Exception as e:
+        logger.debug(f"call meta: not scheduled: {type(e).__name__}")
+        return
     _background.add(task)
     task.add_done_callback(_background.discard)
 
@@ -55,17 +59,22 @@ async def _sip_caller_numbers(room_name: str, lk=None) -> list[str]:
 async def key_mismatch(session, key: bytes) -> bool:
     """Record the key's fingerprint on first use; True once it has changed."""
     fingerprint = ci.key_fingerprint(key)
-    await session.execute(
-        text(
-            "INSERT INTO ccp_settings (id, key_fingerprint) VALUES (1, :fp)"
-            " ON CONFLICT (id) DO UPDATE SET key_fingerprint = :fp"
-            " WHERE ccp_settings.key_fingerprint IS NULL"
-        ),
-        {"fp": fingerprint},
-    )
     stored = (
         await session.execute(text("SELECT key_fingerprint FROM ccp_settings"))
-    ).scalar_one()
+    ).scalar_one_or_none()
+    if stored is None:
+        # first use only: a plain read every other call (no row lock per call)
+        await session.execute(
+            text(
+                "INSERT INTO ccp_settings (id, key_fingerprint) VALUES (1, :fp)"
+                " ON CONFLICT (id) DO UPDATE SET key_fingerprint = :fp"
+                " WHERE ccp_settings.key_fingerprint IS NULL"
+            ),
+            {"fp": fingerprint},
+        )
+        stored = (
+            await session.execute(text("SELECT key_fingerprint FROM ccp_settings"))
+        ).scalar_one()
     return stored != fingerprint
 
 

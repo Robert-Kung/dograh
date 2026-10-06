@@ -13,6 +13,13 @@ from api.services.pipecat.livekit_consent import (
 )
 
 
+async def _drain():
+    import asyncio
+
+    while lc._pending_writes:
+        await asyncio.gather(*list(lc._pending_writes))
+
+
 def _fake_engine(*, queue_raises=False):
     frames = []
 
@@ -113,6 +120,7 @@ async def test_notice_played_records_consent(monkeypatch, consent_events, db_upd
     gate = RecordingConsentGate(engine, room_name="cs-+886912", workflow_run_id=7)
     assert not gate.should_record
     await gate.play_notice()
+    await _drain()
     assert gate.should_record
     assert len(frames) == 1 and "錄音" in frames[0].text
     assert consent_events[0][0] == "consent.notice_played"
@@ -130,6 +138,7 @@ async def test_no_notice_text_means_no_recording(
     engine, frames = _fake_engine()
     gate = RecordingConsentGate(engine, room_name="cs-+886912", workflow_run_id=7)
     await gate.play_notice()
+    await _drain()
     assert not gate.should_record  # fail-safe: 未告知不錄音
     assert frames == []
     assert consent_events == []
@@ -146,7 +155,8 @@ async def test_notice_failure_no_recording_call_continues(
     monkeypatch.setenv("RECORD_CONSENT_NOTICE_TEXT", "本通話將錄音。")
     engine, _ = _fake_engine(queue_raises=True)
     gate = RecordingConsentGate(engine, room_name="cs-+886912", workflow_run_id=7)
-    await gate.play_notice()  # must not raise (C4)
+    await gate.play_notice()
+    await _drain()  # must not raise (C4)
     assert not gate.should_record
     assert consent_events[0][0] == "consent.notice_failed"
     assert consent_events[0][1]["reason"] == "playback_error"
@@ -167,6 +177,7 @@ async def test_consent_persist_failure_swallowed(monkeypatch, consent_events):
     engine, _ = _fake_engine()
     gate = RecordingConsentGate(engine, room_name="cs-+886912", workflow_run_id=7)
     await gate.play_notice()
+    await _drain()
     assert gate.should_record  # notice did play; persistence failure only logs
 
 
@@ -188,7 +199,8 @@ async def test_failure_and_disabled_persist_failures_swallowed(
     monkeypatch.setattr(db_client, "update_workflow_run", broken_update)
     engine, _ = _fake_engine(queue_raises=True)
     gate = RecordingConsentGate(engine, room_name="cs-+886912", workflow_run_id=7)
-    await gate.play_notice()  # must not raise (C4)
+    await gate.play_notice()
+    await _drain()  # must not raise (C4)
     assert not gate.should_record
 
 
@@ -257,13 +269,16 @@ def retention_env(monkeypatch):
         "fs": _FakeFS(),
     }
 
-    async def fake_expired_audio(days, limit=500):
-        state["queried"]["audio"] = days
-        return state["runs"]
+    def page(rows, limit, after_id):
+        return [r for r in rows if r.id > after_id][:limit]
 
-    async def fake_expired_transcript(days, limit=500):
+    async def fake_expired_audio(days, limit=500, after_id=0):
+        state["queried"]["audio"] = days
+        return page(state["runs"], limit, after_id)
+
+    async def fake_expired_transcript(days, limit=500, after_id=0):
         state["queried"]["transcript"] = days
-        return state["transcript_runs"]
+        return page(state["transcript_runs"], limit, after_id)
 
     async def fake_clear(run_id):
         state["cleared"].append(run_id)
@@ -364,6 +379,38 @@ async def test_transcript_sweep_uses_its_own_setting(retention_env):
 
 
 @pytest.mark.asyncio
+async def test_sweep_runs_every_batch_and_passes_failures_over(
+    retention_env, monkeypatch
+):
+    from api.tasks import recording_retention as rr
+
+    monkeypatch.setattr(rr, "BATCH", 3)
+    retention_env["fs"] = _FakeFS(
+        fail_keys={"recordings/1.wav", "recordings/2.wav", "recordings/3.wav"}
+    )
+    retention_env["runs"] = [_run(i) for i in range(1, 9)]
+    await rr.enforce_recording_retention(None)
+    # the failed first batch does not hold the rest back
+    assert retention_env["cleared"] == [4, 5, 6, 7, 8]
+    failed = [a for a in retention_env["audits"] if a["result"] != "ok"]
+    assert [a["run_id"] for a in failed] == [1, 2, 3]
+    assert all(a["result"] == "failed: RuntimeError" for a in failed)  # type only
+
+
+@pytest.mark.asyncio
+async def test_no_storage_lookup_without_objects(retention_env, monkeypatch):
+    from api.tasks import recording_retention as rr
+
+    def boom(backend):
+        raise ValueError("no S3 configured")
+
+    monkeypatch.setattr(rr, "get_storage_for_backend", boom)
+    retention_env["transcript_runs"] = [_run(4, recording=None)]  # DB copy only
+    await rr.enforce_recording_retention(None)
+    assert retention_env["transcript_cleared"] == [4]
+
+
+@pytest.mark.asyncio
 async def test_transcript_never_skips_the_sweep(retention_env, monkeypatch):
     from api.tasks.recording_retention import enforce_recording_retention
 
@@ -419,6 +466,7 @@ async def test_realtime_pipeline_no_notice_no_recording(
         engine, room_name="cs-+886912", workflow_run_id=7, is_realtime=True
     )
     await gate.play_notice()
+    await _drain()
     assert not gate.should_record
     assert frames == []
     assert consent_events[0][0] == "consent.notice_failed"
@@ -439,6 +487,7 @@ async def test_audio_greeting_no_notice_no_recording(
     engine.get_node_greeting = lambda node_id: ("audio", "42")
     gate = RecordingConsentGate(engine, room_name="cs-+886912", workflow_run_id=7)
     await gate.play_notice()
+    await _drain()
     assert not gate.should_record
     assert frames == []
     assert consent_events[0][1]["reason"] == "audio_greeting_ordering_unsupported"
@@ -454,5 +503,6 @@ async def test_text_greeting_still_records(monkeypatch, consent_events, db_updat
     engine.get_node_greeting = lambda node_id: ("text", "您好")
     gate = RecordingConsentGate(engine, room_name="cs-+886912", workflow_run_id=7)
     await gate.play_notice()
+    await _drain()
     assert gate.should_record
     assert len(frames) == 1

@@ -49,16 +49,24 @@ _TRANSCRIPT_PENDING = """(
           AND (m.caller_hmac IS NOT NULL OR m.caller_last4 IS NOT NULL
                OR m.caller_masked IS NOT NULL)
     )
-    OR (json_typeof(gathered_context) = 'object' AND EXISTS (
-        SELECT 1 FROM json_object_keys(gathered_context) AS k
+    OR EXISTS (
+        -- CASE, not AND: Postgres need not evaluate the type check first
+        SELECT 1 FROM json_object_keys(
+            CASE WHEN json_typeof(gathered_context) = 'object'
+                 THEN gathered_context ELSE '{}'::json END) AS k
         WHERE k <> ALL(CAST(:keep AS text[]))
-    ))
+    )
 )"""
 
 
 class RecordingRetentionClient(BaseDBClient):
     async def _expired_runs(
-        self, pending: str, days: int, limit: int, params: dict | None = None
+        self,
+        pending: str,
+        days: int,
+        limit: int,
+        params: dict | None = None,
+        after_id: int = 0,
     ) -> list[WorkflowRunModel]:
         # Anchored on created_at (call start): the model has no ended-at
         # column, and call start is always <= call end, so this errs early.
@@ -67,6 +75,7 @@ class RecordingRetentionClient(BaseDBClient):
             result = await session.execute(
                 select(WorkflowRunModel)
                 .where(WorkflowRunModel.created_at < cutoff)
+                .where(WorkflowRunModel.id > after_id)
                 .where(text(pending).bindparams(**(params or {})))
                 .order_by(WorkflowRunModel.id)
                 .limit(limit)
@@ -74,16 +83,18 @@ class RecordingRetentionClient(BaseDBClient):
             return list(result.scalars().all())
 
     async def get_expired_audio_runs(
-        self, retention_days: int, limit: int = 500
+        self, retention_days: int, limit: int = 500, after_id: int = 0
     ) -> list[WorkflowRunModel]:
         """Runs still holding a mixed or per-track recording past the window.
 
         Cleared rows never match again; failed rows are re-picked next sweep.
         """
-        return await self._expired_runs(_AUDIO_PENDING, retention_days, limit)
+        return await self._expired_runs(
+            _AUDIO_PENDING, retention_days, limit, after_id=after_id
+        )
 
     async def get_expired_transcript_runs(
-        self, retention_days: int, limit: int = 500
+        self, retention_days: int, limit: int = 500, after_id: int = 0
     ) -> list[WorkflowRunModel]:
         """Runs past the window still holding any transcript-derived data.
 
@@ -94,6 +105,7 @@ class RecordingRetentionClient(BaseDBClient):
             retention_days,
             limit,
             {"keep": list(TRANSCRIPT_KEEP_KEYS)},
+            after_id=after_id,
         )
 
     async def clear_audio_artifacts(self, workflow_run_id: int) -> None:
