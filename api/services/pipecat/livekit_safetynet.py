@@ -339,6 +339,8 @@ async def midcall_safetynet(
 
         from api.services.pipecat.livekit_transfer_flow import execute_cold_transfer
 
+        await _interrupt_stalled_turn(engine)
+
         destination = fallback_queue()
         if destination is None:
             # The resolver never raises (ccp#7 D4) — a failed lookup comes
@@ -408,6 +410,26 @@ async def midcall_safetynet(
         await server_side_safetynet(
             room_name, "midcall_safetynet_error", workflow_run_id
         )
+
+
+async def _interrupt_stalled_turn(engine) -> None:
+    """Cut whatever holds the floor before the safetynet speaks.
+
+    The announcements are TTSSpeakFrames queued at the pipeline source; a
+    stalled LLM stream (the usual cause of ``bot_silence``) blocks them in its
+    processor. An upstream ``InterruptionWorkerFrame`` bypasses the push
+    queue and becomes an ``InterruptionFrame`` inside the pipeline, which
+    cancels the in-flight generation. Best effort: never raises.
+    """
+    try:
+        from pipecat.frames.frames import InterruptionWorkerFrame
+        from pipecat.processors.frame_processor import FrameDirection
+
+        await engine.task.queue_frame(
+            InterruptionWorkerFrame(), FrameDirection.UPSTREAM
+        )
+    except Exception as e:
+        logger.warning(f"safetynet interruption skipped: {e}")
 
 
 SAFETYNET_END_DEADLINE_SECONDS = 10.0

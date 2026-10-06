@@ -1059,3 +1059,21 @@ def test_forced_end_alerts_immediately():
     from api.services.pipecat.livekit_safetynet import SAFETYNET_END_FORCED_EVENT
 
     assert SAFETYNET_END_FORCED_EVENT in IMMEDIATE_EVENTS
+
+
+async def test_safetynet_interrupts_stalled_turn_upstream():
+    import types
+
+    from pipecat.frames.frames import InterruptionWorkerFrame
+    from pipecat.processors.frame_processor import FrameDirection
+
+    from api.services.pipecat import livekit_safetynet
+
+    sent = []
+
+    async def queue_frame(frame, direction=FrameDirection.DOWNSTREAM):
+        sent.append((type(frame), direction))
+
+    engine = types.SimpleNamespace(task=types.SimpleNamespace(queue_frame=queue_frame))
+    await livekit_safetynet._interrupt_stalled_turn(engine)
+    assert sent == [(InterruptionWorkerFrame, FrameDirection.UPSTREAM)]
