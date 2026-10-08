@@ -201,11 +201,22 @@ async def test_exit_delete_failure_pages(answer, log, events):
     assert failed and failed[0]["room_name"] == ROOM
 
 
-async def test_exit_answer_failure_before_join_still_deletes(answer, log, events):
-    answer.fail_at["enter"] = "connect"
+async def test_exit_refused_before_join_still_deletes(answer, log, events):
+    answer.fail_at["enter"] = "saturated"
     ex = await _exit(log)
-    assert ex == sn.AnswerExit("answer_failed", stage="connect")
+    assert ex == sn.AnswerExit("answer_failed", stage="saturated")
     assert log == [("delete", ROOM)]  # never answered: this delete is the 486
+
+
+@pytest.mark.parametrize("stage", ["connect", "publish"])
+async def test_exit_failed_join_deletes_before_disconnect(answer, log, events, stage):
+    """Review M1: livekit-sip may already have answered a join that then
+    failed (a publish that timed out on our side but landed) — the room is
+    deleted before the participant leaves, never after."""
+    answer.fail_at["join"] = stage
+    ex = await _exit(log)
+    assert ex == sn.AnswerExit("answer_failed", stage=stage)
+    assert log == [("answer", ROOM), ("delete", ROOM), ("disconnect", ROOM)]
 
 
 async def test_exit_caller_left_never_refers(answer, log, events):
@@ -232,7 +243,7 @@ async def test_delete_not_found_is_not_a_failure(events):
         code = "not_found"
 
     lk = _lk([], delete_error=NotFound())
-    assert await sn.delete_room(ROOM, lk) is True
+    await sn.delete_room(ROOM, lk)
     assert events == []
 
 
@@ -296,9 +307,11 @@ async def test_safetynet_answer_unavailable_deletes(
     answer, log, events, monkeypatch, stage
 ):
     monkeypatch.setenv("SAFETYNET_FALLBACK_QUEUE", FALLBACK)
-    answer.fail_at["enter"] = stage
+    step = "join" if stage in ("connect", "publish") else "enter"
+    answer.fail_at[step] = stage
     await _safetynet(log)
-    assert log == [("delete", ROOM)]  # no REFER on an unanswered call
+    assert ("refer", FALLBACK) not in log  # no REFER without a played prompt
+    assert ("delete", ROOM) in log
     assert _names(events) == [
         "safetynet.triggered",
         "safetynet.transfer_failed",
@@ -584,9 +597,9 @@ async def test_overflow_answer_unavailable(
     answer, log, events, gate, monkeypatch, stage
 ):
     monkeypatch.setenv("CAPACITY_OVERFLOW_TRANSFER_TO", FALLBACK)
-    answer.fail_at["enter"] = stage
+    answer.fail_at["join" if stage == "connect" else "enter"] = stage
     await _overflow(_lk(log))
-    assert log == [("delete", ROOM)]
+    assert ("refer", FALLBACK) not in log and ("delete", ROOM) in log
     assert _rejected(events) == ("terminated", f"answer_{stage}")
 
 
@@ -646,3 +659,47 @@ def test_overflow_timeout_is_derived_not_fixed(monkeypatch):
     pcm = b"\x00" * la.FRAME_BYTES * 50 * 3  # 3 s
     monkeypatch.setattr(la, "_prompts", {"transfer": pcm, "end": pcm})
     assert capacity_gate.overflow_action_timeout() == pytest.approx(base + 2 * (3 + 1))
+
+
+# --- review H1: the overflow gate reads the workflow's node graph ---------------------
+
+
+async def test_gate_lookup_gets_a_node_graph_not_the_db_row(monkeypatch):
+    """Review H1: ``_gate_allows`` used to hand the DB row to the tool lookup,
+    which walks ``.nodes`` → AttributeError on every call → the gate degraded
+    to "open, health unchecked" and overflow REFERed into closed or dead
+    queues. Not mocked here: the real ``_gate_allows`` with a real-shaped row."""
+    from api.db import db_client
+    from api.services.pipecat import livekit_transfer_flow, transfer_call_config
+    from api.tests.support.workflow_rows import workflow_row
+
+    async def get_workflow(workflow_id, user_id):
+        return workflow_row(tool_uuid="xfer-1")
+
+    seen = {}
+
+    async def lookup(graph, organization_id):
+        seen["tool_uuids"] = [
+            tu
+            for n in graph.nodes.values()
+            for tu in (getattr(n, "tool_uuids", None) or [])
+        ]
+        return {"queueHealthUrl": "http://queue:8080/health"}
+
+    async def decide(schedule, alt, now, config):
+        seen["config"] = config
+        return livekit_transfer_flow.TransferDecision.UNAVAILABLE
+
+    unvalidatable = []
+    monkeypatch.setattr(db_client, "get_workflow", get_workflow)
+    monkeypatch.setattr(transfer_call_config, "find_transfer_call_config", lookup)
+    monkeypatch.setattr(capacity_gate, "resolve_transfer_decision", decide)
+    monkeypatch.setattr(
+        transfer_call_config, "_config_event", lambda *a, **k: unvalidatable.append(a)
+    )
+    from datetime import datetime, timezone
+
+    assert await capacity_gate._gate_allows(1, 1, datetime.now(timezone.utc)) is False
+    assert seen["tool_uuids"] == ["xfer-1"]
+    assert seen["config"] == {"queueHealthUrl": "http://queue:8080/health"}
+    assert unvalidatable == []

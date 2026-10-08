@@ -60,6 +60,8 @@ class FakeRtc:
         self.disconnect_hang = False
         self.capture_hang = False
         self.capture_error = None
+        self.caller_present = True
+        self.disconnect_order = None  # shared ordered log, when a test wants one
         self.options = None
         fake = self
 
@@ -69,6 +71,11 @@ class FakeRtc:
                 self.handlers = {}
                 self.disconnected = False
                 self.published = []
+                self.remote_participants = (
+                    {"sip_abc": types.SimpleNamespace(kind=3)}
+                    if fake.caller_present
+                    else {}
+                )
                 self.local_participant = types.SimpleNamespace(
                     publish_track=self._publish
                 )
@@ -91,6 +98,8 @@ class FakeRtc:
                 self.handlers[event] = cb
 
             async def disconnect(self):
+                if fake.disconnect_order is not None:
+                    fake.disconnect_order.append("disconnect")
                 if fake.disconnect_hang:
                     await asyncio.Event().wait()
                 self.disconnected = True
@@ -183,15 +192,15 @@ def asset_dir(tmp_path, monkeypatch):
 
 def test_validate_ok_caches_pcm_with_lead_silence(asset_dir, events):
     la.validate_answer_assets()
-    assert la.disabled_reason() is None
+    assert la._disabled_reason is None
     lead = int(la.LEAD_SILENCE_SECONDS * la.SAMPLE_RATE) * la.SAMPLE_WIDTH
     for pcm in la._prompts.values():
         assert pcm[:lead] == b"\x00" * lead
         assert len(pcm) % la.FRAME_BYTES == 0
         assert la._prompt_seconds(pcm) == pytest.approx(0.4, abs=0.021)
-    # D5: connect + publish + one play of each prompt + disconnect
+    # D5: connect + publish + one play of each prompt + disconnect + close
     assert la.hard_cap_seconds() == pytest.approx(
-        20 + 2 + 2 * (0.4 + 1.0) + 2, abs=0.05
+        20 + 2 + 2 * (0.4 + 1.0) + 2 + 2, abs=0.05
     )
     assert events == []
 
@@ -199,8 +208,9 @@ def test_validate_ok_caches_pcm_with_lead_silence(asset_dir, events):
 async def test_validate_missing_file_disables_without_raising(asset_dir, events):
     (asset_dir / "answer_end.wav").unlink()
     la.validate_answer_assets()  # never raises: boot continues (AC12)
-    assert "answer_end.wav" in la.disabled_reason()
+    assert la._disabled_reason == "answer_end.wav: FileNotFoundError"
     assert [e["event"] for e in events] == ["answer.disabled"]
+    assert events[0]["reason"] == "answer_end.wav: FileNotFoundError"  # no path
     with pytest.raises(AnswerFailed) as ei:
         async with answering(ROOM, reason="no_did"):
             pass
@@ -213,7 +223,7 @@ async def test_validate_missing_file_disables_without_raising(asset_dir, events)
 def test_validate_bad_format_disables(asset_dir, events, kw):
     _wav(asset_dir / "answer_transfer.wav", **kw)
     la.validate_answer_assets()
-    assert "answer_transfer.wav" in la.disabled_reason()
+    assert la._disabled_reason == "answer_transfer.wav: invalid"
     assert events[0]["event"] == "answer.disabled"
     assert events[0]["room_name"] == ""
 
@@ -222,8 +232,16 @@ def test_validate_skipped_without_livekit(asset_dir, events, monkeypatch):
     monkeypatch.delenv("LIVEKIT_URL")
     (asset_dir / "answer_end.wav").unlink()
     la.validate_answer_assets()
-    assert la.disabled_reason() == "not_validated"
+    assert la._disabled_reason == "not_validated"
     assert events == []
+
+
+def test_validate_rejects_overlong_prompt(asset_dir, events):
+    """A minutes-long recording is a wrong file: it would hold the slot and
+    stretch every bound derived from the prompt length (security LOW-10)."""
+    _wav(asset_dir / "answer_end.wav", frames=int(48000 * (la.MAX_PROMPT_SECONDS + 1)))
+    la.validate_answer_assets()
+    assert la._disabled_reason == "answer_end.wav: invalid"
 
 
 # --- 2.2 token grants -------------------------------------------------------------
@@ -311,6 +329,13 @@ async def test_non_cs_room_refused_before_joining(prompts, rtc, events):
     assert ei.value.stage == "room"
     assert rtc.rooms == []
     assert events[0]["event"] == "answer.failed" and events[0]["stage"] == "room"
+
+
+async def test_native_connect_timeout_is_set(prompts, rtc, events):
+    """Review L3: the FFI connect gives up on its own, not only the Python wait."""
+    async with answering(ROOM, reason="no_did"):
+        pass
+    assert rtc.options.connect_timeout == la.CONNECT_TIMEOUT_SECONDS
 
 
 async def test_connect_timeout(prompts, rtc, events, monkeypatch):
@@ -414,6 +439,104 @@ async def test_caller_left_during_play(prompts, rtc, events):
     assert ei.value.stage == "caller_left"
     failed = [e for e in events if e["event"] == "answer.failed"]
     assert failed[0]["stage"] == "caller_left"
+
+
+async def test_own_disconnect_is_not_caller_left(prompts, rtc, events):
+    """Review M2: losing the room ourselves is an incident (alerted), not a
+    caller hangup (exempt)."""
+    rtc.capture_hang = True
+
+    async def kicked():
+        await asyncio.sleep(0.02)
+        rtc.rooms[0].handlers["disconnected"](4)
+
+    with pytest.raises(AnswerFailed) as ei:
+        async with answering(ROOM, reason="no_did") as ans:
+            asyncio.ensure_future(kicked())
+            await ans.play("transfer")
+    assert ei.value.stage == "disconnected"
+    assert [e["stage"] for e in events if e["event"] == "answer.failed"] == [
+        "disconnected"
+    ]
+
+
+async def test_caller_gone_before_join_is_caller_left(prompts, rtc, events):
+    """Review M3: no SIP participant once joined → nobody to answer or play to."""
+    rtc.caller_present = False
+    with pytest.raises(AnswerFailed) as ei:
+        async with answering(ROOM, reason="undispatched") as ans:
+            await ans.play("transfer")
+    assert ei.value.stage == "caller_left"
+    assert rtc.sources[0].frames == 0
+
+
+async def test_hangup_during_join_is_seen(prompts, rtc, events):
+    """Review M3: handlers exist before connect, so a hangup while joining counts."""
+    real_room = rtc.Room
+
+    class SlowRoom(real_room):
+        async def connect(self, url, token, options=None):
+            self.handlers["participant_disconnected"](types.SimpleNamespace(kind=3))
+            await super().connect(url, token, options)
+
+    import livekit.rtc as real_rtc
+
+    real_rtc.Room = SlowRoom
+    try:
+        with pytest.raises(AnswerFailed) as ei:
+            async with answering(ROOM, reason="no_did") as ans:
+                await ans.play("end")
+    finally:
+        real_rtc.Room = rtc.Room
+    assert ei.value.stage == "caller_left"
+
+
+async def test_real_answering_deletes_before_disconnect_on_failed_join(
+    prompts, rtc, events
+):
+    """Review M1 end to end: the real ``answering`` under ``answer_then_exit``
+    — a publish that failed after joining still deletes before leaving."""
+    from api.services.pipecat import livekit_safetynet as sn
+
+    order = []
+    rtc.disconnect_order = order
+    rtc.publish_error = asyncio.TimeoutError()
+
+    async def delete_room(req):
+        order.append("delete")
+
+    lk = types.SimpleNamespace(room=types.SimpleNamespace(delete_room=delete_room))
+    ex = await sn.answer_then_exit(
+        ROOM, client=lk, identity="sip_abc", destination=None, reason="no_did"
+    )
+    assert ex == sn.AnswerExit("answer_failed", stage="publish")
+    assert order == ["delete", "disconnect"]
+
+
+async def test_real_answering_deletes_before_disconnect_when_play_hangs(
+    prompts, rtc, events, monkeypatch
+):
+    """AC9 end to end: a stuck capture hits its bound, then delete → disconnect."""
+    from api.services.pipecat import livekit_safetynet as sn
+
+    monkeypatch.setattr(la, "PLAY_SLACK_SECONDS", 0.05)
+    order = []
+    rtc.disconnect_order = order
+    rtc.capture_hang = True
+
+    async def delete_room(req):
+        order.append("delete")
+
+    lk = types.SimpleNamespace(room=types.SimpleNamespace(delete_room=delete_room))
+    ex = await asyncio.wait_for(
+        sn.answer_then_exit(
+            ROOM, client=lk, identity="sip_abc", destination=None, reason="no_did"
+        ),
+        2.0,
+    )
+    assert ex.kind == "answer_failed" and ex.stage == "play"
+    assert order == ["delete", "disconnect"]
+    assert la._active == 0
 
 
 async def test_non_sip_leaving_is_not_caller_left(prompts, rtc, events, monkeypatch):

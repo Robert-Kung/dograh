@@ -30,6 +30,7 @@ import os
 import secrets
 import time
 import wave
+from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
@@ -62,6 +63,9 @@ PUBLISH_TIMEOUT_SECONDS = 2.0
 PLAY_SLACK_SECONDS = 1.0
 DISCONNECT_TIMEOUT_SECONDS = 2.0
 TOKEN_TTL_SECONDS = 60
+# A prompt longer than this is a wrong file, not a longer message: every
+# second is held in the concurrency slot and the overflow chain's bound.
+MAX_PROMPT_SECONDS = 15.0
 
 # All answering participants in this process (design D10): one PeerConnection
 # each, sharing livekit-server's media ports with the agents (R-AV.11). 8 is
@@ -80,8 +84,10 @@ class AnswerFailed(Exception):
     """The answering participant could not (or must no longer) play.
 
     ``stage``: ``room`` / ``connect`` / ``publish`` / ``play`` / ``deadline`` /
-    ``caller_left`` — and, raised before anything joins, ``disabled`` (assets
-    failed validation at boot) / ``saturated`` (concurrency limit).
+    ``caller_left`` (the SIP caller left) / ``disconnected`` (this participant
+    lost the room — server-side kick, signal loss: an incident, not a hangup)
+    — and, raised before anything joins, ``disabled`` (assets failed
+    validation at boot) / ``saturated`` (concurrency limit).
     """
 
     def __init__(self, stage: str, detail: str = ""):
@@ -112,6 +118,8 @@ def _load_prompt(path: Path) -> bytes:
         pcm = w.readframes(w.getnframes())
     if not pcm:
         raise ValueError("empty")
+    if _prompt_seconds(pcm) > MAX_PROMPT_SECONDS:
+        raise ValueError(f"longer than {MAX_PROMPT_SECONDS:.0f} s")
     lead = b"\x00" * (
         int(LEAD_SILENCE_SECONDS * SAMPLE_RATE) * NUM_CHANNELS * SAMPLE_WIDTH
     )
@@ -126,24 +134,27 @@ def validate_answer_assets() -> None:
     (``answer.disabled``) instead of refusing to boot: a refusal would take
     every AI call, the webhooks and the reconciler down to protect the few
     calls that fall back to a 486 without it. Preflight §9b blocks the deploy;
-    this catches mount drift after it.
+    this catches mount drift after it. The event carries the file name and
+    the failure's type only — no paths, no exception text.
     """
     global _prompts, _disabled_reason
     if not os.environ.get("LIVEKIT_URL"):
         return
     directory = answer_audio_dir()
     loaded: dict[str, bytes] = {}
-    try:
-        for name, filename in PROMPT_FILES.items():
-            try:
-                loaded[name] = _load_prompt(directory / filename)
-            except Exception as e:
-                raise ValueError(f"{filename}: {type(e).__name__}: {e}") from e
-    except ValueError as e:
-        _prompts, _disabled_reason = {}, str(e)
-        logger.error(f"answering participant disabled: {e} (dir {directory})")
-        call_events.emit(ANSWER_DISABLED_EVENT, room_name="", reason=str(e)[:200])
-        return
+    for name, filename in PROMPT_FILES.items():
+        try:
+            loaded[name] = _load_prompt(directory / filename)
+        except Exception as e:
+            kind = "invalid" if isinstance(e, ValueError) else type(e).__name__
+            _prompts, _disabled_reason = {}, f"{filename}: {kind}"
+            logger.error(
+                f"answering participant disabled: {filename}: {e} (dir {directory})"
+            )
+            call_events.emit(
+                ANSWER_DISABLED_EVENT, room_name="", reason=_disabled_reason
+            )
+            return
     _prompts, _disabled_reason = loaded, None
     logger.info(
         f"answering participant ready: prompts "
@@ -158,32 +169,29 @@ def _play_limit(pcm: bytes) -> float:
 
 def hard_cap_seconds() -> float:
     """The participant's own lifetime bound (design D5): connect + publish +
-    one play of each prompt + disconnect. Excludes the caller's REFER."""
+    one play of each prompt + disconnect + source close. Excludes the
+    caller's REFER (the concurrency slot is held through it, though)."""
     plays = sum(_play_limit(p) for p in _prompts.values())
     return (
         CONNECT_TIMEOUT_SECONDS
         + PUBLISH_TIMEOUT_SECONDS
         + plays
-        + DISCONNECT_TIMEOUT_SECONDS
+        + 2 * DISCONNECT_TIMEOUT_SECONDS
     )
 
 
-def disabled_reason() -> Optional[str]:
-    return _disabled_reason
-
-
 class Answerer:
-    """One joined, published participant. Built only inside :func:`answering`."""
+    """One answering participant. Built only inside :func:`answering`."""
 
-    def __init__(self, room, source, *, room_name, reason, workflow_run_id, started):
-        self._room = room
-        self._source = source
+    def __init__(self, *, room_name, reason, workflow_run_id):
         self._room_name = room_name
         self._reason = reason
         self._workflow_run_id = workflow_run_id
-        self._started = started
-        self._budget = hard_cap_seconds() - (time.monotonic() - started)
-        self._caller_left = asyncio.Event()
+        self._started = time.monotonic()
+        self._budget = hard_cap_seconds()
+        self._source = None
+        self._stop = asyncio.Event()
+        self._stop_stage: Optional[str] = None
         self._lock = (
             asyncio.Lock()
         )  # one writer per AudioSource (InvalidState otherwise)
@@ -191,22 +199,36 @@ class Answerer:
     def _elapsed_ms(self) -> int:
         return int((time.monotonic() - self._started) * 1000)
 
-    def caller_left(self) -> None:
-        self._caller_left.set()
+    def stop(self, stage: str) -> None:
+        """``caller_left`` / ``disconnected``: the first one wins."""
+        if self._stop_stage is None:
+            self._stop_stage = stage
+            self._stop.set()
+
+    def failed(self, stage: str, detail: str = "") -> AnswerFailed:
+        call_events.emit(
+            ANSWER_FAILED_EVENT,
+            room_name=self._room_name,
+            reason=self._reason,
+            workflow_run_id=self._workflow_run_id,
+            elapsed_ms=self._elapsed_ms(),
+            stage=stage,
+        )
+        return AnswerFailed(stage, detail)
 
     async def _bounded(self, aw, *, stage: str, limit: float):
-        """Run ``aw`` within min(limit, remaining budget); caller hangup wins.
+        """Run ``aw`` within min(limit, remaining budget); a stop wins.
 
         On a timeout the work is cancelled and not awaited — a
         ``capture_frame`` that never returns must not hold the exit (AC9).
         """
         budget_binds = self._budget < limit
         task = asyncio.ensure_future(aw)
-        left = asyncio.ensure_future(self._caller_left.wait())
+        stopped = asyncio.ensure_future(self._stop.wait())
         t0 = time.monotonic()
         try:
             done, _ = await asyncio.wait(
-                {task, left},
+                {task, stopped},
                 timeout=max(0.0, min(limit, self._budget)),
                 return_when=asyncio.FIRST_COMPLETED,
             )
@@ -215,13 +237,17 @@ class Answerer:
             raise
         finally:
             self._budget -= time.monotonic() - t0
-            left.cancel()
+            stopped.cancel()
+        if stopped in done:
+            # A stop wins even when the work also finished: _push stops
+            # feeding on a stop and returns, which is not "played".
+            task.cancel()
+            task.add_done_callback(lambda t: t.cancelled() or t.exception())
+            raise AnswerFailed(self._stop_stage)
         if task in done:
             return task.result()
         task.cancel()
         task.add_done_callback(lambda t: t.cancelled() or t.exception())
-        if left in done:
-            raise AnswerFailed("caller_left")
         raise AnswerFailed("deadline" if budget_binds else stage)
 
     async def play(self, prompt: str) -> None:
@@ -230,7 +256,7 @@ class Answerer:
         "Played" = the last frame was captured and the source's queue drained
         (``wait_for_playout``), so a REFER or room delete right after cannot
         cut the prompt. Raises :class:`AnswerFailed` (``play`` / ``deadline``
-        / ``caller_left``); the caller then deletes the room.
+        / ``caller_left`` / ``disconnected``); the caller then deletes the room.
         """
         from livekit import rtc
 
@@ -241,11 +267,9 @@ class Answerer:
                     self._push(rtc, pcm), stage="play", limit=_play_limit(pcm)
                 )
             except AnswerFailed as e:
-                self._failed(e.stage)
-                raise
+                raise self.failed(e.stage) from e
             except Exception as e:
-                self._failed("play")
-                raise AnswerFailed("play", type(e).__name__) from e
+                raise self.failed("play", type(e).__name__) from e
         call_events.emit(
             ANSWER_OK_EVENT,
             room_name=self._room_name,
@@ -257,55 +281,39 @@ class Answerer:
 
     async def _push(self, rtc, pcm: bytes) -> None:
         for off in range(0, len(pcm), FRAME_BYTES):
-            if self._caller_left.is_set():
-                break  # _bounded reports caller_left; stop feeding the queue
+            if self._stop.is_set():
+                break  # _bounded reports the stop; stop feeding the queue
             frame = rtc.AudioFrame(
                 pcm[off : off + FRAME_BYTES], SAMPLE_RATE, NUM_CHANNELS, FRAME_SAMPLES
             )
             await self._source.capture_frame(frame)
         await self._source.wait_for_playout()
 
-    def _failed(self, stage: str) -> None:
-        call_events.emit(
-            ANSWER_FAILED_EVENT,
-            room_name=self._room_name,
-            reason=self._reason,
-            workflow_run_id=self._workflow_run_id,
-            elapsed_ms=self._elapsed_ms(),
-            stage=stage,
-        )
-
 
 @asynccontextmanager
 async def answering(
-    room_name: str, *, reason: str, workflow_run_id: Optional[int] = None
+    room_name: str,
+    *,
+    reason: str,
+    workflow_run_id: Optional[int] = None,
+    before_disconnect: Optional[Callable[[], Awaitable[None]]] = None,
 ):
     """Join ``room_name``, publish one track, yield an :class:`Answerer`.
 
     Raises :class:`AnswerFailed` before yielding (``room`` / ``disabled`` /
-    ``saturated`` / ``connect`` / ``publish``). On exit — any exit, cancel
-    included — disconnects within a bound and gives up past it; the room
-    delete that actually ends the call is the caller's and MUST come first
-    (``answer_then_exit``). The rtc objects are built here, inside the running
-    loop: built outside it, ``connect()`` hangs forever with no error
-    (queue media bot, 2026-07-21).
+    ``saturated`` / ``connect`` / ``publish``). On every exit after the join
+    attempt — failure, cancel or normal — ``before_disconnect`` runs first
+    (the caller's room delete: once livekit-sip may have answered, the SIP
+    leg must not be left alone in the room, review M1), then the participant
+    disconnects within a bound and gives up past it. The rtc objects are
+    built here, inside the running loop: built outside it, ``connect()``
+    hangs forever with no error (queue media bot, 2026-07-21).
     """
     global _active
-    started = time.monotonic()
-
-    def _fail(stage: str, detail: str = "") -> AnswerFailed:
-        call_events.emit(
-            ANSWER_FAILED_EVENT,
-            room_name=room_name,
-            reason=reason,
-            workflow_run_id=workflow_run_id,
-            elapsed_ms=int((time.monotonic() - started) * 1000),
-            stage=stage,
-        )
-        return AnswerFailed(stage, detail)
+    ans = Answerer(room_name=room_name, reason=reason, workflow_run_id=workflow_run_id)
 
     if not room_name or not room_name.startswith(DEFAULT_ROOM_PREFIX):
-        raise _fail("room")
+        raise ans.failed("room")
     if _disabled_reason is not None:
         # Already paged once at boot (answer.disabled); per call only the log.
         logger.warning(
@@ -326,73 +334,84 @@ async def answering(
     from api.services.pipecat.livekit_dispatcher import _sign_agent_token
 
     _active += 1
+    room = None
     try:
-        token = _sign_agent_token(
-            room_name,
-            f"{IDENTITY_PREFIX}{secrets.token_hex(4)}",
-            can_subscribe=False,
-            can_publish_data=False,
-            can_publish_sources=["microphone"],
-            ttl_seconds=TOKEN_TTL_SECONDS,
-        )
-        room = rtc.Room()
-        source = None
         try:
-            try:
-                await asyncio.wait_for(
-                    room.connect(
-                        os.environ["LIVEKIT_URL"],
-                        token,
-                        options=rtc.RoomOptions(auto_subscribe=False),
-                    ),
-                    CONNECT_TIMEOUT_SECONDS,
-                )
-            except Exception as e:
-                raise _fail("connect", type(e).__name__) from e
-            source = rtc.AudioSource(
-                SAMPLE_RATE, NUM_CHANNELS, queue_size_ms=QUEUE_SIZE_MS
+            token = _sign_agent_token(
+                room_name,
+                f"{IDENTITY_PREFIX}{secrets.token_hex(4)}",
+                can_subscribe=False,
+                can_publish_data=False,
+                can_publish_sources=["microphone"],
+                ttl_seconds=TOKEN_TTL_SECONDS,
             )
-            track = rtc.LocalAudioTrack.create_audio_track("answer", source)
-            try:
-                await asyncio.wait_for(
-                    room.local_participant.publish_track(
-                        track,
-                        rtc.TrackPublishOptions(
-                            source=rtc.TrackSource.SOURCE_MICROPHONE
-                        ),
-                    ),
-                    PUBLISH_TIMEOUT_SECONDS,
-                )
-            except Exception as e:
-                raise _fail("publish", type(e).__name__) from e
-
-            ans = Answerer(
-                room,
-                source,
-                room_name=room_name,
-                reason=reason,
-                workflow_run_id=workflow_run_id,
-                started=started,
-            )
+            room = rtc.Room()
             sip_kind = rtc.ParticipantKind.PARTICIPANT_KIND_SIP
+            # Registered before connecting, so a hangup during a slow join is
+            # not missed (review M3).
             room.on(
                 "participant_disconnected",
-                lambda p: ans.caller_left() if p.kind == sip_kind else None,
+                lambda p: ans.stop("caller_left") if p.kind == sip_kind else None,
             )
-            # Kicked by a room delete from elsewhere: nobody left to talk to.
-            room.on("disconnected", lambda *_: ans.caller_left())
-            yield ans
-        finally:
-            try:
-                await asyncio.wait_for(room.disconnect(), DISCONNECT_TIMEOUT_SECONDS)
-            except Exception as e:
-                logger.warning(
-                    f"answering disconnect abandoned for {room_name}: {type(e).__name__}"
-                )
-            if source is not None:
-                try:
-                    await asyncio.wait_for(source.aclose(), DISCONNECT_TIMEOUT_SECONDS)
-                except Exception as e:
-                    logger.warning(f"answering source close failed: {type(e).__name__}")
+            room.on("disconnected", lambda *_: ans.stop("disconnected"))
+            await asyncio.wait_for(
+                room.connect(
+                    os.environ["LIVEKIT_URL"],
+                    token,
+                    # The native side gives up too; a cancelled Python wait
+                    # alone would leave the FFI connect running (review L3).
+                    options=rtc.RoomOptions(
+                        auto_subscribe=False, connect_timeout=CONNECT_TIMEOUT_SECONDS
+                    ),
+                ),
+                CONNECT_TIMEOUT_SECONDS,
+            )
+        except Exception as e:
+            raise ans.failed("connect", type(e).__name__) from e
+        try:
+            ans._source = rtc.AudioSource(
+                SAMPLE_RATE, NUM_CHANNELS, queue_size_ms=QUEUE_SIZE_MS
+            )
+            track = rtc.LocalAudioTrack.create_audio_track("answer", ans._source)
+            await asyncio.wait_for(
+                room.local_participant.publish_track(
+                    track,
+                    rtc.TrackPublishOptions(source=rtc.TrackSource.SOURCE_MICROPHONE),
+                ),
+                PUBLISH_TIMEOUT_SECONDS,
+            )
+        except Exception as e:
+            raise ans.failed("publish", type(e).__name__) from e
+        # The caller may have hung up before we joined: then there is no SIP
+        # participant to answer, and no one to play to (review M3).
+        if not any(p.kind == sip_kind for p in room.remote_participants.values()):
+            ans.stop("caller_left")
+        ans._budget -= time.monotonic() - ans._started
+        yield ans
     finally:
-        _active -= 1
+        try:
+            if room is not None:
+                try:
+                    if before_disconnect is not None:
+                        await before_disconnect()
+                finally:
+                    try:
+                        await asyncio.wait_for(
+                            room.disconnect(), DISCONNECT_TIMEOUT_SECONDS
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            f"answering disconnect abandoned for {room_name}: "
+                            f"{type(e).__name__}"
+                        )
+                if ans._source is not None:
+                    try:
+                        await asyncio.wait_for(
+                            ans._source.aclose(), DISCONNECT_TIMEOUT_SECONDS
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            f"answering source close failed: {type(e).__name__}"
+                        )
+        finally:
+            _active -= 1

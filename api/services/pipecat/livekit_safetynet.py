@@ -174,14 +174,15 @@ def release(workflow_run_id: Optional[int]) -> None:
 
 async def delete_room(
     room_name: str, lk, *, workflow_run_id: Optional[int] = None
-) -> bool:
+) -> None:
     """Delete the room so the caller hears a hangup, never a silent room (C4).
 
     A failure pages (``livekit.room_delete_failed``, answer-before-refer D6):
     once the call was answered, an undeleted room is a caller on a silent SIP
     leg until the trunk's ``max_call_duration``, and nothing else will notice —
     the dispatch dedup is committed, so the reconciler skips the call.
-    ``not_found`` counts as deleted. Never raises; True when the room is gone.
+    ``not_found`` counts as deleted. Never raises. The single delete path for
+    the safetynet, overflow and run-end exits.
     """
     from livekit.protocol.room import DeleteRoomRequest
 
@@ -189,19 +190,17 @@ async def delete_room(
 
     try:
         await lk.room.delete_room(DeleteRoomRequest(room=room_name))
-        return True
     except Exception as e:
         code = getattr(e, "code", None)
         if code == "not_found":
-            return True
-        logger.error(f"safetynet room delete failed for {room_name}: {e}")
+            return
+        logger.error(f"room delete failed for {room_name}: {type(e).__name__}: {e}")
         call_events.emit(
             ROOM_DELETE_FAILED_EVENT,
             room_name=room_name,
             reason=code or type(e).__name__,
             workflow_run_id=workflow_run_id,
         )
-        return False
 
 
 class AnswerExit(NamedTuple):
@@ -263,30 +262,35 @@ async def answer_then_exit(
                 delete_room(room_name, client, workflow_run_id=workflow_run_id)
             )
 
+    async def _delete_unless_transferred() -> None:
+        if not transferred:
+            await _delete()
+
     try:
         async with livekit_answer.answering(
-            room_name, reason=reason, workflow_run_id=workflow_run_id
+            room_name,
+            reason=reason,
+            workflow_run_id=workflow_run_id,
+            # Runs before the participant disconnects on every exit after the
+            # join attempt, the failed join included (review M1).
+            before_disconnect=_delete_unless_transferred,
         ) as ans:
-            try:
-                if destination is None:
-                    await ans.play("end")
-                    return AnswerExit("ended")
-                await ans.play("transfer")
-                result = await cold_transfer_to_human(
-                    room_name,
-                    destination,
-                    lk=client,
-                    participant_identity=identity,
-                )
-                if result.get("status") == "success":
-                    transferred = True
-                    return AnswerExit("transferred")
-                refer_reason = result.get("reason", "unknown")
+            if destination is None:
                 await ans.play("end")
-                return AnswerExit("refer_failed", refer_reason=refer_reason)
-            finally:
-                if not transferred:
-                    await _delete()
+                return AnswerExit("ended")
+            await ans.play("transfer")
+            result = await cold_transfer_to_human(
+                room_name,
+                destination,
+                lk=client,
+                participant_identity=identity,
+            )
+            if result.get("status") == "success":
+                transferred = True
+                return AnswerExit("transferred")
+            refer_reason = result.get("reason", "unknown")
+            await ans.play("end")
+            return AnswerExit("refer_failed", refer_reason=refer_reason)
     except livekit_answer.AnswerFailed as e:
         kind = "caller_left" if e.stage == "caller_left" else "answer_failed"
         return AnswerExit(kind, stage=e.stage, refer_reason=refer_reason)
@@ -294,8 +298,9 @@ async def answer_then_exit(
         logger.exception(f"answered exit failed for {room_name}: {e}")
         return AnswerExit("answer_failed", stage="error", refer_reason=refer_reason)
     finally:
-        if not transferred:
-            await _delete()
+        # Never joined (room / disabled / saturated): nothing answered, the
+        # delete is the explicit end (486).
+        await _delete_unless_transferred()
 
 
 async def server_side_safetynet(

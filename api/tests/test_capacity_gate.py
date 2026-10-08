@@ -241,9 +241,10 @@ def test_no_reserved_underflow_from_unreserved_paths():
 def _patch_transfer_config(monkeypatch, config):
     from api.db import db_client
     from api.services.pipecat import transfer_call_config
+    from api.tests.support.workflow_rows import workflow_row
 
     async def fake_get_workflow(workflow_id, user_id):
-        return types.SimpleNamespace(organization_id=9, nodes={})
+        return workflow_row(organization_id=9)
 
     async def fake_find(workflow, organization_id):
         return config

@@ -3,8 +3,10 @@
 Replaces ``livekit_answer.answering`` so the safetynet / overflow tests see the
 exit sequence — prompts played, REFER, room delete — in one ordered log
 without rtc. ``fail_at`` makes one step raise ``AnswerFailed(stage)``:
-``enter`` (before yielding, e.g. ``connect``), ``transfer`` / ``end`` (that
-prompt's play).
+``enter`` (refused before joining: ``room`` / ``disabled`` / ``saturated``),
+``join`` (joined, then failed before yielding: ``connect`` / ``publish``),
+``transfer`` / ``end`` (that prompt's play). Like the real one it awaits
+``before_disconnect`` before logging the disconnect.
 """
 
 import asyncio
@@ -30,7 +32,9 @@ class FakeAnswering:
         if step in self.fail_at:
             raise AnswerFailed(self.fail_at[step])
 
-    def __call__(self, room_name, *, reason, workflow_run_id=None):
+    def __call__(
+        self, room_name, *, reason, workflow_run_id=None, before_disconnect=None
+    ):
         fake = self
 
         class _Ans:
@@ -40,13 +44,19 @@ class FakeAnswering:
 
         @asynccontextmanager
         async def _cm():
-            await fake._step("enter")
-            fake.entered.append(room_name)
-            fake.log.append(("answer", room_name))
+            await fake._step("enter")  # refused before joining: nothing to undo
             try:
+                fake.entered.append(room_name)
+                fake.log.append(("answer", room_name))
+                await fake._step("join")  # joined, then e.g. publish failed
                 yield _Ans()
             finally:
-                fake.log.append(("disconnect", room_name))
+                # the real contract: the caller's delete, then the disconnect
+                try:
+                    if before_disconnect is not None:
+                        await before_disconnect()
+                finally:
+                    fake.log.append(("disconnect", room_name))
 
         return _cm()
 

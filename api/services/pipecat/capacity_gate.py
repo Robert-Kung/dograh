@@ -253,6 +253,32 @@ def validate_capacity_config() -> None:
         )
 
 
+def _workflow_graph(workflow):
+    """The node graph a run of ``workflow`` would execute, for the tool lookup.
+
+    ``find_transfer_call_config`` walks ``graph.nodes``; the DB ``WorkflowModel``
+    has no such attribute. Passing the model made every lookup raise
+    ``AttributeError`` and degrade to "unconfigured" — hours open, health
+    unchecked — since S-L9 (answer-before-refer review H1). Harmless while an
+    unanswered overflow REFER could never succeed; not once it can. Same
+    definition choice as run creation: released, else current, else the
+    legacy column.
+    """
+    from api.services.workflow.dto import ReactFlowDTO
+    from api.services.workflow.workflow_graph import WorkflowGraph
+
+    definition = workflow.released_definition or workflow.current_definition
+    workflow_json = (
+        definition.workflow_json
+        if definition is not None
+        else workflow.workflow_definition
+    )
+    return WorkflowGraph(
+        ReactFlowDTO.model_validate(workflow_json),
+        skip_instance_constraints_for={"trigger"},
+    )
+
+
 async def _gate_allows(workflow_id: int, user_id: int, now: datetime) -> bool:
     """營運中 ∧ 隊列健康 — the same composed verdict ``execute_cold_transfer``
     uses (``resolve_transfer_decision``, single truth, security F7).
@@ -298,7 +324,9 @@ async def _gate_allows(workflow_id: int, user_id: int, now: datetime) -> bool:
         elif not workflow.organization_id:
             unresolved = f"workflow {workflow_id} has no organization"
         else:
-            config = await find_transfer_call_config(workflow, workflow.organization_id)
+            config = await find_transfer_call_config(
+                _workflow_graph(workflow), workflow.organization_id
+            )
     except Exception as e:
         unresolved = f"lookup failed ({type(e).__name__})"
     if unresolved is not None:
