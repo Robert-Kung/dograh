@@ -21,7 +21,7 @@ import pytest
 import api.services.pipecat.transfer_context_handoff as handoff
 import api.tasks.transfer_handoff as job_module
 from api.services.pipecat.livekit_transfer_flow import execute_cold_transfer
-from api.services.tickets import contract
+from api.services.tickets import contract, credential
 from api.services.tickets.config import TicketServerConfig
 from api.services.tickets.reference_server import build_reference_mcp
 from api.tasks.transfer_handoff import summarize_transfer_handoff
@@ -166,7 +166,11 @@ async def _drain_background():
         await asyncio.gather(*list(handoff._background_tasks), return_exceptions=True)
 
 
-async def test_full_pipeline_transfer_to_screen_pop(contract_server_url):
+async def test_full_pipeline_transfer_to_screen_pop(contract_server_url, monkeypatch):
+    monkeypatch.setenv(
+        credential.KEYS_ENV, '{"k1": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"}'
+    )
+    monkeypatch.setenv(credential.KID_ENV, "k1")
     config = TicketServerConfig(url=contract_server_url, api_key="e2e-token")
     cap: dict = {}
     enqueued: list = []
@@ -187,9 +191,9 @@ async def test_full_pipeline_transfer_to_screen_pop(contract_server_url):
     assert result["status"] == "success"
 
     # 2. REFER carried the correlation key.
-    ticket_id = cap["headers"][handoff.TICKET_HEADER]
+    ticket_id = cap["headers"][handoff.UUI_HEADER].split(";")[0]
     assert ticket_id == contract.ticket_id_for_run(RUN_ID)
-    assert ticket_id in cap["headers"][handoff.UUI_HEADER]
+    assert cap["headers"][handoff.TICKET_AUTH_HEADER].split(".")[4] == ticket_id
 
     # 3. Skeleton is immediately queryable — by ticket id and by number.
     skeleton = await handoff.call_ticket_tool(

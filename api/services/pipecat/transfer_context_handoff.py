@@ -2,12 +2,15 @@
 
 At the moment the shared cold-transfer preamble decides to REFER, this
 module: generates the ticket correlation id locally (deterministic per
-workflow run), returns the REFER headers that attach it to the call leg,
+workflow run), signs it into the reflow credential, returns the REFER
+headers that attach both to the call leg,
 snapshots the conversation material in-memory, fires the skeleton ticket
 write in the background, and — once the REFER outcome is known — enqueues
 the ARQ summary job. Nothing here ever blocks or fails the transfer (C4):
 every failure path degrades to a `context_write: failed` log marker plus
-a counter, and the REFER proceeds untouched.
+a counter, and the REFER proceeds untouched. A credential that cannot be
+signed has its own `ticket_auth: unsigned` marker — it is not a ticket
+write failure, and the REFER simply goes without it.
 
 Writes go through the ticket MCP contract over streamable HTTP — never an
 in-process service call — so swapping the server for an owner's CRM
@@ -18,6 +21,7 @@ see run_pipeline.py MCP teardown).
 
 import asyncio
 import json
+import time
 from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Any, Optional
@@ -25,16 +29,17 @@ from typing import Any, Optional
 from loguru import logger
 
 from api.db import db_client
-from api.services.tickets import contract
+from api.services.tickets import contract, credential
 from api.services.tickets.config import TicketServerConfig, resolve_ticket_server_config
 from api.services.tickets.sanitize import clean_text
 
-# Both header spellings are attached: User-to-User is the SIP/ACD standard
-# for attached data (UUI), the X- header survives trunks that rewrite UUI.
-# Which one reaches the transferee is trunk-dependent (§0.2 live-deferred);
-# phone-number lookup stays the documented fallback channel either way.
+# X-Ticket-Auth carries the signed credential and is the only correlation the
+# platform queue trusts; its name MUST match the reflow trunk's
+# headers_to_attributes mapping (sip.h.x-ticket-auth). User-to-User keeps the
+# bare id for third-party ACDs (ccp R-AV.3 Q6) and is never trusted by the
+# queue. Phone-number lookup stays the fallback channel either way.
 UUI_HEADER = "User-to-User"
-TICKET_HEADER = "X-Dograh-Ticket-Id"
+TICKET_AUTH_HEADER = "X-Ticket-Auth"
 
 # Snapshot caps: the summary prompt doesn't need unbounded history, and the
 # snapshot travels through the ARQ queue.
@@ -45,6 +50,9 @@ SNAPSHOT_MAX_CONTEXT_KEYS = 50
 # S-L7-OBS wiring point: process-local failure counter + the structured
 # "context_write: failed" log marker emitted by _record_write_failure.
 CONTEXT_WRITE_METRICS = {"failed": 0}
+# Transfers that left without X-Ticket-Auth (unconfigured or signing failed).
+TICKET_AUTH_METRICS = {"unsigned": 0}
+_unconfigured_logged = False
 
 # Keep strong references so fire-and-forget writes aren't GC'd mid-flight.
 _background_tasks: set = set()
@@ -53,6 +61,28 @@ _background_tasks: set = set()
 def _record_write_failure(stage: str, detail: str) -> None:
     CONTEXT_WRITE_METRICS["failed"] += 1
     logger.warning(f"context_write: failed (stage={stage}) — {detail}")
+
+
+def issue_ticket_credential(ticket_id: str) -> str:
+    """Signed reflow credential, or "" — never raises, never logs key or
+    credential material (C4; ccp R-AV.3 design D7)."""
+    global _unconfigured_logged
+    try:
+        config = credential.load_signer_config()
+        if config is not None:
+            return credential.issue(config, ticket_id, time.time())
+        TICKET_AUTH_METRICS["unsigned"] += 1
+        # Expected outside the `full` combination (no reflow leg): say it once.
+        if not _unconfigured_logged:
+            _unconfigured_logged = True
+            logger.info("ticket_auth: unsigned (reason=unconfigured)")
+    except credential.SignerConfigError as e:
+        TICKET_AUTH_METRICS["unsigned"] += 1
+        logger.warning(f"ticket_auth: unsigned (reason=invalid_config) — {e}")
+    except Exception as e:
+        TICKET_AUTH_METRICS["unsigned"] += 1
+        logger.warning(f"ticket_auth: unsigned (reason={type(e).__name__})")
+    return ""
 
 
 @dataclass
@@ -68,13 +98,15 @@ class HandoffPlan:
     transfer_reason: str
     snapshot_messages: list = field(default_factory=list)
     gathered_context: dict = field(default_factory=dict)
+    # repr=False: a dataclass repr lands in tracebacks and debug logs (ccp D7)
+    ticket_auth: str = field(default="", repr=False)
 
     @property
     def refer_headers(self) -> dict[str, str]:
-        return {
-            UUI_HEADER: f"{self.ticket_id};encoding=ascii",
-            TICKET_HEADER: self.ticket_id,
-        }
+        headers = {UUI_HEADER: f"{self.ticket_id};encoding=ascii"}
+        if self.ticket_auth:
+            headers[TICKET_AUTH_HEADER] = self.ticket_auth
+        return headers
 
     def to_job_snapshot(self, refer_status: str) -> dict:
         return {
@@ -248,9 +280,10 @@ async def prepare_transfer_handoff(
         if config is None:
             return None
 
+        ticket_id = contract.ticket_id_for_run(workflow_run_id)
         plan = HandoffPlan(
             config=config,
-            ticket_id=contract.ticket_id_for_run(workflow_run_id),
+            ticket_id=ticket_id,
             workflow_run_id=workflow_run_id,
             organization_id=organization_id,
             caller_number="",
@@ -262,6 +295,7 @@ async def prepare_transfer_handoff(
             gathered_context=snapshot_gathered_context(
                 getattr(engine, "_gathered_context", None)
             ),
+            ticket_auth=issue_ticket_credential(ticket_id),
         )
 
         task = asyncio.create_task(_write_skeleton(plan, lk=lk))

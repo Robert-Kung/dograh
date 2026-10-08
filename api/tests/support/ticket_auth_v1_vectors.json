@@ -1,0 +1,38 @@
+{
+  "_comment": "Cross-component vectors for the reflow ticket credential (R-AV.3 tasks 2.7). The dograh signer test MUST load an identical copy; any change here is a wire-format change on both sides.",
+  "key_b64url": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+  "version_label": "reflow-ticket-auth:v1",
+  "valid": [
+    {
+      "kid": "k1",
+      "exp": 1900000000,
+      "nonce": "AAAAAAAAAAAAAAAAAAAAAA",
+      "ticket_id": "CS-42",
+      "credential": "v1.k1.1900000000.AAAAAAAAAAAAAAAAAAAAAA.CS-42.ZnBon2EAo5lyQXMmYam9SHWr1yP6PiW4_iYfQ3N5Z_c"
+    },
+    {
+      "kid": "rot_2026-10",
+      "exp": 1900000123,
+      "nonce": "q83vEjRWeJCrze8SNFZ4kA",
+      "ticket_id": "T_9-x",
+      "credential": "v1.rot_2026-10.1900000123.q83vEjRWeJCrze8SNFZ4kA.T_9-x.lLJDm26SHs2BQskrFOlzGLt2hbpltJ6jrTAYZ77xh3Y"
+    }
+  ],
+  "rejected": [
+    {
+      "credential": "v1.k1.1900000000.AAAAAAAAAAAAAAAAAAAAAA.CS-42.ZnBon2EAo5lyQXMmYam9SHWr1yP6PiW4_iYfQ3N5Z_c;encoding=ascii",
+      "reason": "malformed",
+      "why": "no ;param suffix is part of the format (sanitize_ticket_id would have split it)"
+    },
+    {
+      "credential": "v1.k1.1900000000.AAAAAAAAAAAAAAAAAAAAAA.CS-43.ZnBon2EAo5lyQXMmYam9SHWr1yP6PiW4_iYfQ3N5Z_c",
+      "reason": "bad_mac",
+      "why": "ticket swapped under an intact MAC"
+    },
+    {
+      "credential": "v2.k1.1900000000.AAAAAAAAAAAAAAAAAAAAAA.CS-42.ZnBon2EAo5lyQXMmYam9SHWr1yP6PiW4_iYfQ3N5Z_c",
+      "reason": "malformed",
+      "why": "unknown version"
+    }
+  ]
+}

@@ -17,7 +17,7 @@ from zoneinfo import ZoneInfo
 import pytest
 
 import api.services.pipecat.transfer_context_handoff as handoff
-from api.services.tickets import contract
+from api.services.tickets import contract, credential
 from api.services.tickets.config import TicketServerConfig
 
 pytestmark = pytest.mark.asyncio
@@ -28,6 +28,13 @@ OPEN = datetime(2026, 6, 29, 10, 0, tzinfo=TPE)
 CLOSED = datetime(2026, 6, 29, 20, 0, tzinfo=TPE)
 
 CONFIG = TicketServerConfig(url="http://localhost:8000/api/v1/mcp", api_key="key-a")
+SIGNER_KEYS = '{"k1": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"}'
+
+
+@pytest.fixture
+def signer_env(monkeypatch):
+    monkeypatch.setenv(credential.KEYS_ENV, SIGNER_KEYS)
+    monkeypatch.setenv(credential.KID_ENV, "k1")
 
 
 def _engine(run_id=1234, org_id=1):
@@ -110,7 +117,7 @@ def _patched(config=CONFIG, tool_result=None, key_org=1):
 # ── REFER carries the ticket id ───────────────────────────────────────────────
 
 
-async def test_refer_headers_carry_ticket_id_and_skeleton_written():
+async def test_refer_headers_carry_ticket_id_and_skeleton_written(signer_env):
     from api.services.pipecat.livekit_transfer_flow import execute_cold_transfer
 
     eng = _engine(run_id=1234)
@@ -137,8 +144,8 @@ async def test_refer_headers_carry_ticket_id_and_skeleton_written():
         await _drain_background()
 
     assert res["status"] == "success"
-    assert cap["headers"][handoff.TICKET_HEADER] == "CS-1234"
-    assert "CS-1234" in cap["headers"][handoff.UUI_HEADER]
+    assert cap["headers"][handoff.TICKET_AUTH_HEADER].split(".")[4] == "CS-1234"
+    assert cap["headers"][handoff.UUI_HEADER] == "CS-1234;encoding=ascii"
 
     tool, args = call_tool.await_args.args[1], call_tool.await_args.args[2]
     assert tool == "create_ticket"
@@ -228,7 +235,7 @@ async def test_alternate_misconfigured_falls_back_and_creates_no_ticket():
 # ── Failure isolation (C4) ───────────────────────────────────────────────────
 
 
-async def test_server_down_fast_fail_does_not_block_refer():
+async def test_server_down_fast_fail_does_not_block_refer(signer_env):
     from api.services.pipecat.livekit_transfer_flow import execute_cold_transfer
 
     eng = _engine()
@@ -258,7 +265,7 @@ async def test_server_down_fast_fail_does_not_block_refer():
         await _drain_background()
 
     assert res["status"] == "success"
-    assert cap["headers"][handoff.TICKET_HEADER]  # header still attached
+    assert cap["headers"][handoff.TICKET_AUTH_HEADER]  # header still attached
     assert handoff.CONTEXT_WRITE_METRICS["failed"] == failures_before + 1
 
 
