@@ -112,9 +112,12 @@ implement is the only durable copy this contract creates.
 ## Correlation channels (how the ticket reaches the human)
 
 1. **Primary**: the platform attaches the ticket id to the SIP REFER as
-   `User-to-User` (standard UUI attached-data) and `X-Dograh-Ticket-Id`.
-   Whether these survive to your ACD depends on the trunk — verify with
-   your provider.
+   `User-to-User` (standard UUI attached-data, bare id) and, when the
+   reflow signer is configured, `X-Ticket-Auth` (an HMAC-signed
+   credential carrying the id; only the platform's own queue verifies
+   it). Treat the bare UUI value as an unauthenticated hint. Whether
+   either survives to your ACD depends on the trunk — verify with your
+   provider.
 2. **Fallback**: E.164 caller-number lookup via `find_tickets_by_caller`
    (most-recent-first). This is why implementing the optional tools is
    strongly recommended.
