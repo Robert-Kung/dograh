@@ -49,7 +49,16 @@ IMMEDIATE_EVENTS = {
     # (the first occurrence must page) but is deduplicated per process per
     # text: see IMMEDIATE_ONCE_PER_PROCESS.
     "transfer.deploy_config_unverified",
+    # answer-before-refer D7: the answering participant failed at a stage
+    # (except caller_left -- see IMMEDIATE_EXEMPT), or its prompts failed boot
+    # validation and every engine-free exit is back to an unexplained hangup.
+    "answer.failed",
+    "answer.disabled",
 }
+
+# (event, stage) pairs that stay log-only although the event is immediate:
+# the caller hanging up during the prompt is not an incident.
+IMMEDIATE_EXEMPT = {("answer.failed", "caller_left")}
 
 # Immediate events whose text is re-derived on a per-call path and would
 # otherwise repeat identically for every call: send each distinct text once
@@ -89,6 +98,9 @@ WINDOWED_EVENTS = {
     # The undispatched-room reconciler retries every 30 s; a LiveKit outage
     # should page as one summary, not every round.
     "livekit.reconcile_failed",
+    # Concurrency limit of the answering participant: a burst of unmapped-DID
+    # calls or a reconcile sweep after a restart arrives in batches.
+    "answer.saturated",
 }
 
 _redis = None
@@ -120,6 +132,8 @@ def notify(event: str, fields: dict) -> None:
     if url is None:
         return
     if event in IMMEDIATE_EVENTS:
+        if (event, fields.get("stage")) in IMMEDIATE_EXEMPT:
+            return
         text = _format(event, fields)
         if event in IMMEDIATE_ONCE_PER_PROCESS:
             if text in _sent_once:
@@ -136,6 +150,7 @@ def _format(event: str, fields: dict) -> str:
         "room_name",
         "field",
         "reason",
+        "stage",
         "transfer_reason",
         "workflow_run_id",
         "elapsed_ms",

@@ -33,6 +33,15 @@ def _reset_latch():
     yield
 
 
+@pytest.fixture(autouse=True)
+def answer(monkeypatch):
+    """No rtc in these tests: the answering participant is faked, and its log
+    is shared with ``_fake_lk(log=answer.log)`` to assert the exit order."""
+    from api.tests.support.answer_fakes import install
+
+    return install(monkeypatch, [])
+
+
 @pytest.fixture
 def events(monkeypatch):
     captured = []
@@ -44,8 +53,9 @@ def events(monkeypatch):
     return captured
 
 
-def _fake_lk(participants, *, raise_on_transfer=False):
+def _fake_lk(participants, *, raise_on_transfer=False, log=None, delete_error=None):
     captured = {"deleted": [], "transfers": []}
+    log = [] if log is None else log
 
     async def list_participants(req):
         return types.SimpleNamespace(participants=participants)
@@ -54,9 +64,13 @@ def _fake_lk(participants, *, raise_on_transfer=False):
         if raise_on_transfer:
             raise RuntimeError("provider rejected")
         captured["transfers"].append(req.transfer_to)
+        log.append(("refer", req.transfer_to))
 
     async def delete_room(req):
+        if delete_error is not None:
+            raise delete_error
         captured["deleted"].append(req.room)
+        log.append(("delete", req.room))
 
     return types.SimpleNamespace(
         room=types.SimpleNamespace(

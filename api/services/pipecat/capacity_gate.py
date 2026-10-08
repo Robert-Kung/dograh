@@ -3,8 +3,9 @@
 Admission for LIVEKIT inbound calls: the dispatcher makes a synchronous
 check-and-reserve decision (primitives in :mod:`active_calls`) before creating
 any run, and hands full-capacity calls to :func:`capacity_overflow` — a
-background action chain that REFERs the caller straight to the human queue,
-or deletes the room so the call ends explicitly (C4, never dead air).
+background action chain that answers the caller with the L-0 answering
+participant, says why, and REFERs to the human queue or ends the call
+explicitly (C4, never dead air; answer-before-refer).
 
 Config is env-only (C6 — callers can never influence the target) and
 validated at startup via :func:`validate_capacity_config`, wired into the
@@ -49,10 +50,34 @@ DEFAULT_MAX_INFLIGHT_OVERFLOW = 8
 # only over-blocks. **Add new prefixes to both, in the same change.**
 PREMIUM_RATE_PREFIXES = ("1900", "1976", "886204")
 
-# Wall-clock bound on one overflow action chain (gate probe ≤2s + poll ≤3s +
-# REFER + delete). A hung LiveKit call must not pin its room in the guard set
-# and its flood-valve slot forever.
-OVERFLOW_ACTION_TIMEOUT_SECONDS = 15.0
+# Stage bounds the overflow chain's wall-clock limit is derived from
+# (answer-before-refer D5). REFER: livekit-api 1.2.1 treats a transfer as a
+# dial — client timeout = 30 s ring + 2 s; task 0.4 measured the server's 408
+# for an unresponsive REFER target at 30.0 s. Delete: the API's 10 s total.
+OVERFLOW_GATE_PROBE_SECONDS = 2.0
+OVERFLOW_POLL_SECONDS = 3.0
+OVERFLOW_REFER_SECONDS = 32.0
+OVERFLOW_DELETE_SECONDS = 10.0
+
+
+def overflow_action_timeout() -> float:
+    """Wall-clock bound on one overflow action chain: gate probe + poll + the
+    answering participant's hard cap (both prompts included) + REFER + delete.
+
+    A hung LiveKit call must not pin its room in the guard set and its
+    flood-valve slot forever — but the bound must not undercut the stages it
+    covers either, or an answered call is cut mid-prompt by our own timer.
+    """
+    from api.services.pipecat.livekit_answer import hard_cap_seconds
+
+    return (
+        OVERFLOW_GATE_PROBE_SECONDS
+        + OVERFLOW_POLL_SECONDS
+        + hard_cap_seconds()
+        + OVERFLOW_REFER_SECONDS
+        + OVERFLOW_DELETE_SECONDS
+    )
+
 
 # Rooms with an overflow action currently in flight. An in-progress guard, NOT
 # a permanent fired-set (security F1): room names used to repeat across calls
@@ -332,10 +357,12 @@ async def capacity_overflow(
     """Background action chain for a capacity-rejected call. Never raises.
 
     guard → flood valve → target → 營運中 ∧ 隊列健康 gate → wait for the SIP
-    caller → REFER; any non-viable step deletes the room so the caller hears a
-    hangup (C4). Emits exactly one ``capacity.rejected`` per rejection with
-    the final outcome; a redelivered dispatch trigger (the SIP caller's
-    ``participant_joined``) blocked by the guard emits nothing.
+    caller → :func:`answer_then_exit` (transfer prompt + REFER when the target
+    is set and the gate passes, end prompt otherwise). The flood valve and a
+    missing caller delete the room without answering. Emits exactly one
+    ``capacity.rejected`` per rejection with the final outcome; a redelivered
+    dispatch trigger (the SIP caller's ``participant_joined``) blocked by the
+    guard emits nothing.
     """
     if room_name in _overflow_in_progress:
         logger.info(
@@ -351,46 +378,58 @@ async def capacity_overflow(
 
     async def _act() -> tuple[str, str]:
         from api.services.pipecat.livekit_cold_transfer import (
-            cold_transfer_to_human,
             livekit_api,
             wait_for_sip_participant,
         )
-        from api.services.pipecat.livekit_safetynet import delete_room
+        from api.services.pipecat.livekit_safetynet import (
+            answer_then_exit,
+            delete_room,
+        )
 
         async with livekit_api(lk) as client:
             if flood:
+                # Not answered: the valve exists to stop adding load, and the
+                # answering participant is load (one PeerConnection).
                 await delete_room(room_name, client)
                 return "terminated", "overflow_flood"
             destination = overflow_transfer_to()
+            end_reason = None
             if destination is None:
-                await delete_room(room_name, client)
-                return "terminated", "no_target"
-            if not await _gate_allows(
+                end_reason = "no_target"
+            elif not await _gate_allows(
                 workflow_id, user_id, now or datetime.now(timezone.utc)
             ):
-                await delete_room(room_name, client)
-                return "terminated", "gate_closed"
+                destination, end_reason = None, "gate_closed"
             identity = await wait_for_sip_participant(room_name, lk=client)
             if identity is None:
                 await delete_room(room_name, client)
                 return "terminated", "no_sip_caller"
-            result = await cold_transfer_to_human(
+            exit_ = await answer_then_exit(
                 room_name,
-                destination,
-                lk=client,
-                participant_identity=identity,
+                client=client,
+                identity=identity,
+                destination=destination,
+                reason="capacity_overflow",
             )
-            if result.get("status") == "success":
+            if exit_.kind == "transferred":
                 return "transferred", "capacity"
-            await delete_room(room_name, client)
-            return "terminated", result.get("reason", "refer_failed")
+            if exit_.kind == "caller_left":
+                return "terminated", "caller_left"
+            if exit_.refer_reason is not None:
+                return "terminated", exit_.refer_reason
+            if exit_.kind == "answer_failed":
+                return "terminated", f"answer_{exit_.stage}"
+            return "terminated", end_reason
 
     try:
         # A hung LiveKit call must not pin this room's guard entry and its
         # flood-valve slot forever — bound the whole chain, then take the
-        # recovery-delete leg like any other failure.
+        # recovery-delete leg like any other failure. An answered call was
+        # already deleted by answer_then_exit's shielded finally when the
+        # timeout cancelled it; this delete covers the pre-answer stages and
+        # sees ``not_found`` otherwise.
         outcome, reason = await asyncio.wait_for(
-            _act(), timeout=OVERFLOW_ACTION_TIMEOUT_SECONDS
+            _act(), timeout=overflow_action_timeout()
         )
     except Exception as e:
         logger.exception(f"capacity overflow failed for {room_name}: {e}")

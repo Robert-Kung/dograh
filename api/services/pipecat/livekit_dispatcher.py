@@ -144,22 +144,40 @@ async def _resolve_with_retry(resolver: DidResolver, did: str):
             await asyncio.sleep(delay)
 
 
-def _sign_agent_token(room_name: str, identity: str) -> str:
+def _sign_agent_token(
+    room_name: str,
+    identity: str,
+    *,
+    can_subscribe: bool = True,
+    can_publish_data: bool | None = None,
+    can_publish_sources: list[str] | None = None,
+    ttl_seconds: int | None = None,
+) -> str:
+    """Room token for a server-side participant.
+
+    The keyword grants exist for the answering participant (answer-before-
+    refer D3: no subscribe, no data, microphone only, short TTL); their
+    defaults leave the agent's token exactly as it was — ``None`` means "not
+    set on the grant", i.e. the server default, not ``False``.
+    """
+    from datetime import timedelta
+
     from livekit import api
 
-    return (
+    grants = {"room_join": True, "room": room_name, "can_publish": True}
+    grants["can_subscribe"] = can_subscribe
+    if can_publish_data is not None:
+        grants["can_publish_data"] = can_publish_data
+    if can_publish_sources is not None:
+        grants["can_publish_sources"] = can_publish_sources
+    token = (
         api.AccessToken(os.environ["LIVEKIT_API_KEY"], os.environ["LIVEKIT_API_SECRET"])
         .with_identity(identity)
-        .with_grants(
-            api.VideoGrants(
-                room_join=True,
-                room=room_name,
-                can_publish=True,
-                can_subscribe=True,
-            )
-        )
-        .to_jwt()
+        .with_grants(api.VideoGrants(**grants))
     )
+    if ttl_seconds is not None:
+        token = token.with_ttl(timedelta(seconds=ttl_seconds))
+    return token.to_jwt()
 
 
 async def dispatch_livekit_call(

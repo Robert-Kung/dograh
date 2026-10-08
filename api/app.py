@@ -87,6 +87,13 @@ async def lifespan(app: FastAPI):
 
         validate_capacity_config()
 
+        # answer-before-refer D4: load the two L-0 prompts for the answering
+        # participant. Never blocks boot — a failure disables answering (the
+        # engine-free exits fall back to a bare room delete) and pages.
+        from api.services.pipecat.livekit_answer import validate_answer_assets
+
+        validate_answer_assets()
+
         # W3a: the transfer gate's six deployment-layer values now come from
         # the environment, so "were they supplied, and are they usable" has to
         # be answered here — the write-time required-key rule that used to
