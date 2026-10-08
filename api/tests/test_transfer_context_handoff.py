@@ -28,12 +28,12 @@ OPEN = datetime(2026, 6, 29, 10, 0, tzinfo=TPE)
 CLOSED = datetime(2026, 6, 29, 20, 0, tzinfo=TPE)
 
 CONFIG = TicketServerConfig(url="http://localhost:8000/api/v1/mcp", api_key="key-a")
-SIGNER_KEY = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"
+SIGNER_KEYS = '{"k1": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"}'
 
 
 @pytest.fixture
 def signer_env(monkeypatch):
-    monkeypatch.setenv(credential.KEY_ENV, SIGNER_KEY)
+    monkeypatch.setenv(credential.KEYS_ENV, SIGNER_KEYS)
     monkeypatch.setenv(credential.KID_ENV, "k1")
 
 

@@ -24,7 +24,11 @@ CRED_RE = re.compile(
     r"v1\.([A-Za-z0-9_-]{1,16})\.([0-9]{1,12})\.([A-Za-z0-9_-]{22})"
     r"\.([A-Za-z0-9_-]{1,64})\.([A-Za-z0-9_-]{43})"
 )
-ENV = {credential.KEY_ENV: VECTORS["key_b64url"], credential.KID_ENV: "k1"}
+ENV = {
+    credential.KEYS_ENV: json.dumps({"k0": "AAAA", "k1": VECTORS["key_b64url"]}),
+    credential.KID_ENV: "k1",
+}
+SHORT_KEY = "AAECAwQFBgcICQoLDA0ODw"  # 128-bit
 
 
 @pytest.fixture
@@ -83,11 +87,14 @@ def test_config_unset_is_none_and_ttl_defaults():
 @pytest.mark.parametrize(
     "env",
     [
-        {credential.KEY_ENV: VECTORS["key_b64url"]},  # kid missing
-        {credential.KID_ENV: "k1"},  # key missing
+        {credential.KEYS_ENV: ENV[credential.KEYS_ENV]},  # kid missing
+        {credential.KID_ENV: "k1"},  # keys missing
         {**ENV, credential.KID_ENV: "has.dot"},
-        {**ENV, credential.KEY_ENV: "not base64!"},
-        {**ENV, credential.KEY_ENV: "AAECAwQFBgcICQoLDA0ODw"},  # 128-bit
+        {**ENV, credential.KID_ENV: "k2"},  # kid not in the map
+        {**ENV, credential.KEYS_ENV: "not json"},
+        {**ENV, credential.KEYS_ENV: json.dumps(["k1"])},
+        {**ENV, credential.KEYS_ENV: json.dumps({"k1": "not base64!"})},
+        {**ENV, credential.KEYS_ENV: json.dumps({"k1": SHORT_KEY})},
         {**ENV, credential.TTL_ENV: "0"},
         {**ENV, credential.TTL_ENV: "-5"},
         {**ENV, credential.TTL_ENV: "3m"},
@@ -107,7 +114,7 @@ def test_issue_ticket_credential_configured(monkeypatch):
 
 
 def test_unconfigured_issues_nothing_and_counts(monkeypatch, logs):
-    monkeypatch.delenv(credential.KEY_ENV, raising=False)
+    monkeypatch.delenv(credential.KEYS_ENV, raising=False)
     monkeypatch.delenv(credential.KID_ENV, raising=False)
     before = handoff.TICKET_AUTH_METRICS["unsigned"]
     assert handoff.issue_ticket_credential("CS-9") == ""
@@ -117,12 +124,11 @@ def test_unconfigured_issues_nothing_and_counts(monkeypatch, logs):
 
 
 def test_invalid_config_issues_nothing_and_never_logs_key(monkeypatch, logs):
-    short = "AAECAwQFBgcICQoLDA0ODw"
-    monkeypatch.setenv(credential.KEY_ENV, short)
+    monkeypatch.setenv(credential.KEYS_ENV, json.dumps({"k1": SHORT_KEY}))
     monkeypatch.setenv(credential.KID_ENV, "k1")
     assert handoff.issue_ticket_credential("CS-9") == ""
     assert any("ticket_auth: unsigned (reason=invalid_config)" in x for x in logs)
-    assert not any(short in line for line in logs)
+    assert not any(SHORT_KEY in line for line in logs)
 
 
 def test_signing_exception_issues_nothing(monkeypatch, logs):

@@ -168,7 +168,7 @@ async def _drain_background():
 
 async def test_full_pipeline_transfer_to_screen_pop(contract_server_url, monkeypatch):
     monkeypatch.setenv(
-        credential.KEY_ENV, "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"
+        credential.KEYS_ENV, '{"k1": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"}'
     )
     monkeypatch.setenv(credential.KID_ENV, "k1")
     config = TicketServerConfig(url=contract_server_url, api_key="e2e-token")

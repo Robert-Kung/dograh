@@ -12,6 +12,11 @@ both sides pin byte-identical vectors (`tests/support/ticket_auth_v1_vectors.jso
 — any change to this format is a wire change on both sides. No `;param`
 suffix is ever appended: the verifier's strict parse rejects one.
 
+Keys come from the same `.env` entry the verifier reads (`REFLOW_AUTH_KEYS`,
+a JSON object `{"<kid>": "<base64url key>"}`); `REFLOW_AUTH_KID` picks the one
+to sign with. Rotation (design D3) is then edits to one map plus one kid,
+never a key copied into two places.
+
 The expiry's single source is this signer (design D2): the verifier has no
 TTL setting and only reads `exp`. `REFLOW_AUTH_TTL_S` is therefore the value
 the deploy-time check must read.
@@ -20,6 +25,7 @@ the deploy-time check must read.
 import base64
 import hashlib
 import hmac
+import json
 import os
 import re
 import secrets
@@ -31,7 +37,7 @@ _VERSION_LABEL = b"reflow-ticket-auth:v1"
 MIN_KEY_BYTES = 32  # 256-bit (platform-deployment spec: 密鑰強度)
 DEFAULT_TTL_S = 180
 
-KEY_ENV = "REFLOW_AUTH_KEY"
+KEYS_ENV = "REFLOW_AUTH_KEYS"
 KID_ENV = "REFLOW_AUTH_KID"
 TTL_ENV = "REFLOW_AUTH_TTL_S"
 
@@ -52,22 +58,34 @@ class SignerConfig:
 
 
 def load_signer_config(env: Mapping[str, str] = os.environ) -> SignerConfig | None:
-    """None when neither key nor kid is set (signing not deployed);
-    SignerConfigError when set but unusable."""
-    raw_key = env.get(KEY_ENV, "").strip()
+    """None when neither keys nor kid is set (signing not deployed);
+    SignerConfigError when set but unusable. Only the selected kid's key is
+    decoded — the verifier validates the whole map."""
+    raw_keys = env.get(KEYS_ENV, "").strip()
     kid = env.get(KID_ENV, "").strip()
-    if not raw_key and not kid:
+    if not raw_keys and not kid:
         return None
     if not _KID_RE.fullmatch(kid):
         raise SignerConfigError(f"{KID_ENV} missing or not [A-Za-z0-9_-]{{1,16}}")
+    try:
+        keys = json.loads(raw_keys)
+    except ValueError:
+        raise SignerConfigError(f"{KEYS_ENV} missing or not a JSON object") from None
+    if not isinstance(keys, dict):
+        raise SignerConfigError(f"{KEYS_ENV} missing or not a JSON object")
+    raw_key = keys.get(kid)
+    if not isinstance(raw_key, str):
+        raise SignerConfigError(f"{KID_ENV} has no key in {KEYS_ENV}")
     if not _KEY_RE.fullmatch(raw_key):
-        raise SignerConfigError(f"{KEY_ENV} missing or not base64url")
+        raise SignerConfigError(f"{KEYS_ENV} entry for {KID_ENV} is not base64url")
     try:
         key = base64.urlsafe_b64decode(raw_key + "=" * (-len(raw_key) % 4))
     except ValueError:
-        raise SignerConfigError(f"{KEY_ENV} does not decode") from None
+        raise SignerConfigError(
+            f"{KEYS_ENV} entry for {KID_ENV} does not decode"
+        ) from None
     if len(key) < MIN_KEY_BYTES:
-        raise SignerConfigError(f"{KEY_ENV} shorter than 256 bit")
+        raise SignerConfigError(f"{KEYS_ENV} entry for {KID_ENV} shorter than 256 bit")
     raw_ttl = env.get(TTL_ENV, "").strip() or str(DEFAULT_TTL_S)
     if not raw_ttl.isdigit() or int(raw_ttl) <= 0:
         raise SignerConfigError(f"{TTL_ENV} must be a positive integer (seconds)")
