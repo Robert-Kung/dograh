@@ -158,6 +158,46 @@ async def test_refer_headers_carry_ticket_id_and_skeleton_written(signer_env):
     assert status == "success" and plan.ticket_id == "CS-1234"
 
 
+async def test_r_av10_normal_transfer_keeps_headers_and_never_answers(
+    signer_env, monkeypatch
+):
+    """R-AV.10 立案驗收條件（answer-before-refer AC7 unit / D8）: the normal AI
+    transfer's REFER still carries X-Ticket-Auth and User-to-User, and never
+    goes through the answering participant — the call is already answered."""
+    from api.services.pipecat import livekit_answer
+    from api.services.pipecat.livekit_transfer_flow import execute_cold_transfer
+
+    def must_not_answer(*a, **kw):
+        raise AssertionError("normal transfer must not use the answering participant")
+
+    monkeypatch.setattr(livekit_answer, "answering", must_not_answer)
+    cap = {}
+    lk = _fake_lk(capture=cap, sip_attrs={"sip.phoneNumber": "+886912345678"})
+    p1, p2, p3, p4 = _patched()
+    with (
+        p1,
+        p2,
+        p3,
+        p4,
+        patch.object(handoff, "finalize_transfer_handoff", AsyncMock()),
+    ):
+        res = await execute_cold_transfer(
+            _engine(run_id=1234),
+            room_name="cs-room",
+            destination="tel:+886900000000",
+            schedule=SCHED,
+            now=OPEN,
+            lk=lk,
+            transfer_reason="voice_tool",
+        )
+        await _drain_background()
+
+    assert res["status"] == "success"
+    assert set(cap["headers"]) == {handoff.TICKET_AUTH_HEADER, handoff.UUI_HEADER}
+    assert handoff.TICKET_AUTH_HEADER == "X-Ticket-Auth"
+    assert handoff.UUI_HEADER == "User-to-User"
+
+
 async def test_anonymous_caller_writes_empty_number():
     eng = _engine()
     cap = {}

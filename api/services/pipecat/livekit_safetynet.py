@@ -4,10 +4,12 @@ C4 (never dead air) for the infrastructure failure faces the voice-tool and
 press-0 transfers don't cover:
 
 - **Dispatch failures** (``no_did`` / ``unmapped_did`` / ``launch_failed``) and
-  **pipeline crashes**: no (working) agent is in the room, so the caller is
-  handed to the fallback human queue with a server-side SIP REFER via
-  :func:`server_side_safetynet` — no engine involved. If that fails the room
-  is deleted so the caller hears a hangup, never a silent room.
+  **pipeline crashes**: no (working) agent is in the room, so
+  :func:`server_side_safetynet` has the L-0 answering participant answer the
+  still-ringing call and say why (answer-before-refer: livekit-sip cannot
+  REFER an unanswered call), then REFERs to the fallback human queue — no
+  engine involved. Unset fallback or a failed REFER: the end prompt, then the
+  room is deleted so the caller hears a BYE, never a silent room.
 - **Mid-call fatal conditions** (fatal pipeline errors, the bot owing a reply
   and staying silent past the threshold): :class:`SafetynetWatchdog` observes
   the pipeline and :func:`midcall_safetynet` runs the shared cold-transfer
@@ -33,7 +35,7 @@ import os
 import time
 from collections import deque
 from collections.abc import Awaitable, Callable
-from typing import Optional
+from typing import NamedTuple, Optional
 
 from loguru import logger
 
@@ -170,14 +172,135 @@ def release(workflow_run_id: Optional[int]) -> None:
         _fired_runs.discard(workflow_run_id)
 
 
-async def delete_room(room_name: str, lk) -> None:
-    """Delete the room so the caller hears a hangup, never a silent room (C4)."""
+async def delete_room(
+    room_name: str, lk, *, workflow_run_id: Optional[int] = None
+) -> None:
+    """Delete the room so the caller hears a hangup, never a silent room (C4).
+
+    A failure pages (``livekit.room_delete_failed``, answer-before-refer D6):
+    once the call was answered, an undeleted room is a caller on a silent SIP
+    leg until the trunk's ``max_call_duration``, and nothing else will notice —
+    the dispatch dedup is committed, so the reconciler skips the call.
+    ``not_found`` counts as deleted. Never raises. The single delete path for
+    the safetynet, overflow and run-end exits.
+    """
     from livekit.protocol.room import DeleteRoomRequest
+
+    from api.services.pipecat.livekit_call_events import ROOM_DELETE_FAILED_EVENT
 
     try:
         await lk.room.delete_room(DeleteRoomRequest(room=room_name))
     except Exception as e:
-        logger.error(f"safetynet room delete failed for {room_name}: {e}")
+        code = getattr(e, "code", None)
+        if code == "not_found":
+            return
+        logger.error(f"room delete failed for {room_name}: {type(e).__name__}: {e}")
+        call_events.emit(
+            ROOM_DELETE_FAILED_EVENT,
+            room_name=room_name,
+            reason=code or type(e).__name__,
+            workflow_run_id=workflow_run_id,
+        )
+
+
+class AnswerExit(NamedTuple):
+    """How :func:`answer_then_exit` ended the call.
+
+    ``kind``: ``transferred`` / ``ended`` (end prompt, room deleted) /
+    ``refer_failed`` (transfer prompt, failed REFER, end prompt, room deleted)
+    / ``answer_failed`` (room deleted; ``stage`` says where) / ``caller_left``.
+    ``refer_reason`` is set whenever a REFER was attempted and failed, even if
+    the end prompt then failed too.
+    """
+
+    kind: str
+    stage: Optional[str] = None
+    refer_reason: Optional[str] = None
+
+
+async def answer_then_exit(
+    room_name: str,
+    *,
+    client,
+    identity: str,
+    destination: Optional[str],
+    reason: str,
+    workflow_run_id: Optional[int] = None,
+) -> AnswerExit:
+    """Answer the ringing caller, say why, then REFER or end (answer-before-refer).
+
+    The one exit shared by the dispatch-face safetynet and capacity overflow
+    (design D6), so the rule below cannot drift between two copies:
+
+    **Once answering has been entered, every outcome except a successful REFER
+    deletes the room** — failures, unexpected exceptions and cancellation
+    included. The delete runs before the answering participant disconnects
+    (the delete kicks it anyway, so the exit never waits on a stuck
+    disconnect) and is shielded from the cancel that brought us here. Leaving
+    the room does not end the SIP leg (task 0.5), the dedup is committed so
+    the reconciler will not come back, and the trunk's 3600 s cap is the only
+    other backstop. Entering covers "may have been answered": deleting a room
+    that never got answered is a 486, an explicit end all the same.
+
+    ``destination`` None → end prompt only. Otherwise transfer prompt, the
+    unchanged ``cold_transfer_to_human`` (R-AV.10: no headers here — there is
+    no ticket to sign), and the end prompt if the REFER fails. Never raises
+    except ``CancelledError``.
+    """
+    from api.services.pipecat import livekit_answer
+    from api.services.pipecat.livekit_cold_transfer import cold_transfer_to_human
+
+    transferred = False
+    deleted = False
+    refer_reason: Optional[str] = None
+
+    async def _delete() -> None:
+        nonlocal deleted
+        if not deleted:
+            deleted = True
+            await asyncio.shield(
+                delete_room(room_name, client, workflow_run_id=workflow_run_id)
+            )
+
+    async def _delete_unless_transferred() -> None:
+        if not transferred:
+            await _delete()
+
+    try:
+        async with livekit_answer.answering(
+            room_name,
+            reason=reason,
+            workflow_run_id=workflow_run_id,
+            # Runs before the participant disconnects on every exit after the
+            # join attempt, the failed join included (review M1).
+            before_disconnect=_delete_unless_transferred,
+        ) as ans:
+            if destination is None:
+                await ans.play("end")
+                return AnswerExit("ended")
+            await ans.play("transfer")
+            result = await cold_transfer_to_human(
+                room_name,
+                destination,
+                lk=client,
+                participant_identity=identity,
+            )
+            if result.get("status") == "success":
+                transferred = True
+                return AnswerExit("transferred")
+            refer_reason = result.get("reason", "unknown")
+            await ans.play("end")
+            return AnswerExit("refer_failed", refer_reason=refer_reason)
+    except livekit_answer.AnswerFailed as e:
+        kind = "caller_left" if e.stage == "caller_left" else "answer_failed"
+        return AnswerExit(kind, stage=e.stage, refer_reason=refer_reason)
+    except Exception as e:
+        logger.exception(f"answered exit failed for {room_name}: {e}")
+        return AnswerExit("answer_failed", stage="error", refer_reason=refer_reason)
+    finally:
+        # Never joined (room / disabled / saturated): nothing answered, the
+        # delete is the explicit end (486).
+        await _delete_unless_transferred()
 
 
 async def server_side_safetynet(
@@ -186,11 +309,14 @@ async def server_side_safetynet(
     workflow_run_id: Optional[int] = None,
     lk=None,
 ) -> None:
-    """Engine-free safetynet: REFER the room's SIP caller to the fallback queue.
+    """Engine-free safetynet: answer, say why, REFER to the fallback queue.
 
-    Used when no working agent is in the room — dispatch failures and pipeline
-    crashes. Only ``cs-`` rooms are touched: every other room on the LiveKit
-    project (tests, future outbound) is logged and left alone. Never raises.
+    Used when no working agent is in the room — dispatch failures, the
+    undispatched-room reconciler, pipeline crashes and a failed mid-call
+    safetynet. The exit is :func:`answer_then_exit`; no SIP caller → the room
+    is deleted without answering (nobody to tell). Only ``cs-`` rooms are
+    touched: every other room on the LiveKit project (tests, future outbound)
+    is logged and left alone. Never raises.
     """
     if not room_name or not room_name.startswith(DEFAULT_ROOM_PREFIX):
         logger.warning(
@@ -217,28 +343,41 @@ async def server_side_safetynet(
             workflow_run_id=workflow_run_id,
         )
         from api.services.pipecat.livekit_cold_transfer import (
-            cold_transfer_to_human,
             livekit_api,
             wait_for_sip_participant,
         )
 
         async with livekit_api(lk) as client:
             destination = fallback_queue()
-            if destination is not None:
-                # Bounded wait for the SIP caller (the reconciler and crash
-                # paths do not start from its join event), then REFER with the
-                # found identity (no second list, no TOCTOU).
-                identity = await wait_for_sip_participant(room_name, lk=client)
-                if identity is None:
-                    result = {"status": "failed", "reason": "no_sip_caller"}
-                else:
-                    result = await cold_transfer_to_human(
-                        room_name,
-                        destination,
-                        lk=client,
-                        participant_identity=identity,
+            if destination is None:
+                logger.warning(
+                    "SAFETYNET_FALLBACK_QUEUE not configured; ending call with "
+                    "the end prompt"
+                )
+            # Bounded wait for the SIP caller (the reconciler and crash paths
+            # do not start from its join event); the identity goes straight to
+            # the REFER (no second list, no TOCTOU).
+            identity = await wait_for_sip_participant(room_name, lk=client)
+            if identity is None:
+                if destination is not None:
+                    log_event(
+                        "safetynet.transfer_failed",
+                        room_name=room_name,
+                        reason="no_sip_caller",
+                        workflow_run_id=workflow_run_id,
+                        elapsed_ms=_elapsed(),
                     )
-                if result.get("status") == "success":
+                await delete_room(room_name, client, workflow_run_id=workflow_run_id)
+            else:
+                exit_ = await answer_then_exit(
+                    room_name,
+                    client=client,
+                    identity=identity,
+                    destination=destination,
+                    reason=reason,
+                    workflow_run_id=workflow_run_id,
+                )
+                if exit_.kind == "transferred":
                     log_event(
                         "safetynet.transfer_ok",
                         room_name=room_name,
@@ -253,19 +392,21 @@ async def server_side_safetynet(
                         transfer_reason="safetynet",
                     )
                     return
-                log_event(
-                    "safetynet.transfer_failed",
-                    room_name=room_name,
-                    reason=result.get("reason", "unknown"),
-                    workflow_run_id=workflow_run_id,
-                    elapsed_ms=_elapsed(),
-                )
-            else:
-                logger.warning(
-                    "SAFETYNET_FALLBACK_QUEUE not configured; ending call explicitly"
-                )
-
-            await delete_room(room_name, client)
+                if exit_.kind == "caller_left":
+                    # The caller hung up during the prompt: not a failed
+                    # transfer, not a safetynet termination (AC13).
+                    logger.info(
+                        f"safetynet: caller left during the prompt in {room_name}"
+                    )
+                    return
+                if destination is not None:
+                    log_event(
+                        "safetynet.transfer_failed",
+                        room_name=room_name,
+                        reason=exit_.refer_reason or f"answer_{exit_.stage}",
+                        workflow_run_id=workflow_run_id,
+                        elapsed_ms=_elapsed(),
+                    )
         log_event(
             "safetynet.terminated",
             room_name=room_name,
@@ -280,7 +421,9 @@ async def server_side_safetynet(
             transfer_reason="safetynet",
         )
     except Exception as e:
-        # Last resort: the safetynet itself must never take the process down.
+        # Last resort: the safetynet itself must never take the process down —
+        # and must still end the call explicitly rather than leave the room
+        # (design D6; it used to only log).
         logger.exception(f"server-side safetynet failed for {room_name}: {e}")
         log_event(
             "safetynet.transfer_failed",
@@ -289,6 +432,13 @@ async def server_side_safetynet(
             workflow_run_id=workflow_run_id,
             elapsed_ms=_elapsed(),
         )
+        try:
+            from api.services.pipecat.livekit_cold_transfer import livekit_api
+
+            async with livekit_api(lk) as client:
+                await delete_room(room_name, client, workflow_run_id=workflow_run_id)
+        except Exception as e2:
+            logger.error(f"safetynet last-resort delete failed for {room_name}: {e2}")
 
 
 async def midcall_safetynet(

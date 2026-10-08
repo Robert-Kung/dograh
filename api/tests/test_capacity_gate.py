@@ -53,8 +53,18 @@ def gate_open(monkeypatch):
     monkeypatch.setattr(capacity_gate, "_gate_allows", allow)
 
 
-def _fake_lk(participants=None, *, raise_on_transfer=False, on_list=None):
+@pytest.fixture(autouse=True)
+def answer(monkeypatch):
+    """No rtc here: the answering participant is faked; pass ``answer.log`` to
+    ``_fake_lk(log=...)`` to assert the exit order (answer-before-refer)."""
+    from api.tests.support.answer_fakes import install
+
+    return install(monkeypatch, [])
+
+
+def _fake_lk(participants=None, *, raise_on_transfer=False, on_list=None, log=None):
     captured = {"deleted": [], "transfers": [], "identities": []}
+    log = [] if log is None else log
 
     async def list_participants(req):
         if on_list is not None:
@@ -66,9 +76,11 @@ def _fake_lk(participants=None, *, raise_on_transfer=False, on_list=None):
             raise RuntimeError("provider rejected")
         captured["transfers"].append(req.transfer_to)
         captured["identities"].append(req.participant_identity)
+        log.append(("refer", req.transfer_to))
 
     async def delete_room(req):
         captured["deleted"].append(req.room)
+        log.append(("delete", req.room))
 
     return types.SimpleNamespace(
         room=types.SimpleNamespace(
@@ -229,9 +241,10 @@ def test_no_reserved_underflow_from_unreserved_paths():
 def _patch_transfer_config(monkeypatch, config):
     from api.db import db_client
     from api.services.pipecat import transfer_call_config
+    from api.tests.support.workflow_rows import workflow_row
 
     async def fake_get_workflow(workflow_id, user_id):
-        return types.SimpleNamespace(organization_id=9, nodes={})
+        return workflow_row(organization_id=9)
 
     async def fake_find(workflow, organization_id):
         return config
@@ -429,7 +442,7 @@ async def test_hung_overflow_times_out_and_releases_guard(
 ):
     # a hung LiveKit call must not pin the guard entry / flood-valve slot
     monkeypatch.setenv("CAPACITY_OVERFLOW_TRANSFER_TO", "tel:+886900000000")
-    monkeypatch.setattr(capacity_gate, "OVERFLOW_ACTION_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(capacity_gate, "overflow_action_timeout", lambda: 0.05)
 
     async def hang_forever(req):
         await asyncio.Event().wait()
