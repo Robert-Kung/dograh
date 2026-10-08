@@ -98,7 +98,8 @@ class HandoffPlan:
     transfer_reason: str
     snapshot_messages: list = field(default_factory=list)
     gathered_context: dict = field(default_factory=dict)
-    ticket_auth: str = ""
+    # repr=False: a dataclass repr lands in tracebacks and debug logs (ccp D7)
+    ticket_auth: str = field(default="", repr=False)
 
     @property
     def refer_headers(self) -> dict[str, str]:

@@ -98,6 +98,7 @@ def test_config_unset_is_none_and_ttl_defaults():
         {**ENV, credential.TTL_ENV: "0"},
         {**ENV, credential.TTL_ENV: "-5"},
         {**ENV, credential.TTL_ENV: "3m"},
+        {**ENV, credential.TTL_ENV: "3601"},
     ],
 )
 def test_unusable_config_raises_without_echoing_the_key(env):
@@ -158,3 +159,17 @@ def test_refer_headers_with_and_without_credential():
     }
     # the credential never rides the ARQ snapshot
     assert plan.ticket_auth not in json.dumps(plan.to_job_snapshot("success"))
+
+
+def test_credential_kept_out_of_plan_repr():
+    plan = handoff.HandoffPlan(
+        config=None,
+        ticket_id="CS-1",
+        workflow_run_id=1,
+        organization_id=1,
+        caller_number="",
+        room_name="r",
+        transfer_reason="x",
+        ticket_auth="v1.secret",
+    )
+    assert "v1.secret" not in repr(plan)

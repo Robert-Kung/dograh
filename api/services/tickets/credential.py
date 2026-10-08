@@ -36,6 +36,10 @@ VERSION = "v1"
 _VERSION_LABEL = b"reflow-ticket-auth:v1"
 MIN_KEY_BYTES = 32  # 256-bit (platform-deployment spec: 密鑰強度)
 DEFAULT_TTL_S = 180
+# Upper bound: the verifier's nonce ledger keeps a binding for TTL + the
+# longest call (trunk max_call_duration 3600) within its 7200 s retention, and
+# refuses credentials that would outlive it (ccp review security M-1).
+MAX_TTL_S = 3600
 
 KEYS_ENV = "REFLOW_AUTH_KEYS"
 KID_ENV = "REFLOW_AUTH_KID"
@@ -87,8 +91,10 @@ def load_signer_config(env: Mapping[str, str] = os.environ) -> SignerConfig | No
     if len(key) < MIN_KEY_BYTES:
         raise SignerConfigError(f"{KEYS_ENV} entry for {KID_ENV} shorter than 256 bit")
     raw_ttl = env.get(TTL_ENV, "").strip() or str(DEFAULT_TTL_S)
-    if not raw_ttl.isdigit() or int(raw_ttl) <= 0:
-        raise SignerConfigError(f"{TTL_ENV} must be a positive integer (seconds)")
+    if not raw_ttl.isdigit() or not 0 < int(raw_ttl) <= MAX_TTL_S:
+        raise SignerConfigError(
+            f"{TTL_ENV} must be an integer in 1..{MAX_TTL_S} (seconds)"
+        )
     return SignerConfig(kid=kid, key=key, ttl_s=int(raw_ttl))
 
 
