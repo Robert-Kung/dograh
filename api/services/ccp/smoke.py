@@ -45,7 +45,11 @@ async def _get_redis():
     if _redis is None:
         import redis.asyncio as aioredis
 
-        _redis = aioredis.from_url(os.environ["REDIS_URL"])
+        # short timeouts: the immediate-alert path waits on this lookup, and a
+        # hung Redis must not hold pages back (review MED-16); failure = page
+        _redis = aioredis.from_url(
+            os.environ["REDIS_URL"], socket_timeout=0.5, socket_connect_timeout=0.5
+        )
     return _redis
 
 
