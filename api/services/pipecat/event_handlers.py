@@ -6,7 +6,7 @@ from loguru import logger
 from api.db import db_client
 from api.enums import PostHogEvent, WorkflowRunState
 from api.services.campaign.circuit_breaker import circuit_breaker
-from api.services.ccp import call_meta
+from api.services.ccp import call_meta, smoke
 from api.services.integrations import IntegrationRuntimeSession
 from api.services.pipecat.audio_config import AudioConfig
 from api.services.pipecat.audio_playback import play_audio_loop
@@ -144,6 +144,9 @@ def register_event_handlers(
                     fetch_result = pre_call_fetch_task.result()
 
                 if fetch_result:
+                    # a CRM response must not be able to tag a production run
+                    # as smoke (local-deploy-sip-smoke security M1)
+                    fetch_result = smoke.without_reserved(fetch_result)
                     engine._call_context_vars.update(fetch_result)
                     try:
                         await db_client.update_workflow_run(

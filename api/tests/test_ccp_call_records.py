@@ -94,7 +94,7 @@ def add_run(workflow, async_session):
             storage_backend="minio",
             initial_context={
                 **({"did": did} if did else {}),
-                **({"smoke": True} if smoke else {}),
+                **({"ccp_smoke": True} if smoke else {}),
             },
         )
         async_session.add(run)

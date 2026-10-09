@@ -18,6 +18,12 @@ import os
 from loguru import logger
 
 SMOKE_ATTRIBUTE = "ccp.smoke"
+# The run's tag. Written by the dispatcher on every LiveKit run (true or false)
+# and stripped from every other source that merges into initial_context --
+# workflow template variables, pre-call fetch results -- so neither an editor
+# nor a CRM response can make a production call vanish from the reports.
+RUN_CONTEXT_KEY = "ccp_smoke"
+RESERVED_CONTEXT_KEYS = frozenset({RUN_CONTEXT_KEY})
 ROOM_KEY_PREFIX = "ccp:smoke_room:"
 # Longer than any call can last (trunk max_call_duration is 3600 s).
 ROOM_TTL_SECONDS = 2 * 3600
@@ -27,6 +33,11 @@ _redis = None
 
 def is_smoke(sip_attributes: dict | None) -> bool:
     return (sip_attributes or {}).get(SMOKE_ATTRIBUTE) == "1"
+
+
+def without_reserved(context: dict | None) -> dict:
+    """A merge source minus the dispatcher-owned keys."""
+    return {k: v for k, v in (context or {}).items() if k not in RESERVED_CONTEXT_KEYS}
 
 
 async def _get_redis():

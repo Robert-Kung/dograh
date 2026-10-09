@@ -297,9 +297,10 @@ async def _dispatch(
                     "did": did,
                     "room_name": room_name,
                     "direction": "inbound",
-                    # Server-set dispatch-rule attribute only (local-deploy-sip-smoke D2);
-                    # call_scope excludes these runs from usage and call records.
-                    **({"smoke": True} if smoke.is_smoke(sip_attributes) else {}),
+                    # Server-set dispatch-rule attribute only (local-deploy-sip-smoke D2),
+                    # always written so no template variable can supply it; call_scope
+                    # excludes the true ones from usage and call records.
+                    smoke.RUN_CONTEXT_KEY: smoke.is_smoke(sip_attributes),
                 },
             )
         )

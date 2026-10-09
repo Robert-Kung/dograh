@@ -151,7 +151,7 @@ async def test_smoke_dispatch_tags_run_and_marks_room(monkeypatch, fake_redis):
         _fallback_fails,
     )
     await _drain()
-    assert created[0]["initial_context"]["smoke"] is True
+    assert created[0]["initial_context"]["ccp_smoke"] is True
     assert await smoke.is_smoke_room("cs-+886212345000")
 
 
@@ -168,7 +168,7 @@ async def test_production_dispatch_untagged_even_with_smoke_caller_number(
         _fallback_fails,
     )
     await _drain()
-    assert "smoke" not in created[0]["initial_context"]
+    assert created[0]["initial_context"]["ccp_smoke"] is False
     assert not await smoke.is_smoke_room("cs-+886212345678")
 
 
@@ -198,7 +198,7 @@ async def test_unmapped_smoke_did_marks_room_before_fallback(fake_redis):
 
 def test_scope_clause_excludes_smoke_runs():
     clause = call_scope.scope_clause("wr.")
-    assert "COALESCE(wr.initial_context->>'smoke', '') <> 'true'" in clause
+    assert "COALESCE(wr.initial_context->>'ccp_smoke', '') <> 'true'" in clause
 
 
 # --- 2.3 alerts stay log-only for smoke rooms ---
@@ -267,3 +267,35 @@ async def test_reconciler_marks_smoke_room(monkeypatch, fake_redis):
         client, now=10**10, dedup=livekit_dispatcher.DispatchDedup()
     )
     assert n == 1 and handed == [("cs-+886212345000", "undispatched", True)]
+
+
+# --- security M1: only the dispatcher writes the run tag ---
+
+
+def test_without_reserved_strips_the_tag_only():
+    assert smoke.without_reserved({"ccp_smoke": True, "name": "x"}) == {"name": "x"}
+    assert smoke.without_reserved(None) == {}
+
+
+@pytest.mark.asyncio
+async def test_template_variable_cannot_tag_a_run(db_session, async_session):
+    from api.db.models import OrganizationModel, UserModel
+
+    org = OrganizationModel(provider_id="smoke-m1-org")
+    async_session.add(org)
+    await async_session.flush()
+    user = UserModel(provider_id="smoke-m1-user", selected_organization_id=org.id)
+    async_session.add(user)
+    await async_session.flush()
+    wf = await db_session.create_workflow(
+        name="m1", workflow_definition={"nodes": [], "edges": []},
+        user_id=user.id, organization_id=org.id,
+    )
+    wf.template_context_variables = {"ccp_smoke": True, "greeting": "hi"}
+    await async_session.flush()
+    run = await db_session.create_workflow_run(
+        name="m1-run", workflow_id=wf.id, mode="livekit", user_id=user.id,
+        initial_context={"did": "+886212345678"},
+    )
+    assert "ccp_smoke" not in run.initial_context
+    assert run.initial_context["greeting"] == "hi"
