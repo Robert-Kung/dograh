@@ -71,6 +71,7 @@ def add_run(workflow, async_session):
         gathered: dict | None = None,
         logs: dict | None = None,
         did: str | None = "+886212345678",
+        smoke: bool = False,
     ) -> int:
         gathered_context = dict(gathered or {})
         if disposition:
@@ -91,7 +92,10 @@ def add_run(workflow, async_session):
             logs=logs or {},
             recording_url=recording_url,
             storage_backend="minio",
-            initial_context={"did": did} if did else {},
+            initial_context={
+                **({"did": did} if did else {}),
+                **({"smoke": True} if smoke else {}),
+            },
         )
         async_session.add(run)
         await async_session.flush()
@@ -777,3 +781,18 @@ async def test_audio_streams_without_a_db_session(add_run, fake_minio, monkeypat
     stream = await cr.open_audio(run_id, None, now=NOW)
     assert open_sessions == []  # closed before the first byte
     await asyncio.wait_for(_drain(stream), 5)
+
+
+# --- smoke runs (local-deploy-sip-smoke 2.2) ---
+
+
+async def test_smoke_run_not_listed_not_readable(add_run, fake_minio):
+    keep = await add_run(_at(2021, 11, 5))
+    smoke_run = await add_run(
+        _at(2021, 11, 5), smoke=True, recording_url="recordings/7.wav"
+    )
+    ids = {r["run_id"] for r in (await _list())["rows"]}
+    assert keep in ids and smoke_run not in ids
+    assert await _detail(smoke_run) is None
+    assert await cr.open_audio(smoke_run, None, now=NOW) is None
+    assert fake_minio.calls == []

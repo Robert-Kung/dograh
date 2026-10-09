@@ -24,6 +24,7 @@ from typing import Awaitable, Callable, Optional
 
 from loguru import logger
 
+from api.services.ccp import smoke
 from api.utils.telephony_address import normalize_telephony_address
 
 DEFAULT_ROOM_PREFIX = "cs-"
@@ -203,6 +204,9 @@ async def dispatch_livekit_call(
     """
     dedup = dedup or dispatch_dedup
     handed_off = False
+    if smoke.is_smoke(sip_attributes):
+        # Before anything can emit an event for this room (local-deploy-sip-smoke D8).
+        await smoke.mark_room(room_name)
     try:
         handed_off = await _dispatch(
             room_name, sip_attributes, resolver, fallback, livekit_url
@@ -293,6 +297,9 @@ async def _dispatch(
                     "did": did,
                     "room_name": room_name,
                     "direction": "inbound",
+                    # Server-set dispatch-rule attribute only (local-deploy-sip-smoke D2);
+                    # call_scope excludes these runs from usage and call records.
+                    **({"smoke": True} if smoke.is_smoke(sip_attributes) else {}),
                 },
             )
         )

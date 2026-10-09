@@ -102,11 +102,14 @@ def scope_clause(t: str = "") -> str:
     """Runs that count as an AI-reception call (W4b 設計 B).
 
     Ended runs only: completed, written a terminal outcome, or old enough that
-    a killed worker never will. Binds ``:stale_before``.
+    a killed worker never will. Smoke runs (``initial_context.smoke``, set by
+    the dispatcher from a server-set dispatch-rule attribute only) are never
+    counted (local-deploy-sip-smoke D2). Binds ``:stale_before``.
     """
     return f"""(
         {t}mode = 'livekit'
         AND {t}call_type = 'inbound'
+        AND COALESCE({t}initial_context->>'smoke', '') <> 'true'
         AND (
             COALESCE({t}is_completed, false)
             OR starts_with({t}annotations->>'call_outcome', 'transferred:')
