@@ -204,9 +204,6 @@ async def dispatch_livekit_call(
     """
     dedup = dedup or dispatch_dedup
     handed_off = False
-    if smoke.is_smoke(sip_attributes):
-        # Before anything can emit an event for this room (local-deploy-sip-smoke D8).
-        await smoke.mark_room(room_name)
     try:
         handed_off = await _dispatch(
             room_name, sip_attributes, resolver, fallback, livekit_url
@@ -297,10 +294,10 @@ async def _dispatch(
                     "did": did,
                     "room_name": room_name,
                     "direction": "inbound",
-                    # Server-set dispatch-rule attribute only (local-deploy-sip-smoke D2),
-                    # always written so no template variable can supply it; call_scope
-                    # excludes the true ones from usage and call records.
-                    smoke.RUN_CONTEXT_KEY: smoke.is_smoke(sip_attributes),
+                    # Room name set by the smoke dispatch rule only (local-deploy-sip-smoke
+                    # D2 r2), always written so no template variable can supply it;
+                    # call_scope excludes the true ones from usage and call records.
+                    smoke.RUN_CONTEXT_KEY: smoke.is_smoke_room(room_name),
                 },
             )
         )

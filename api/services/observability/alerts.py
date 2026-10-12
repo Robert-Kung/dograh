@@ -148,11 +148,10 @@ def notify(event: str, fields: dict) -> None:
 async def _suppressed_for_smoke(event: str, fields: dict) -> bool:
     """Smoke-call events stay log-only (local-deploy-sip-smoke D8).
 
-    The room is registered by the dispatcher from the SIP participant's
-    server-set ``ccp.smoke`` attribute; a lookup failure reads as "not smoke".
+    Recognised by the room name the smoke dispatch rule gives (D2 r2).
     """
     room_name = fields.get("room_name")
-    if not await smoke.is_smoke_room(room_name):
+    if not smoke.is_smoke_room(room_name):
         return False
     logger.bind(call_event=event, smoke=True, room_name=room_name).info(
         f"alert suppressed for smoke room: {event} room={room_name}"

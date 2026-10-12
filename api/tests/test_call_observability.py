@@ -17,12 +17,6 @@ def _clean_alert_env(monkeypatch):
     monkeypatch.delenv("OBS_ERROR_WINDOW_SECONDS", raising=False)
     monkeypatch.delenv("OBS_ERROR_THRESHOLD", raising=False)
 
-    # the smoke-room lookup hits real Redis when REDIS_URL is set (CI); these
-    # tests are about production calls, so keep it out of the alert path
-    async def not_smoke(room_name):
-        return False
-
-    monkeypatch.setattr(alerts.smoke, "is_smoke_room", not_smoke)
     alerts._redis = None
     yield
     alerts._redis = None
