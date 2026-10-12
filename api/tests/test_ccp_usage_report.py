@@ -383,7 +383,9 @@ async def test_persisted_outcome_reads_the_annotation(add_run, db_session):
 async def test_smoke_runs_are_not_counted(add_run):
     # local-deploy-sip-smoke 2.2: the dispatcher's server-side tag excludes a run;
     # anything else (absent, false, a caller-looking field) is a production call.
-    await add_run(_at(2021, 11, 3), initial_context={"did": "+886212345000", "ccp_smoke": True})
+    await add_run(
+        _at(2021, 11, 3), initial_context={"did": "+886212345000", "ccp_smoke": True}
+    )
     await add_run(_at(2021, 11, 3), initial_context={"did": "+886212345678"})
     await add_run(_at(2021, 11, 3), initial_context={"ccp_smoke": False})
     await add_run(_at(2021, 11, 3), initial_context={"ccp_smoke": "1", "smoke": True})

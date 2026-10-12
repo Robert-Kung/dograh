@@ -207,14 +207,18 @@ def test_scope_clause_excludes_smoke_runs():
 @pytest.mark.asyncio
 async def test_immediate_alert_suppressed_for_smoke_room(fake_redis, sent):
     await smoke.mark_room("cs-smoke")
-    alerts.notify("safetynet.triggered", {"room_name": "cs-smoke", "reason": "unmapped_did"})
+    alerts.notify(
+        "safetynet.triggered", {"room_name": "cs-smoke", "reason": "unmapped_did"}
+    )
     await _drain()
     assert sent == []
 
 
 @pytest.mark.asyncio
 async def test_immediate_alert_still_sent_for_production_room(fake_redis, sent):
-    alerts.notify("safetynet.triggered", {"room_name": "cs-prod", "reason": "unmapped_did"})
+    alerts.notify(
+        "safetynet.triggered", {"room_name": "cs-prod", "reason": "unmapped_did"}
+    )
     await _drain()
     assert len(sent) == 1 and "cs-prod" in sent[0]
 
@@ -244,8 +248,11 @@ async def test_reconciler_marks_smoke_room(monkeypatch, fake_redis):
     from api.services.pipecat.livekit_cold_transfer import SIP_KIND
 
     caller = types.SimpleNamespace(
-        identity="sip_1", kind=SIP_KIND, joined_at=0,
-        attributes={"ccp.smoke": "1", "sip.callID": "c-1"}, sid="PA_1",
+        identity="sip_1",
+        kind=SIP_KIND,
+        joined_at=0,
+        attributes={"ccp.smoke": "1", "sip.callID": "c-1"},
+        sid="PA_1",
     )
     room = types.SimpleNamespace(name="cs-+886212345000")
 
@@ -288,13 +295,18 @@ async def test_template_variable_cannot_tag_a_run(db_session, async_session):
     async_session.add(user)
     await async_session.flush()
     wf = await db_session.create_workflow(
-        name="m1", workflow_definition={"nodes": [], "edges": []},
-        user_id=user.id, organization_id=org.id,
+        name="m1",
+        workflow_definition={"nodes": [], "edges": []},
+        user_id=user.id,
+        organization_id=org.id,
     )
     wf.template_context_variables = {"ccp_smoke": True, "greeting": "hi"}
     await async_session.flush()
     run = await db_session.create_workflow_run(
-        name="m1-run", workflow_id=wf.id, mode="livekit", user_id=user.id,
+        name="m1-run",
+        workflow_id=wf.id,
+        mode="livekit",
+        user_id=user.id,
         initial_context={"did": "+886212345678"},
     )
     assert "ccp_smoke" not in run.initial_context
