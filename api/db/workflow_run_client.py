@@ -16,6 +16,7 @@ from api.db.models import (
 )
 from api.enums import CallType, StorageBackend
 from api.schemas.workflow import WorkflowRunResponseSchema
+from api.services.ccp import smoke
 from api.services.workflow.run_usage_response import format_public_cost_info
 from api.utils.recording_artifacts import get_recording_storage_key
 
@@ -94,7 +95,9 @@ class WorkflowRunClient(BaseDBClient):
             )
 
             merged_initial_context = {
-                **(default_context or {}),
+                # template variables cannot supply the dispatcher-owned smoke tag
+                # (local-deploy-sip-smoke security M1)
+                **smoke.without_reserved(default_context),
                 **(initial_context or {}),
             }
 
