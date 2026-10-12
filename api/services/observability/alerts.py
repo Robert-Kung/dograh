@@ -132,10 +132,10 @@ def notify(event: str, fields: dict) -> None:
     url = webhook_url()
     if url is None:
         return
-    if _suppressed_for_smoke(event, fields):
-        return
     if event in IMMEDIATE_EVENTS:
         if (event, fields.get("stage")) in IMMEDIATE_EXEMPT:
+            return
+        if _suppressed_for_smoke(event, fields):
             return
         text = _format(event, fields)
         if event in IMMEDIATE_ONCE_PER_PROCESS:
@@ -144,6 +144,8 @@ def notify(event: str, fields: dict) -> None:
             _sent_once.add(text)
         spawn(_send(url, text))
     elif event in WINDOWED_EVENTS:
+        if _suppressed_for_smoke(event, fields):
+            return
         spawn(_count_and_alert(url, event, fields))
 
 
