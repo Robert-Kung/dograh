@@ -39,7 +39,6 @@ from typing import NamedTuple, Optional
 
 from loguru import logger
 
-from api.services.ccp import smoke
 from api.services.observability import call_events
 from api.services.observability.call_outcome import (
     record_call_fact,
@@ -896,8 +895,6 @@ async def reconcile_undispatched_rooms(
             key = livekit_dispatcher.dispatch_key(caller)
             if not dedup.claim(key):
                 continue
-            if smoke.is_smoke(dict(caller.attributes)):
-                await smoke.mark_room(room.name)
             jobs.append(_hand_off(client, room.name, key))
         results = await asyncio.gather(*jobs, return_exceptions=True)
     for r in results:

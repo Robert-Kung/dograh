@@ -135,35 +135,33 @@ def notify(event: str, fields: dict) -> None:
     if event in IMMEDIATE_EVENTS:
         if (event, fields.get("stage")) in IMMEDIATE_EXEMPT:
             return
+        if _suppressed_for_smoke(event, fields):
+            return
         text = _format(event, fields)
         if event in IMMEDIATE_ONCE_PER_PROCESS:
             if text in _sent_once:
                 return
             _sent_once.add(text)
-        spawn(_send_unless_smoke(url, text, event, fields))
+        spawn(_send(url, text))
     elif event in WINDOWED_EVENTS:
+        if _suppressed_for_smoke(event, fields):
+            return
         spawn(_count_and_alert(url, event, fields))
 
 
-async def _suppressed_for_smoke(event: str, fields: dict) -> bool:
-    """Smoke-call events stay log-only (local-deploy-sip-smoke D8).
+def _suppressed_for_smoke(event: str, fields: dict) -> bool:
+    """Smoke-call events stay log-only (local-deploy-sip-smoke D8): never sent,
+    never counted, never recorded as sent-once.
 
-    The room is registered by the dispatcher from the SIP participant's
-    server-set ``ccp.smoke`` attribute; a lookup failure reads as "not smoke".
+    Recognised by the room name the smoke dispatch rule gives (D2 r2).
     """
     room_name = fields.get("room_name")
-    if not await smoke.is_smoke_room(room_name):
+    if not smoke.is_smoke_room(room_name):
         return False
     logger.bind(call_event=event, smoke=True, room_name=room_name).info(
         f"alert suppressed for smoke room: {event} room={room_name}"
     )
     return True
-
-
-async def _send_unless_smoke(url: str, text: str, event: str, fields: dict) -> None:
-    if await _suppressed_for_smoke(event, fields):
-        return
-    await _send(url, text)
 
 
 def _format(event: str, fields: dict) -> str:
@@ -208,8 +206,6 @@ async def _get_redis():
 
 
 async def _count_and_alert(url: str, event: str, fields: dict) -> None:
-    if await _suppressed_for_smoke(event, fields):
-        return
     try:
         r = await _get_redis()
         key = f"obs:alert:{event}"

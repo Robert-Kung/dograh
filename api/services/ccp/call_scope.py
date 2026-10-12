@@ -103,9 +103,9 @@ def scope_clause(t: str = "") -> str:
 
     Ended runs only: completed, written a terminal outcome, or old enough that
     a killed worker never will. Smoke runs (``initial_context.ccp_smoke``, set
-    by the dispatcher from a server-set dispatch-rule attribute only and
+    by the dispatcher from the smoke dispatch rule's room name only and
     stripped from every other merge source) are never counted
-    (local-deploy-sip-smoke D2). Binds ``:stale_before``.
+    (local-deploy-sip-smoke D2 r2). Binds ``:stale_before``.
     """
     return f"""(
         {t}mode = 'livekit'
