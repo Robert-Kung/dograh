@@ -132,6 +132,8 @@ def notify(event: str, fields: dict) -> None:
     url = webhook_url()
     if url is None:
         return
+    if _suppressed_for_smoke(event, fields):
+        return
     if event in IMMEDIATE_EVENTS:
         if (event, fields.get("stage")) in IMMEDIATE_EXEMPT:
             return
@@ -140,13 +142,14 @@ def notify(event: str, fields: dict) -> None:
             if text in _sent_once:
                 return
             _sent_once.add(text)
-        spawn(_send_unless_smoke(url, text, event, fields))
+        spawn(_send(url, text))
     elif event in WINDOWED_EVENTS:
         spawn(_count_and_alert(url, event, fields))
 
 
-async def _suppressed_for_smoke(event: str, fields: dict) -> bool:
-    """Smoke-call events stay log-only (local-deploy-sip-smoke D8).
+def _suppressed_for_smoke(event: str, fields: dict) -> bool:
+    """Smoke-call events stay log-only (local-deploy-sip-smoke D8): never sent,
+    never counted, never recorded as sent-once.
 
     Recognised by the room name the smoke dispatch rule gives (D2 r2).
     """
@@ -157,12 +160,6 @@ async def _suppressed_for_smoke(event: str, fields: dict) -> bool:
         f"alert suppressed for smoke room: {event} room={room_name}"
     )
     return True
-
-
-async def _send_unless_smoke(url: str, text: str, event: str, fields: dict) -> None:
-    if await _suppressed_for_smoke(event, fields):
-        return
-    await _send(url, text)
 
 
 def _format(event: str, fields: dict) -> str:
@@ -207,8 +204,6 @@ async def _get_redis():
 
 
 async def _count_and_alert(url: str, event: str, fields: dict) -> None:
-    if await _suppressed_for_smoke(event, fields):
-        return
     try:
         r = await _get_redis()
         key = f"obs:alert:{event}"
