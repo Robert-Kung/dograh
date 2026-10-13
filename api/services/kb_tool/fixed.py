@@ -34,6 +34,10 @@ KB_SSE_READ_TIMEOUT_SECS = 3
 #: ExternalCredential shape the kb tool must reference.
 KB_CREDENTIAL_TYPE = "api_key"
 KB_CREDENTIAL_HEADER = "X-KB-Token"
+#: Name of the dedicated credential the platform bootstrap creates (its
+#: ``RESTRICTED_CREDENTIAL_NAMES["mcp"]``; unique per org upstream). The uuid
+#: is assigned at creation, so the name is the stable identity to compare.
+KB_CREDENTIAL_NAME = "kb-mcp"
 
 #: At most this many ``mcp``-category tools may exist in the database.
 KB_MAX_MCP_TOOLS = 1
@@ -56,6 +60,7 @@ FIELD_SSE_READ_TIMEOUT = "sse_read_timeout_secs"
 FIELD_CREDENTIAL = "credential"
 FIELD_CREDENTIAL_TYPE = "credential_type"
 FIELD_CREDENTIAL_HEADER = "credential_header_name"
+FIELD_CREDENTIAL_NAME = "credential_name"
 
 
 def expected_url() -> Optional[str]:
@@ -103,11 +108,15 @@ def credential_mismatches(credential: Any) -> list[str]:
     """Field names in which the referenced ExternalCredential is wrong.
 
     ``None`` (missing, inactive, or in another organization) reports
-    ``credential``. Never reads or returns the secret value.
+    ``credential``. A credential of the right shape that is not the
+    bootstrap's ``kb-mcp`` one reports ``credential_name``. Never reads or
+    returns the secret value.
     """
     if credential is None:
         return [FIELD_CREDENTIAL]
     fields: list[str] = []
+    if getattr(credential, "name", None) != KB_CREDENTIAL_NAME:
+        fields.append(FIELD_CREDENTIAL_NAME)
     if getattr(credential, "credential_type", None) != KB_CREDENTIAL_TYPE:
         fields.append(FIELD_CREDENTIAL_TYPE)
     data = getattr(credential, "credential_data", None) or {}

@@ -13,7 +13,7 @@ Checks, in order:
    constants (drift report only -- the constants are the baseline).
 3. Number of non-archived ``mcp`` tools in the database: 0 -> "not created
    yet"; >= 2 -> warn; each one compared field by field (definition and
-   ExternalCredential type/header), mismatches named by field only.
+   ExternalCredential name/type/header), mismatches named by field only.
 4. A matching tool -> ``tools/list`` against the kb server
    (``KB_MCP_URL``, fixed timeouts, that tool's credential): warn when
    unreachable or when ``search_knowledge`` is not listed.

@@ -1,4 +1,13 @@
-from typing import TYPE_CHECKING, Awaitable, Callable, Dict, Literal, Optional, Union
+from typing import (
+    TYPE_CHECKING,
+    Awaitable,
+    Callable,
+    Collection,
+    Dict,
+    Literal,
+    Optional,
+    Union,
+)
 
 from pipecat.adapters.schemas.tools_schema import ToolsSchema
 from pipecat.frames.frames import (
@@ -186,10 +195,17 @@ class PipecatEngine:
             "workflow_run_id": self._workflow_run_id,
         }
 
-    async def get_platform_bound_values(self) -> dict:
-        """Platform-side truth for identity params (C6 source binding)."""
+    async def get_platform_bound_values(
+        self, sources: Optional[Collection[str]] = None
+    ) -> dict:
+        """Platform-side truth for identity params (C6 source binding).
+
+        ``sources`` narrows the lookup to the keys a trust spec binds (None =
+        all). The caller E.164 costs a LiveKit roundtrip with no deadline of
+        its own, so a tool that does not bind it must not wait on it.
+        """
         values: dict = {"workflow_run_id": self._workflow_run_id}
-        if self._room_name:
+        if self._room_name and (sources is None or "caller_e164" in sources):
             # Only a resolved E.164 is cached. An empty result (anonymous
             # caller or a transient LiveKit lookup failure — get_caller_number
             # collapses both to "") is left unresolved so the next tool call

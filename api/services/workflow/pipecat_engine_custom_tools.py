@@ -7,6 +7,7 @@ during workflow execution.
 from __future__ import annotations
 
 import asyncio
+import functools
 import re
 import time
 import uuid
@@ -167,7 +168,7 @@ def _family_for_category(category: str) -> Optional[str]:
 def _node_allows_kb(
     mcp_tool_filters: Optional[dict[str, list[str]]], tool_uuid: str
 ) -> bool:
-    """Per-node MCP filter applied to the kb stub, like to real MCP schemas."""
+    """Per-node MCP filter applied to the kb tool, like to other MCP schemas."""
     if mcp_tool_filters is None:
         return True
     return kb_fixed.KB_SEARCH_TOOL in (mcp_tool_filters.get(tool_uuid) or [])
@@ -306,12 +307,16 @@ class CustomToolManager:
                 if tool.category == ToolCategory.MCP.value:
                     session = self._engine._mcp_sessions.get(tool.tool_uuid)
                     if allowed_categories.is_restricted(tool.category):
-                        if not kb_runtime.definition_admissible(tool):
-                            continue
-                        if kb_runtime.stub_reason(session) is not None:
-                            if _node_allows_kb(mcp_tool_filters, tool.tool_uuid):
-                                schemas.append(kb_runtime.stub_schema(tool))
-                            continue
+                        # dograh's fixed schema, live or stub -- never the
+                        # server's tools/list text. No session = refused at
+                        # opening: nothing at all.
+                        if (
+                            session is not None
+                            and kb_runtime.definition_admissible(tool)
+                            and _node_allows_kb(mcp_tool_filters, tool.tool_uuid)
+                        ):
+                            schemas.append(kb_runtime.search_schema(tool))
+                        continue
                     if session is None or not session.available:
                         logger.warning(
                             f"MCP tool '{tool.name}' ({tool.tool_uuid}) "
@@ -414,15 +419,14 @@ class CustomToolManager:
 
                 if tool.category == ToolCategory.MCP.value:
                     session = self._engine._mcp_sessions.get(tool.tool_uuid)
-                    restricted = allowed_categories.is_restricted(tool.category)
-                    if restricted:
-                        if not kb_runtime.definition_admissible(tool):
-                            continue
-                        reason = kb_runtime.stub_reason(session)
-                        if reason is not None:
-                            if _node_allows_kb(mcp_tool_filters, tool.tool_uuid):
-                                self._register_kb_stub(tool, reason, trust)
-                            continue
+                    if allowed_categories.is_restricted(tool.category):
+                        if (
+                            session is not None
+                            and kb_runtime.definition_admissible(tool)
+                            and _node_allows_kb(mcp_tool_filters, tool.tool_uuid)
+                        ):
+                            self._register_kb(tool, session)
+                        continue
                     if session is None or not session.available:
                         logger.warning(
                             f"MCP tool '{tool.name}' ({tool.tool_uuid}) "
@@ -436,16 +440,7 @@ class CustomToolManager:
                     )
                     mcp_schemas = session.function_schemas(allowed)
                     for fs in mcp_schemas:
-                        if restricted:
-                            handler = kb_runtime.create_search_handler(
-                                session,
-                                fs.name,
-                                run_id_provider=lambda: getattr(
-                                    self._engine, "_workflow_run_id", None
-                                ),
-                            )
-                        else:
-                            handler = self._create_mcp_handler(session, fs.name)
+                        handler = self._create_mcp_handler(session, fs.name)
                         if trust:
                             spec = resolve_mcp_spec(session.raw_name(fs.name))
                             if spec is None:
@@ -510,31 +505,51 @@ class CustomToolManager:
     ):
         """Wrap a handler with the S-L8-TRUST deterministic boundary.
 
-        ``fence_source`` (MCP tools) also fences the handler's output.
+        ``fence_source`` (MCP tools) also fences the handler's output. The
+        platform lookup is narrowed to the sources this spec binds, so a tool
+        that binds only ``workflow_run_id`` (search_knowledge) never waits on
+        the LiveKit caller-number roundtrip before its own deadline starts.
         """
         return guard(
             handler,
             spec,
             tool_name=tool_name,
             declared_params=declared_params,
-            platform_values_provider=self._engine.get_platform_bound_values,
+            platform_values_provider=functools.partial(
+                self._engine.get_platform_bound_values,
+                sources=frozenset(spec.platform_bound.values()),
+            ),
             event_context_provider=self._engine.trust_event_context,
             fence_source=fence_source,
         )
 
-    def _register_kb_stub(self, tool: Any, reason: str, trust: bool) -> None:
-        """Register the no-result stub for an admitted but unusable kb tool."""
-        schema = kb_runtime.stub_schema(tool)
-        handler = kb_runtime.create_stub_handler(tool, reason)
-        if trust:
-            handler = self._guarded(
-                handler,
-                resolve_mcp_spec(kb_fixed.KB_SEARCH_TOOL),
-                tool_name=schema.name,
-                declared_params=set(schema.properties),
-                fence_source=kb_fixed.KB_SEARCH_TOOL,
+    def _register_kb(self, tool: Any, session: Any) -> None:
+        """Register the admitted kb tool: live search, or the no-result stub.
+
+        Guarded in **every** mode, not only LIVEKIT: text-chat is the one path
+        a customer identity can drive itself, so the ``search_knowledge``
+        argument rules and the output fence apply there too (kb-service).
+        """
+        schema = kb_runtime.search_schema(tool)
+        reason = kb_runtime.stub_reason(session)
+        register_kw: dict = {}
+        if reason is None:
+            handler = kb_runtime.create_search_handler(
+                session,
+                schema.name,
+                run_id_provider=lambda: getattr(self._engine, "_workflow_run_id", None),
             )
-        self._engine.llm.register_function(schema.name, handler)
+            register_kw["timeout_secs"] = session.call_timeout_secs
+        else:
+            handler = kb_runtime.create_stub_handler(tool, reason)
+        handler = self._guarded(
+            handler,
+            resolve_mcp_spec(kb_fixed.KB_SEARCH_TOOL),
+            tool_name=schema.name,
+            declared_params=set(schema.properties),
+            fence_source=kb_fixed.KB_SEARCH_TOOL,
+        )
+        self._engine.llm.register_function(schema.name, handler, **register_kw)
 
     def _create_handler(self, tool: Any, function_name: str):
         """Create a handler function for a tool based on its category.

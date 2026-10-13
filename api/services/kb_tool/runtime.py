@@ -11,6 +11,11 @@ compares the tool against the fixed definition here before going further:
 - advertisement and registration re-check the definition (pure, no DB) so a
   session that somehow exists for a non-matching row is still not exposed.
 
+What the LLM sees is dograh's own: the advertised schema is always
+:func:`search_schema` (never the server's ``tools/list`` description or
+properties), and the handler -- real or stub -- always runs behind the
+``search_knowledge`` trust spec and output fence, in every mode.
+
 Failure of the admitted tool is "no result", never dead air (C4): the handler
 maps timeout and error to :func:`no_result`, and an admitted tool whose server
 is down or does not list ``search_knowledge`` is offered as a stub that answers
@@ -145,8 +150,13 @@ def stub_function_name(tool: Any) -> str:
     return namespace_function_name(tool.name, fixed.KB_SEARCH_TOOL, fallback=fallback)
 
 
-def stub_schema(tool: Any) -> FunctionSchema:
-    """The schema offered when the admitted kb server cannot serve searches."""
+def search_schema(tool: Any) -> FunctionSchema:
+    """The only schema ever advertised for the kb tool (live or stub).
+
+    Program constants, not the kb server's ``tools/list``: the server-side
+    description and properties go into the LLM prompt, and a replaced or
+    compromised kb must not be able to steer the LLM through them.
+    """
     return FunctionSchema(
         name=stub_function_name(tool),
         description="Search the customer-service knowledge base for FAQ answers.",
@@ -183,10 +193,10 @@ def create_search_handler(
     ends in this envelope, not in Pipecat's bare ``None`` timeout result.
     Arguments are not logged: ``query`` is caller speech (D12).
 
-    ``workflow_run_id`` is set from ``run_id_provider`` in **every** mode. On
-    LIVEKIT the guard has already bound it (and reported a forged value); the
-    text-chat path has no guard, and kb's contract carries the field in both,
-    so the handler supplies it there instead of trusting the LLM's value.
+    ``workflow_run_id`` is set from ``run_id_provider`` in **every** mode. The
+    guard in front of this handler has already bound it (and reported a forged
+    value); setting it here too keeps the field platform-sourced even if the
+    guard's platform lookup came back empty.
     """
 
     async def kb_search_handler(function_call_params) -> None:
