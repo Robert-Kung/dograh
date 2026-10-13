@@ -50,22 +50,28 @@ export const DocumentSelector = ({
     };
 
     if (completedDocuments.length === 0) {
-        // customer-center-platform fork（母 repo W4a D7）：空狀態誠實說明本部署未啟用
-        // 知識庫。上游文案「Upload documents to the knowledge base first」與說明列的
-        // 「Learn more」外連一併移除——上傳頁在閘門拒絕清單內，那句話指向一條不存在
-        // 的路；「尚未上傳」式措辭會讓人以為可以自己上傳。
+        // customer-center-platform fork（母 repo W4a D7；kb-service task 4.10 改字）：
+        // 空狀態誠實說明「此處的（dograh 原生）知識庫」未啟用。上游文案「Upload
+        // documents to the knowledge base first」與說明列的「Learn more」外連一併
+        // 移除——上傳頁在閘門拒絕清單內，那句話指向一條不存在的路；「尚未上傳」式
+        // 措辭會讓人以為可以自己上傳。
+        // kb-service 起本部署有知識問答（自建 kb 經 MCP，`knowledge-retrieval`），
+        // 舊文案「本部署未啟用知識庫」會讓人以為整個部署沒有知識庫能力，故改寫為
+        // 指出內容由專案窗口於主控台「知識庫」頁維護。刻意**不**附連往主控台的
+        // 連結：主管沒有該頁存取，連結只會落回總覽（workflow-editor-access）。
         return (
             <div className="space-y-2">
                 {showLabel && <Label>{label}</Label>}
                 <div className="border rounded-md p-4 space-y-3">
                     <div className="text-sm text-muted-foreground text-center" lang="zh-Hant">
-                        本部署未啟用知識庫。如需使用，請洽專案窗口。
+                        本部署未啟用此處的知識庫。AI 接待的知識問答內容由專案窗口於主控台「知識庫」頁維護；如需更新，請洽專案窗口。
                     </div>
                     {/* customer-center-platform fork（母 repo W2d task 3.6）：
                         上游的「Upload Documents」連到 `/files`，該頁在閘門的 UI 拒絕
                         清單內 ⇒ 開新分頁只會拿到 403。依 task 3.2b，**入口本身通往
                         不可達頁面**是「移除」而非「停用」的唯一合格情形，故移除。
-                        知識庫在本部署是唯讀（僅清單與 metadata），文件由建置單位匯入。 */}
+                        原生知識庫在本部署關閉（D8／D12）；知識問答內容由實施方於主控台
+                        「知識庫」頁或 CLI 匯入自建 kb，經 MCP 檢索。 */}
                 </div>
             </div>
         );
