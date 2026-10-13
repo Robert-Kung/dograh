@@ -104,6 +104,26 @@ class ToolClient(BaseDBClient):
             result = await session.execute(query)
             return list(result.scalars().all())
 
+    async def get_non_archived_tools_by_category(
+        self, category: str
+    ) -> List[ToolModel]:
+        """Non-archived tools of one category across **all** organizations.
+
+        Platform boot checks only (kb-service 3.3b counts ``mcp`` tools in the
+        whole database); never expose through a user-facing path.
+        """
+        async with self.async_session() as session:
+            query = (
+                select(ToolModel)
+                .where(
+                    ToolModel.category == category,
+                    ToolModel.status != ToolStatus.ARCHIVED.value,
+                )
+                .order_by(ToolModel.id)
+            )
+            result = await session.execute(query)
+            return list(result.scalars().all())
+
     async def get_tool_by_uuid(
         self,
         tool_uuid: str,

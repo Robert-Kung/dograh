@@ -1067,7 +1067,13 @@ class PipecatEngine:
         and ``transfer_call``) nothing here should open at all, and C5's
         "MCP is blocked at call time" claim rests on this check, not on the
         two downstream ones.
+
+        When the canon lists ``mcp`` under ``restricted_tool_types`` (kb-service
+        D4), each tool is further compared with the fixed kb definition and at
+        most one is opened; a refused tool gets no session and is therefore
+        neither advertised nor registered downstream.
         """
+        from api.services.kb_tool import runtime as kb_runtime
         from api.services.workflow.tools.mcp_tool import (
             McpDefinitionError,
             validate_mcp_definition,
@@ -1090,6 +1096,7 @@ class PipecatEngine:
                 list(tool_uuids), organization_id
             )
             allowed_categories = allowed_tool_categories_or_none()
+            restricted_admitted = 0
             for tool in tools:
                 if tool.category != ToolCategory.MCP.value:
                     continue
@@ -1126,6 +1133,18 @@ class PipecatEngine:
                         )
                         continue
 
+                restricted = allowed_categories.is_restricted(tool.category)
+                if restricted:
+                    if not kb_runtime.admit_for_session(
+                        tool,
+                        cfg,
+                        credential,
+                        admitted_so_far=restricted_admitted,
+                        event_context=self.trust_event_context(),
+                    ):
+                        continue
+                    restricted_admitted += 1
+
                 session = McpToolSession(
                     tool_uuid=tool.tool_uuid,
                     tool_name=tool.name,
@@ -1137,6 +1156,8 @@ class PipecatEngine:
                 )
                 await session.start()
                 self._mcp_sessions[tool.tool_uuid] = session
+                if restricted:
+                    kb_runtime.warn_if_tool_missing(tool, session)
         except Exception as e:
             logger.warning(
                 f"Failed to open MCP sessions; call proceeds without MCP tools: {e}",

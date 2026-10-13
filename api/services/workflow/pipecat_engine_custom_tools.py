@@ -23,6 +23,8 @@ from pipecat.utils.enums import EndTaskReason
 
 from api.db import db_client
 from api.enums import ToolCategory, WorkflowRunMode
+from api.services.kb_tool import fixed as kb_fixed
+from api.services.kb_tool import runtime as kb_runtime
 from api.services.pipecat.audio_playback import play_audio, play_audio_loop
 from api.services.pipecat.livekit_transfer_flow import (
     execute_cold_transfer,
@@ -110,6 +112,11 @@ def log_scope_denied_tool(category: str, name: str) -> None:
 def allowed_tool_categories_or_none() -> Optional[frozenset]:
     """The enabled set, or ``None`` when the canon is unreadable (fail-closed).
 
+    The returned set is a :class:`~api.services.platform_scope.ToolScope`:
+    ``allowed_tool_types`` plus the restricted keys this build can check
+    (``mcp``). ``scope.is_restricted(category)`` tells the MCP branches to
+    compare against the fixed kb definition (kb-service D4) before going on.
+
     Three call-time consumers share this: tool advertisement, handler
     registration (both below), and MCP session opening in
     ``pipecat_engine._open_mcp_sessions``. The third one runs *before* the
@@ -124,12 +131,12 @@ def allowed_tool_categories_or_none() -> Optional[frozenset]:
     """
     from api.services.platform_scope import (
         PlatformArtifactMissing,
-        allowed_tool_categories,
+        call_time_tool_scope,
         log_artifact_missing,
     )
 
     try:
-        return allowed_tool_categories()
+        return call_time_tool_scope()
     except PlatformArtifactMissing as exc:
         log_artifact_missing("pipecat_engine_custom_tools", exc)
         logger.bind(call_event="scope.canon_unavailable").error(
@@ -155,6 +162,15 @@ def _family_for_category(category: str) -> Optional[str]:
         ToolCategory.HTTP_API.value: "http",
         ToolCategory.MCP.value: "mcp",
     }.get(category)
+
+
+def _node_allows_kb(
+    mcp_tool_filters: Optional[dict[str, list[str]]], tool_uuid: str
+) -> bool:
+    """Per-node MCP filter applied to the kb stub, like to real MCP schemas."""
+    if mcp_tool_filters is None:
+        return True
+    return kb_fixed.KB_SEARCH_TOOL in (mcp_tool_filters.get(tool_uuid) or [])
 
 
 class CustomToolManager:
@@ -289,6 +305,13 @@ class CustomToolManager:
 
                 if tool.category == ToolCategory.MCP.value:
                     session = self._engine._mcp_sessions.get(tool.tool_uuid)
+                    if allowed_categories.is_restricted(tool.category):
+                        if not kb_runtime.definition_admissible(tool):
+                            continue
+                        if kb_runtime.stub_reason(session) is not None:
+                            if _node_allows_kb(mcp_tool_filters, tool.tool_uuid):
+                                schemas.append(kb_runtime.stub_schema(tool))
+                            continue
                     if session is None or not session.available:
                         logger.warning(
                             f"MCP tool '{tool.name}' ({tool.tool_uuid}) "
@@ -391,6 +414,15 @@ class CustomToolManager:
 
                 if tool.category == ToolCategory.MCP.value:
                     session = self._engine._mcp_sessions.get(tool.tool_uuid)
+                    restricted = allowed_categories.is_restricted(tool.category)
+                    if restricted:
+                        if not kb_runtime.definition_admissible(tool):
+                            continue
+                        reason = kb_runtime.stub_reason(session)
+                        if reason is not None:
+                            if _node_allows_kb(mcp_tool_filters, tool.tool_uuid):
+                                self._register_kb_stub(tool, reason, trust)
+                            continue
                     if session is None or not session.available:
                         logger.warning(
                             f"MCP tool '{tool.name}' ({tool.tool_uuid}) "
@@ -404,7 +436,16 @@ class CustomToolManager:
                     )
                     mcp_schemas = session.function_schemas(allowed)
                     for fs in mcp_schemas:
-                        handler = self._create_mcp_handler(session, fs.name)
+                        if restricted:
+                            handler = kb_runtime.create_search_handler(
+                                session,
+                                fs.name,
+                                run_id_provider=lambda: getattr(
+                                    self._engine, "_workflow_run_id", None
+                                ),
+                            )
+                        else:
+                            handler = self._create_mcp_handler(session, fs.name)
                         if trust:
                             spec = resolve_mcp_spec(session.raw_name(fs.name))
                             if spec is None:
@@ -415,6 +456,7 @@ class CustomToolManager:
                                 spec,
                                 tool_name=fs.name,
                                 declared_params=set((fs.properties or {}).keys()),
+                                fence_source=session.raw_name(fs.name),
                             )
                         self._engine.llm.register_function(
                             fs.name,
@@ -464,8 +506,12 @@ class CustomToolManager:
         *,
         tool_name: str,
         declared_params: Optional[set] = None,
+        fence_source: Optional[str] = None,
     ):
-        """Wrap a handler with the S-L8-TRUST deterministic boundary."""
+        """Wrap a handler with the S-L8-TRUST deterministic boundary.
+
+        ``fence_source`` (MCP tools) also fences the handler's output.
+        """
         return guard(
             handler,
             spec,
@@ -473,7 +519,22 @@ class CustomToolManager:
             declared_params=declared_params,
             platform_values_provider=self._engine.get_platform_bound_values,
             event_context_provider=self._engine.trust_event_context,
+            fence_source=fence_source,
         )
+
+    def _register_kb_stub(self, tool: Any, reason: str, trust: bool) -> None:
+        """Register the no-result stub for an admitted but unusable kb tool."""
+        schema = kb_runtime.stub_schema(tool)
+        handler = kb_runtime.create_stub_handler(tool, reason)
+        if trust:
+            handler = self._guarded(
+                handler,
+                resolve_mcp_spec(kb_fixed.KB_SEARCH_TOOL),
+                tool_name=schema.name,
+                declared_params=set(schema.properties),
+                fence_source=kb_fixed.KB_SEARCH_TOOL,
+            )
+        self._engine.llm.register_function(schema.name, handler)
 
     def _create_handler(self, tool: Any, function_name: str):
         """Create a handler function for a tool based on its category.
