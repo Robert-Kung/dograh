@@ -21,10 +21,24 @@
   "blocked_tool_types": [
     "calculator",
     "http_api",
-    "mcp",
     "native",
     "integration"
   ],
+  "restricted_tool_types": {
+    "mcp": {
+      "max_instances": 1,
+      "url_env": "KB_MCP_URL",
+      "tools_filter": [
+        "search_knowledge"
+      ],
+      "timeout_secs": 2,
+      "sse_read_timeout_secs": 3,
+      "credential": {
+        "type": "api_key",
+        "header_name": "X-KB-Token"
+      }
+    }
+  },
   "field_rules": {
     "constrained_values": {
       "queueHealthUrl": {
