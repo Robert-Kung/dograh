@@ -75,6 +75,14 @@ async def lifespan(app: FastAPI):
 
         schedule_startup_check()
 
+        # kb-service 3.3b/3.5: the restricted kb MCP tool (count, fixed
+        # definition, credential shape, tools/list). Probe only, never blocks.
+        from api.services.kb_tool.startup_check import (
+            schedule_startup_check as schedule_kb_startup_check,
+        )
+
+        schedule_kb_startup_check()
+
         # Fail loudly on malformed safetynet config (S-L3-SAFETYNET, C6): the
         # dispatch face has no call-time validation hook.
         from api.services.pipecat.livekit_safetynet import validate_safetynet_config

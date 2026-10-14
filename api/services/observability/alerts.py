@@ -102,6 +102,9 @@ WINDOWED_EVENTS = {
     # Concurrency limit of the answering participant: a burst of unmapped-DID
     # calls or a reconcile sweep after a restart arrives in batches.
     "answer.saturated",
+    # kb-service D4: an mcp tool refused by the fixed-definition check. It is
+    # re-detected on every call, so windowed like transfer.config_rejected.
+    "scope.restricted_tool_denied",
 }
 
 _redis = None

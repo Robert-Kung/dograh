@@ -250,6 +250,95 @@ def allowed_tool_categories() -> frozenset[str]:
     return frozenset(str(item) for item in allowed)
 
 
+#: Restricted categories this build can check at call time (kb-service D4).
+#: A restricted key outside this set has no field-level checker here, so it is
+#: **not** admitted -- restricted means "type admitted, then values compared",
+#: and a type with nothing to compare against must stay closed.
+RESTRICTED_CHECKED_CATEGORIES = frozenset({"mcp"})
+
+
+class ToolScope(frozenset):
+    """Call-time type admission: ``allowed_tool_types`` ∪ checked restricted keys.
+
+    Behaves as the frozenset of admitted dispatch keys, so existing
+    ``category in scope`` checks keep their meaning. ``restricted`` names the
+    subset that is admitted *only* through a further fixed-definition check;
+    both come from one canon read so the two can never disagree mid-call.
+    """
+
+    restricted: frozenset
+
+    def __new__(cls, categories, restricted=frozenset()):
+        obj = super().__new__(cls, categories)
+        obj.restricted = frozenset(restricted)
+        return obj
+
+    def is_restricted(self, category: str) -> bool:
+        return category in self.restricted
+
+
+def restricted_tool_types() -> dict[str, dict]:
+    """``restricted_tool_types`` from the canon: ``{dispatch key: fixed values}``.
+
+    Absent = ``{}``. Present but not an object of objects = the canon is broken
+    for this section: raise, and the caller closes the restricted types only
+    (the plain allowlist is unaffected). Keys starting with ``_`` are notes.
+
+    The values are **not** a comparison baseline at call time -- dograh compares
+    against its own constants (``api.services.kb_tool.fixed``); the boot check
+    only reports drift between the two.
+    """
+    scope = load_feature_scope()
+    raw = scope.get("restricted_tool_types")
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise PlatformArtifactMissing(
+            f"feature scope canon at {feature_scope_path()} has a "
+            "restricted_tool_types that is not an object"
+        )
+    entries = {str(k): v for k, v in raw.items() if not str(k).startswith("_")}
+    if not all(isinstance(v, dict) for v in entries.values()):
+        raise PlatformArtifactMissing(
+            f"feature scope canon at {feature_scope_path()} has a "
+            "restricted_tool_types entry that is not an object"
+        )
+    return entries
+
+
+def call_time_tool_scope() -> ToolScope:
+    """The call-time admission set. Raises PlatformArtifactMissing (fail-closed).
+
+    **``blocked_tool_types`` is not consulted.** A key listed in both
+    ``blocked_tool_types`` and ``restricted_tool_types`` takes restricted
+    semantics: the restricted entry is the more specific declaration, and the
+    deployment side may keep ``mcp`` on the blocked list for the gateway and
+    UI readers (which do not know the restricted class). A key in both
+    ``allowed_tool_types`` and ``restricted_tool_types`` is restricted too --
+    the narrower reading wins.
+
+    A malformed ``restricted_tool_types`` closes the restricted keys only and
+    logs; ``transfer_call``/``end_call`` stay up.
+    """
+    allowed = allowed_tool_categories()
+    try:
+        declared = restricted_tool_types()
+    except PlatformArtifactMissing as exc:
+        log_artifact_missing("platform_scope.restricted_tool_types", exc)
+        declared = {}
+    restricted = set()
+    for key in declared:
+        if key not in RESTRICTED_CHECKED_CATEGORIES:
+            logger.error(
+                f"scope.restricted_unchecked category={key!r}: listed in "
+                "restricted_tool_types but this build has no fixed-definition "
+                "check for it; not admitted (fail-closed, kb-service D4)"
+            )
+            continue
+        restricted.add(key)
+    return ToolScope(allowed | restricted, restricted)
+
+
 def queue_health_url_constraints() -> dict:
     """``field_rules.constrained_values.queueHealthUrl`` from the canon.
 
