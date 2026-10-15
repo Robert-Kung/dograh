@@ -110,8 +110,11 @@ async def test_press_zero_transfers_and_is_swallowed(monkeypatch):
 
     gate, calls = _make_gate(monkeypatch, now_values=[1000.0])
     await gate.process_frame(_dtmf("0"), FrameDirection.DOWNSTREAM)
+    from api.services.pipecat.empty_llm_turn_fallback import CallerBargeInFrame
+
     assert calls["interrupts"] == 1  # barge-in fires inline, before the task
-    assert calls["pushed"] == []  # 0 swallowed, not forwarded
+    # 0 swallowed, not forwarded; only the barge-in marker goes downstream
+    assert [type(f) for f in calls["pushed"]] == [CallerBargeInFrame]
     await calls["drain"]()  # transfer runs off the frame loop
 
     assert len(calls["execute"]) == 1
@@ -154,8 +157,11 @@ async def test_rapid_repeat_triggers_once(monkeypatch):
     await gate.process_frame(_dtmf("0"), FrameDirection.DOWNSTREAM)
     await calls["drain"]()
 
+    from api.services.pipecat.empty_llm_turn_fallback import CallerBargeInFrame
+
     assert len(calls["execute"]) == 1  # only one transfer
-    assert calls["pushed"] == []  # both 0s swallowed
+    # both 0s swallowed; one barge-in marker for the one trigger
+    assert [type(f) for f in calls["pushed"]] == [CallerBargeInFrame]
 
 
 @pytest.mark.skipif(not PIPECAT, reason="pipecat runtime not installed")

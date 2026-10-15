@@ -14,6 +14,7 @@ from collections.abc import Callable
 from loguru import logger
 
 from api.enums import WorkflowRunMode
+from api.services.pipecat.empty_llm_turn_fallback import CallerBargeInFrame
 from api.services.pipecat.livekit_transfer_flow import execute_cold_transfer
 from api.services.pipecat.transfer_call_config import (
     transfer_config_defective,
@@ -87,6 +88,9 @@ class Press0Gate(FrameProcessor):
         self._last_trigger = now
 
         # Barge-in: stop any in-flight TTS before transferring (avoid overlap).
+        # Mark it first so the empty-turn fallback skips the LLM turn the
+        # interruption cancels (its End frame arrives before the interruption).
+        await self.push_frame(CallerBargeInFrame(), FrameDirection.DOWNSTREAM)
         await self.broadcast_interruption()
 
         # Run the transfer off the frame loop — the SIP REFER is a multi-second

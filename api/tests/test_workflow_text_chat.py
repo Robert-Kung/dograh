@@ -7,6 +7,7 @@ from pipecat.processors.aggregators.llm_context import LLMSpecificMessage
 
 from api.db.models import OrganizationModel, UserModel
 from api.schemas.ai_model_configuration import EffectiveAIModelConfiguration
+from api.services.pipecat.empty_llm_turn_fallback import EMPTY_LLM_TURN_FALLBACK_TEXT
 from api.services.workflow.text_chat_runner import (
     _deserialize_text_chat_checkpoint_messages,
     _serialize_text_chat_checkpoint_messages,
@@ -1270,3 +1271,68 @@ async def test_text_chat_append_rejects_quota_without_mutating_session(
     assert (
         session_payload["session_data"]["status"] == created["session_data"]["status"]
     )
+
+
+@pytest.mark.asyncio
+async def test_text_chat_empty_llm_turn_gets_fallback_reply(
+    db_session,
+    async_session,
+    test_client_factory,
+):
+    """LLM 回空內容（無文字、無工具）時，助理回覆是固定兜底話術而不是空字串（C4）。"""
+    workflow_definition = {
+        "nodes": [
+            {
+                "id": "start",
+                "type": "startCall",
+                "position": {"x": 0, "y": 0},
+                "data": {
+                    "name": "Start",
+                    "prompt": "You are a helpful assistant.",
+                    "is_start": True,
+                    "allow_interrupt": False,
+                    "add_global_prompt": False,
+                    "greeting_type": "text",
+                    "greeting": "Welcome to the workflow tester.",
+                },
+            },
+        ],
+        "edges": [],
+    }
+    user, workflow = await _create_user_and_workflow(
+        db_session,
+        async_session,
+        workflow_definition=workflow_definition,
+        suffix="empty-turn",
+    )
+    llm_responses = [
+        MockLLMService(mock_steps=[], chunk_delay=0.001),
+        MockLLMService(
+            mock_steps=[MockLLMService.create_text_chunks("")], chunk_delay=0.001
+        ),
+    ]
+
+    async with test_client_factory(user) as client:
+        with (
+            patch(
+                "api.services.workflow.text_chat_runner.create_llm_service",
+                side_effect=llm_responses,
+            ),
+            patch(
+                "api.services.workflow.text_chat_runner.db_client.has_active_recordings",
+                new=AsyncMock(return_value=False),
+            ),
+        ):
+            created = (
+                await client.post(
+                    f"/api/v1/workflow/{workflow.id}/text-chat/sessions", json={}
+                )
+            ).json()
+            message_response = await client.post(
+                f"/api/v1/workflow/{workflow.id}/text-chat/sessions/{created['workflow_run_id']}/messages",
+                json={"text": "Hi there", "expected_revision": created["revision"]},
+            )
+
+    assert message_response.status_code == 200
+    turns = message_response.json()["session_data"]["turns"]
+    assert turns[1]["assistant_message"]["text"] == EMPTY_LLM_TURN_FALLBACK_TEXT

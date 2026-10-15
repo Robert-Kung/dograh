@@ -3,6 +3,7 @@ import os
 from loguru import logger
 
 from api.services.pipecat.audio_config import AudioConfig
+from api.services.pipecat.empty_llm_turn_fallback import EmptyLLMTurnFallbackProcessor
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.worker import PipelineParams, PipelineWorker
 from pipecat.processors.aggregators.llm_context import LLMContext
@@ -70,7 +71,7 @@ def build_pipeline(
         processors.append(voicemail_detector.detector())
 
     # Continue with the rest of the pipeline
-    post_llm = [pipeline_engine_callback_processor]
+    post_llm = [EmptyLLMTurnFallbackProcessor(), pipeline_engine_callback_processor]
     if recording_router:
         post_llm.append(recording_router)
 
