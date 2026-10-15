@@ -99,6 +99,36 @@ async def test_tool_call_turn_is_left_alone():
     assert _fallbacks(pushed) == []
 
 
+async def test_tool_call_frame_with_no_parsed_calls_counts_as_empty():
+    proc, pushed = _processor()
+    await _feed(
+        proc,
+        LLMFullResponseStartFrame(),
+        FunctionCallsFromLLMInfoFrame(function_calls=[]),
+        LLMFullResponseEndFrame(),
+    )
+    assert len(_fallbacks(pushed)) == 1
+
+
+async def test_consecutive_empty_turns_fall_back_only_once():
+    """持續出錯（每輪都空）時第二輪起保持沉默，交回 safetynet 轉真人。"""
+    proc, pushed = _processor()
+    for _ in range(3):
+        await _feed(proc, LLMFullResponseStartFrame(), LLMFullResponseEndFrame())
+    assert len(_fallbacks(pushed)) == 1
+
+    # 有內容的一輪之後重新計數
+    await _feed(
+        proc,
+        LLMFullResponseStartFrame(),
+        LLMTextFrame(text="好的。"),
+        LLMFullResponseEndFrame(),
+        LLMFullResponseStartFrame(),
+        LLMFullResponseEndFrame(),
+    )
+    assert len(_fallbacks(pushed)) == 2
+
+
 async def test_interrupted_turn_is_left_alone():
     proc, pushed = _processor()
     await _feed(

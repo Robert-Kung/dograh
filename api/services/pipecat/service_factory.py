@@ -791,20 +791,19 @@ def _migrate_deprecated_google_model(model: str) -> str:
     return model
 
 
-# pipecat 對 `gemini-3*flash` 的低延遲預設是 thinking_level=minimal，但 Flash 3.7 起
-# （含 `gemini-flash-latest` 別名）不接受 minimal，每次推論都 400。2026-10-15 對
-# AI Studio 實測：3.5／3.6 Flash 與各 lite 型號接受 minimal；3.7／3.8 Flash、
-# gemini-flash-latest 拒絕，改送 low（3.8 實測 thoughtsTokenCount 為空、延遲與 minimal 同級）。
-_GEMINI_FLASH_VERSION = re.compile(r"^gemini-(\d+)\.(\d+)-flash(?!-lite)")
-_GEMINI_FLASH_NO_MINIMAL_SINCE = (3, 7)
+# pipecat 對 `gemini-3*flash` 的低延遲預設是 thinking_level=minimal（google/llm.py
+# `_maybe_unset_thinking_budget`），但 Flash 3.7 起不接受 minimal，每次推論都 400。
+# 2026-10-15 對 AI Studio 實測：3.5／3.6 Flash 與各 lite 型號接受 minimal；3.7／3.8
+# Flash 拒絕，改送 low（3.8 實測 thoughtsTokenCount 為空、延遲與 minimal 同級）。
+# 只改 pipecat 會送 minimal 的那一群（3.x Flash，lite／image 除外），其餘型號不動。
+_GEMINI_3_FLASH_MINOR = re.compile(r"^gemini-3\.(\d+)-flash(?!-lite|-image)")
+_GEMINI_3_FLASH_NO_MINIMAL_SINCE_MINOR = 7
 
 
 def _google_thinking_for_model(model: str) -> GoogleThinkingConfig | None:
     """Flash 型號不接受 minimal 時給 low；其餘回 None，沿用 pipecat 的型號預設。"""
-    if model == "gemini-flash-latest":
-        return GoogleThinkingConfig(thinking_level="low")
-    m = _GEMINI_FLASH_VERSION.match(model or "")
-    if m and (int(m.group(1)), int(m.group(2))) >= _GEMINI_FLASH_NO_MINIMAL_SINCE:
+    m = _GEMINI_3_FLASH_MINOR.match(model or "")
+    if m and int(m.group(1)) >= _GEMINI_3_FLASH_NO_MINIMAL_SINCE_MINOR:
         return GoogleThinkingConfig(thinking_level="low")
     return None
 

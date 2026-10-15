@@ -13,7 +13,7 @@ from api.services.pipecat.service_factory import (
 
 @pytest.mark.parametrize(
     "model",
-    ["gemini-3.7-flash", "gemini-3.8-flash", "gemini-4.0-flash", "gemini-flash-latest"],
+    ["gemini-3.7-flash", "gemini-3.8-flash", "gemini-3.10-flash"],
 )
 def test_flash_models_rejecting_minimal_get_low(model):
     assert _google_thinking_for_model(model).thinking_level == "low"
@@ -28,6 +28,9 @@ def test_flash_models_rejecting_minimal_get_low(model):
         "gemini-3.5-flash-lite",
         "gemini-3.8-flash-lite",
         "gemini-flash-lite-latest",
+        "gemini-flash-latest",
+        "gemini-4.0-flash",
+        "gemini-3.8-flash-image",
         "gemini-2.5-pro",
         "",
     ],
