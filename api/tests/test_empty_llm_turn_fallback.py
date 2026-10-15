@@ -12,9 +12,14 @@ try:
         LLMFullResponseStartFrame,
         LLMTextFrame,
         TTSSpeakFrame,
+        UserStartedSpeakingFrame,
+        UserStoppedSpeakingFrame,
     )
+    from pipecat.pipeline.pipeline import Pipeline
     from pipecat.processors.aggregators.llm_context import LLMContext
     from pipecat.processors.frame_processor import FrameDirection
+    from pipecat.tests.mock_llm_service import MockLLMService
+    from pipecat.tests.utils import SleepFrame, run_test
 
     from api.services.pipecat.empty_llm_turn_fallback import (
         EMPTY_LLM_TURN_FALLBACK_TEXT,
@@ -165,3 +170,93 @@ async def test_all_frames_pass_through_in_order():
     ]
     await _feed(proc, *frames)
     assert pushed[:3] == frames
+
+
+async def test_user_started_speaking_before_end_suppresses_fallback():
+    """插話時 UserStartedSpeakingFrame 先於被取消那輪的 End 到達，那一輪不補。"""
+    proc, pushed = _processor()
+    await _feed(
+        proc,
+        LLMFullResponseStartFrame(),
+        UserStartedSpeakingFrame(),
+        LLMFullResponseEndFrame(),
+        InterruptionFrame(),
+    )
+    assert _fallbacks(pushed) == []
+
+
+async def test_turn_starting_while_user_speaks_is_left_alone():
+    """對方還在說話時才開始又空著結束的一輪不補；對方說完後的空輪照補。"""
+    proc, pushed = _processor()
+    await _feed(
+        proc,
+        UserStartedSpeakingFrame(),
+        LLMFullResponseStartFrame(),
+        LLMFullResponseEndFrame(),
+    )
+    assert _fallbacks(pushed) == []
+
+    await _feed(
+        proc,
+        UserStoppedSpeakingFrame(),
+        LLMFullResponseStartFrame(),
+        LLMFullResponseEndFrame(),
+    )
+    assert len(_fallbacks(pushed)) == 1
+
+
+async def test_interrupted_turn_does_not_reset_consecutive_empty_count():
+    """被插話打斷的輪不算有內容：前一輪已補過話，下一個空輪仍保持沉默交回 safetynet。"""
+    proc, pushed = _processor()
+    await _feed(proc, LLMFullResponseStartFrame(), LLMFullResponseEndFrame())
+    await _feed(
+        proc,
+        LLMFullResponseStartFrame(),
+        UserStartedSpeakingFrame(),
+        LLMFullResponseEndFrame(),
+        UserStoppedSpeakingFrame(),
+        LLMFullResponseStartFrame(),
+        LLMFullResponseEndFrame(),
+    )
+    assert len(_fallbacks(pushed)) == 1
+
+
+def _thinking_llm():
+    # 首字前要「想」1 秒：插話落在 LLM 吐出任何文字之前。
+    return MockLLMService(
+        mock_chunks=MockLLMService.create_text_chunks("您好，廢機車可以領三百元。"),
+        chunk_delay=1.0,
+    )
+
+
+async def test_barge_in_before_first_token_sends_no_fallback_through_real_pipeline():
+    """M1：真實 pipecat 中斷流程下，首字前插話不得送出兜底（也就不會寫入脈絡）。
+
+    LLM 的生成 task 被取消時，finally 照推 LLMFullResponseEndFrame，而且這個 End
+    比 LLM 往下轉送的 InterruptionFrame 早到本處理器；只看 InterruptionFrame
+    擋不住。使用者聚合器在 InterruptionFrame 之前先廣播 UserStartedSpeakingFrame
+    （LLMUserAggregator._on_user_turn_started），本測試照同樣順序送。
+    """
+    down, _ = await run_test(
+        Pipeline([_thinking_llm(), EmptyLLMTurnFallbackProcessor()]),
+        frames_to_send=[
+            LLMContextFrame(context=LLMContext()),
+            SleepFrame(sleep=0.2),
+            UserStartedSpeakingFrame(),
+            InterruptionFrame(),
+            SleepFrame(sleep=0.2),
+        ],
+    )
+    assert [type(f) for f in down if isinstance(f, LLMFullResponseEndFrame)], (
+        "前提：被取消的 LLM 輪仍推出 End"
+    )
+    assert _fallbacks(down) == []
+
+
+async def test_empty_turn_through_real_pipeline_still_falls_back():
+    down, _ = await run_test(
+        Pipeline([MockLLMService(mock_chunks=[]), EmptyLLMTurnFallbackProcessor()]),
+        frames_to_send=[LLMContextFrame(context=LLMContext()), SleepFrame(sleep=0.2)],
+    )
+    (fallback,) = _fallbacks(down)
+    assert fallback.text == EMPTY_LLM_TURN_FALLBACK_TEXT
