@@ -23,6 +23,7 @@ try:
 
     from api.services.pipecat.empty_llm_turn_fallback import (
         EMPTY_LLM_TURN_FALLBACK_TEXT,
+        CallerBargeInFrame,
         EmptyLLMTurnFallbackProcessor,
     )
 
@@ -185,24 +186,41 @@ async def test_user_started_speaking_before_end_suppresses_fallback():
     assert _fallbacks(pushed) == []
 
 
-async def test_turn_starting_while_user_speaks_is_left_alone():
-    """對方還在說話時才開始又空著結束的一輪不補；對方說完後的空輪照補。"""
+async def test_caller_barge_in_marker_before_end_suppresses_fallback():
+    """按 0 轉真人：CallerBargeInFrame 先於被取消那輪的 End 到達，那一輪不補。"""
     proc, pushed = _processor()
+    await _feed(
+        proc,
+        LLMFullResponseStartFrame(),
+        CallerBargeInFrame(),
+        LLMFullResponseEndFrame(),
+        InterruptionFrame(),
+    )
+    assert _fallbacks(pushed) == []
+
+
+async def test_missing_user_stopped_does_not_silence_later_empty_turns():
+    """UserStopped 遺失（靜音不對稱、VAD 誤觸）不得讓之後的空輪永遠不補。"""
+    proc, pushed = _processor()
+    await _feed(proc, UserStartedSpeakingFrame(), LLMFullResponseStartFrame(), LLMFullResponseEndFrame())
+    assert len(_fallbacks(pushed)) == 1
+
+
+async def test_turn_with_content_resets_count_even_while_user_speaks():
+    """空輪（補）→ 對方說話中出現有內容的一輪 → 再一個空輪：計數已重置，照補。"""
+    proc, pushed = _processor()
+    await _feed(proc, LLMFullResponseStartFrame(), LLMFullResponseEndFrame())
     await _feed(
         proc,
         UserStartedSpeakingFrame(),
         LLMFullResponseStartFrame(),
+        LLMTextFrame("好的"),
         LLMFullResponseEndFrame(),
-    )
-    assert _fallbacks(pushed) == []
-
-    await _feed(
-        proc,
         UserStoppedSpeakingFrame(),
         LLMFullResponseStartFrame(),
         LLMFullResponseEndFrame(),
     )
-    assert len(_fallbacks(pushed)) == 1
+    assert len(_fallbacks(pushed)) == 2
 
 
 async def test_interrupted_turn_does_not_reset_consecutive_empty_count():
@@ -260,3 +278,19 @@ async def test_empty_turn_through_real_pipeline_still_falls_back():
     )
     (fallback,) = _fallbacks(down)
     assert fallback.text == EMPTY_LLM_TURN_FALLBACK_TEXT
+
+
+async def test_press_zero_before_first_token_sends_no_fallback_through_real_pipeline():
+    """F1：按 0 沒有 UserStartedSpeakingFrame，靠 CallerBargeInFrame 擋下兜底。"""
+    down, _ = await run_test(
+        Pipeline([_thinking_llm(), EmptyLLMTurnFallbackProcessor()]),
+        frames_to_send=[
+            LLMContextFrame(context=LLMContext()),
+            SleepFrame(sleep=0.2),
+            CallerBargeInFrame(),
+            InterruptionFrame(),
+            SleepFrame(sleep=0.2),
+        ],
+    )
+    assert [f for f in down if isinstance(f, LLMFullResponseEndFrame)], "前提：被取消的 LLM 輪仍推出 End"
+    assert _fallbacks(down) == []
