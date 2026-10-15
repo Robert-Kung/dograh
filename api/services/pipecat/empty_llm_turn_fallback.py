@@ -32,8 +32,8 @@ from pipecat.frames.frames import (
     LLMFullResponseEndFrame,
     LLMFullResponseStartFrame,
     LLMTextFrame,
-    TTSSpeakFrame,
     SystemFrame,
+    TTSSpeakFrame,
     UserStartedSpeakingFrame,
 )
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
@@ -69,7 +69,9 @@ class EmptyLLMTurnFallbackProcessor(FrameProcessor):
         if isinstance(frame, LLMFullResponseStartFrame):
             self._in_response = True
             self._spoke = False
-        elif isinstance(frame, (InterruptionFrame, UserStartedSpeakingFrame, CallerBargeInFrame)):
+        elif isinstance(
+            frame, (InterruptionFrame, UserStartedSpeakingFrame, CallerBargeInFrame)
+        ):
             # 被插話打斷的那一輪不補話。
             self._in_response = False
         elif self._in_response and (

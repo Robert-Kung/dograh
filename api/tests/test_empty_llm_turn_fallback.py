@@ -202,7 +202,12 @@ async def test_caller_barge_in_marker_before_end_suppresses_fallback():
 async def test_missing_user_stopped_does_not_silence_later_empty_turns():
     """UserStopped 遺失（靜音不對稱、VAD 誤觸）不得讓之後的空輪永遠不補。"""
     proc, pushed = _processor()
-    await _feed(proc, UserStartedSpeakingFrame(), LLMFullResponseStartFrame(), LLMFullResponseEndFrame())
+    await _feed(
+        proc,
+        UserStartedSpeakingFrame(),
+        LLMFullResponseStartFrame(),
+        LLMFullResponseEndFrame(),
+    )
     assert len(_fallbacks(pushed)) == 1
 
 
@@ -292,5 +297,7 @@ async def test_press_zero_before_first_token_sends_no_fallback_through_real_pipe
             SleepFrame(sleep=0.2),
         ],
     )
-    assert [f for f in down if isinstance(f, LLMFullResponseEndFrame)], "前提：被取消的 LLM 輪仍推出 End"
+    assert [f for f in down if isinstance(f, LLMFullResponseEndFrame)], (
+        "前提：被取消的 LLM 輪仍推出 End"
+    )
     assert _fallbacks(down) == []
