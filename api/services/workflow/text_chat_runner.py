@@ -32,6 +32,7 @@ from pipecat.utils.run_context import set_current_org_id
 from api.db import db_client
 from api.enums import WorkflowRunMode, WorkflowRunState
 from api.services.pipecat.audio_config import create_audio_config
+from api.services.pipecat.empty_llm_turn_fallback import EmptyLLMTurnFallbackProcessor
 from api.services.pipecat.pipeline_builder import create_pipeline_task
 from api.services.pipecat.pipeline_metrics_aggregator import (
     PipelineMetricsAggregator,
@@ -597,6 +598,7 @@ async def execute_text_chat_pending_turn(
     pipeline = Pipeline(
         [
             llm,
+            EmptyLLMTurnFallbackProcessor(),
             capture_processor,
             assistant_context_aggregator,
             pipeline_metrics_aggregator,

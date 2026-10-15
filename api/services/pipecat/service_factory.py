@@ -1,3 +1,4 @@
+import re
 from typing import TYPE_CHECKING
 from urllib.parse import urlencode, urlparse, urlunparse
 
@@ -40,7 +41,11 @@ from pipecat.services.dograh.stt import DograhSTTService, DograhSTTSettings
 from pipecat.services.dograh.tts import DograhTTSService, DograhTTSSettings
 from pipecat.services.elevenlabs.tts import ElevenLabsTTSService, ElevenLabsTTSSettings
 from pipecat.services.gladia.stt import GladiaSTTService, GladiaSTTSettings
-from pipecat.services.google.llm import GoogleLLMService, GoogleLLMSettings
+from pipecat.services.google.llm import (
+    GoogleLLMService,
+    GoogleLLMSettings,
+    GoogleThinkingConfig,
+)
 from pipecat.services.google.stt import GoogleSTTService, GoogleSTTSettings
 from pipecat.services.google.tts import (
     GoogleHttpTTSService,
@@ -786,6 +791,24 @@ def _migrate_deprecated_google_model(model: str) -> str:
     return model
 
 
+# pipecat 對 `gemini-3*flash` 的低延遲預設是 thinking_level=minimal，但 Flash 3.7 起
+# （含 `gemini-flash-latest` 別名）不接受 minimal，每次推論都 400。2026-10-15 對
+# AI Studio 實測：3.5／3.6 Flash 與各 lite 型號接受 minimal；3.7／3.8 Flash、
+# gemini-flash-latest 拒絕，改送 low（3.8 實測 thoughtsTokenCount 為空、延遲與 minimal 同級）。
+_GEMINI_FLASH_VERSION = re.compile(r"^gemini-(\d+)\.(\d+)-flash(?!-lite)")
+_GEMINI_FLASH_NO_MINIMAL_SINCE = (3, 7)
+
+
+def _google_thinking_for_model(model: str) -> GoogleThinkingConfig | None:
+    """Flash 型號不接受 minimal 時給 low；其餘回 None，沿用 pipecat 的型號預設。"""
+    if model == "gemini-flash-latest":
+        return GoogleThinkingConfig(thinking_level="low")
+    m = _GEMINI_FLASH_VERSION.match(model or "")
+    if m and (int(m.group(1)), int(m.group(2))) >= _GEMINI_FLASH_NO_MINIMAL_SINCE:
+        return GoogleThinkingConfig(thinking_level="low")
+    return None
+
+
 def create_llm_service_from_provider(
     provider: str,
     model: str,
@@ -846,14 +869,22 @@ def create_llm_service_from_provider(
         model = _migrate_deprecated_google_model(model)
         return DograhGoogleLLMService(
             api_key=api_key,
-            settings=GoogleLLMSettings(model=model, temperature=0.1),
+            settings=GoogleLLMSettings(
+                model=model,
+                temperature=0.1,
+                thinking=_google_thinking_for_model(model),
+            ),
         )
     elif provider == ServiceProviders.GOOGLE_VERTEX.value:
         return DograhGoogleVertexLLMService(
             credentials=credentials,
             project_id=project_id,
             location=location or "us-east4",
-            settings=GoogleVertexLLMSettings(model=model, temperature=0.1),
+            settings=GoogleVertexLLMSettings(
+                model=model,
+                temperature=0.1,
+                thinking=_google_thinking_for_model(model),
+            ),
         )
     elif provider == ServiceProviders.AZURE.value:
         if endpoint:
