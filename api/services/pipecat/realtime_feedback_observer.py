@@ -33,6 +33,7 @@ from api.services.pipecat.realtime_feedback_events import (
     build_ttfb_metric_event,
     build_user_transcription_event,
 )
+from api.utils.secret_redaction import redact_secrets
 
 if TYPE_CHECKING:
     from api.services.pipecat.in_memory_buffers import InMemoryLogsBuffer
@@ -254,12 +255,19 @@ class RealtimeFeedbackObserver(BaseObserver):
                         extra_payload[attr] = value
                     except (TypeError, ValueError):
                         extra_payload[attr] = str(value)
+            # The event goes to the WebSocket, the logs buffer and finally the
+            # run's stored realtime_feedback_events: redact API-key-shaped
+            # strings in every field (exception text can carry a URL with
+            # ?key=...). exception_type/code/status carry no such strings and
+            # come through unchanged.
             await self._send_message(
-                build_pipeline_error_event(
-                    error=frame.error,
-                    fatal=frame.fatal,
-                    processor=processor_name,
-                    extra_payload=extra_payload or None,
+                redact_secrets(
+                    build_pipeline_error_event(
+                        error=frame.error,
+                        fatal=frame.fatal,
+                        processor=processor_name,
+                        extra_payload=extra_payload or None,
+                    )
                 )
             )
 

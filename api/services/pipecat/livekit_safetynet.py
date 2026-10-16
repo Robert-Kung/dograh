@@ -46,6 +46,7 @@ from api.services.observability.call_outcome import (
 )
 from api.services.pipecat.livekit_dispatcher import DEFAULT_ROOM_PREFIX
 from api.services.pipecat.livekit_transfer_flow import valid_destination
+from api.utils.secret_redaction import redact_secrets
 from api.utils.background import (
     spawn,  # noqa: F401 — re-export; callers import from here
 )
@@ -692,7 +693,9 @@ class SafetynetWatchdog(BaseObserver):
                 call_events.emit(
                     "provider.error",
                     room_name=self._room_name or "",
-                    reason=str(frame.error)[:200],
+                    # Redact before truncating: a key cut at the limit would
+                    # no longer match the redaction pattern.
+                    reason=redact_secrets(str(frame.error))[:200],
                     workflow_run_id=self._workflow_run_id,
                 )
             return
