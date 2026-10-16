@@ -14,6 +14,10 @@ REDACTED = "[REDACTED]"
 
 # Google API keys (Gemini API keys included).
 _GOOGLE_API_KEY = re.compile(r"AIza[0-9A-Za-z_-]{35}")
+# Google auth keys, the format AI Studio issues by default since 2026: ``AQ.``
+# followed by URL-safe characters (50 of them in the keys seen so far). Google
+# does not document the length, so any run of 20 or more is treated as a key.
+_GOOGLE_AUTH_KEY = re.compile(r"AQ\.[0-9A-Za-z_-]{20,}")
 # The value of a ``key`` URL query parameter, whatever its format.
 _URL_QUERY_KEY = re.compile(r"([?&]key=)[^&#\s'\"]+")
 
@@ -27,6 +31,7 @@ def redact_secrets(value: Any) -> Any:
     """
     if isinstance(value, str):
         value = _GOOGLE_API_KEY.sub(REDACTED, value)
+        value = _GOOGLE_AUTH_KEY.sub(REDACTED, value)
         return _URL_QUERY_KEY.sub(rf"\g<1>{REDACTED}", value)
     if isinstance(value, dict):
         return {redact_secrets(k): redact_secrets(v) for k, v in value.items()}

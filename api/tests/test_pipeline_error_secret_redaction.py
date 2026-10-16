@@ -4,7 +4,9 @@ Design D8: an ErrorFrame's ``error`` and its original exception (string and
 attributes) become external data at two outputs -- the realtime feedback
 pipeline error event (WebSocket + logs buffer, stored as the run's
 ``realtime_feedback_events``) and the safetynet ``provider.error`` call event.
-Both redact API-key-shaped strings and ``key=`` URL query values.
+Both redact API-key-shaped strings and ``key=`` URL query values. Every test
+runs with both Google key formats: the ``AIza`` API key and the ``AQ.`` auth key
+that AI Studio issues by default since 2026.
 """
 
 import json
@@ -22,8 +24,10 @@ from api.services.pipecat.livekit_safetynet import SafetynetWatchdog
 from api.services.pipecat.realtime_feedback_observer import RealtimeFeedbackObserver
 from api.utils.secret_redaction import REDACTED, redact_secrets
 
-# Fixed fake key (design D8 scan rule: the 1.1/1.8 unit-test value).
-FAKE_KEY = "AIza" + "0" * 35
+# Fixed fake keys (design D8 scan rule: the 1.1/1.8 unit-test values, one per
+# key format).
+FAKE_API_KEY = "AIza" + "0" * 35
+FAKE_AUTH_KEY = "AQ." + "0" * 50
 # A query-string secret that is not Google-key shaped: only the ``key=`` rule
 # can catch it.
 QUERY_SECRET = "query-secret-value-123"
@@ -33,11 +37,16 @@ KEY_URI = (
 )
 
 
-def _leaks(text: str) -> bool:
-    return FAKE_KEY in text or QUERY_SECRET in text or "AIza" in text
+@pytest.fixture(params=[FAKE_API_KEY, FAKE_AUTH_KEY], ids=["api_key", "auth_key"])
+def fake_key(request) -> str:
+    return request.param
 
 
-def _api_error() -> genai_errors.ClientError:
+def _leaks(text: str, fake_key: str) -> bool:
+    return fake_key in text or QUERY_SECRET in text or "AIza" in text or "AQ." in text
+
+
+def _api_error(fake_key: str) -> genai_errors.ClientError:
     """A google-genai error whose string and attributes all carry both secrets."""
     return genai_errors.ClientError(
         400,
@@ -45,12 +54,12 @@ def _api_error() -> genai_errors.ClientError:
             "error": {
                 "code": 400,
                 "status": "INVALID_ARGUMENT",
-                "message": f"API key {FAKE_KEY} not valid; request {KEY_URI}",
+                "message": f"API key {fake_key} not valid; request {KEY_URI}",
                 "details": [
                     {
                         "reason": "API_KEY_INVALID",
-                        "metadata": {"key": FAKE_KEY, "url": KEY_URI},
-                        "links": [KEY_URI, FAKE_KEY],
+                        "metadata": {"key": fake_key, "url": KEY_URI},
+                        "links": [KEY_URI, fake_key],
                     }
                 ],
             }
@@ -59,7 +68,9 @@ def _api_error() -> genai_errors.ClientError:
     )
 
 
-async def _error_frame_from_push_error(*, fatal: bool = False) -> ErrorFrame:
+async def _error_frame_from_push_error(
+    fake_key: str, *, fatal: bool = False
+) -> ErrorFrame:
     """Build the ErrorFrame the way services do: ``push_error(error_msg=, exception=)``."""
     processor = FrameProcessor(name="GeminiSTTService#0")
     pushed = []
@@ -69,10 +80,10 @@ async def _error_frame_from_push_error(*, fatal: bool = False) -> ErrorFrame:
 
     processor.push_frame = capture
     try:
-        raise _api_error()
+        raise _api_error(fake_key)
     except genai_errors.ClientError as exc:
         await processor.push_error(
-            error_msg=f"connection error: {exc} (url {KEY_URI}, key {FAKE_KEY})",
+            error_msg=f"connection error: {exc} (url {KEY_URI}, key {fake_key})",
             exception=exc,
             fatal=fatal,
         )
@@ -80,16 +91,16 @@ async def _error_frame_from_push_error(*, fatal: bool = False) -> ErrorFrame:
     assert direction == FrameDirection.UPSTREAM
     assert isinstance(frame, ErrorFrame)
     # Precondition: the secrets really are in every input the observer reads.
-    assert FAKE_KEY in frame.error and QUERY_SECRET in frame.error
-    assert FAKE_KEY in str(frame.exception) and QUERY_SECRET in str(frame.exception)
-    assert FAKE_KEY in frame.exception.message
+    assert fake_key in frame.error and QUERY_SECRET in frame.error
+    assert fake_key in str(frame.exception) and QUERY_SECRET in str(frame.exception)
+    assert fake_key in frame.exception.message
     assert QUERY_SECRET in json.dumps(frame.exception.details)
     return frame
 
 
 @pytest.mark.asyncio
-async def test_pipeline_error_event_redacts_secrets_in_every_field():
-    frame = await _error_frame_from_push_error()
+async def test_pipeline_error_event_redacts_secrets_in_every_field(fake_key):
+    frame = await _error_frame_from_push_error(fake_key)
 
     sent = []
 
@@ -111,7 +122,7 @@ async def test_pipeline_error_event_redacts_secrets_in_every_field():
     stored = logs_buffer.get_events()
     assert len(sent) == 1 and len(stored) == 1
     for event in (sent[0], stored[0]):
-        assert not _leaks(json.dumps(event))
+        assert not _leaks(json.dumps(event), fake_key)
         payload = event["payload"]
         assert REDACTED in payload["error"]
         assert REDACTED in payload["exception_message"]
@@ -125,8 +136,8 @@ async def test_pipeline_error_event_redacts_secrets_in_every_field():
 
 
 @pytest.mark.asyncio
-async def test_safetynet_provider_error_reason_is_redacted(monkeypatch):
-    frame = await _error_frame_from_push_error()
+async def test_safetynet_provider_error_reason_is_redacted(monkeypatch, fake_key):
+    frame = await _error_frame_from_push_error(fake_key)
     captured = []
     monkeypatch.setattr(
         call_events, "emit", lambda event, **fields: captured.append((event, fields))
@@ -143,12 +154,12 @@ async def test_safetynet_provider_error_reason_is_redacted(monkeypatch):
 
     [(event, fields)] = captured
     assert event == "provider.error"
-    assert not _leaks(fields["reason"])
+    assert not _leaks(fields["reason"], fake_key)
     assert REDACTED in fields["reason"]
 
 
 @pytest.mark.asyncio
-async def test_safetynet_redacts_before_truncating(monkeypatch):
+async def test_safetynet_redacts_before_truncating(monkeypatch, fake_key):
     # A key straddling the 200-character cut: truncating first would leave a
     # key prefix that no longer matches the redaction pattern.
     captured = []
@@ -161,7 +172,7 @@ async def test_safetynet_redacts_before_truncating(monkeypatch):
 
     wd = SafetynetWatchdog(on_fatal=on_fatal, threshold_seconds=8.0, poll_seconds=999)
     await wd.on_push_frame(
-        types.SimpleNamespace(frame=ErrorFrame("x" * 190 + FAKE_KEY))
+        types.SimpleNamespace(frame=ErrorFrame("x" * 190 + fake_key))
     )
     await wd.on_push_frame(
         types.SimpleNamespace(frame=ErrorFrame("x" * 180 + f"?key={QUERY_SECRET}"))
@@ -171,23 +182,32 @@ async def test_safetynet_redacts_before_truncating(monkeypatch):
     assert len(captured) == 2
     for reason in captured:
         assert len(reason) <= 200
-        assert "AIza" not in reason
+        assert fake_key[:3] not in reason
         assert "query-se" not in reason
 
 
-def test_redact_secrets_handles_nested_values_and_leaves_others_alone():
+def test_redact_secrets_handles_nested_values_and_leaves_others_alone(fake_key):
     value = {
-        "msg": f"bad {FAKE_KEY}",
-        FAKE_KEY: [KEY_URI, ("t", FAKE_KEY)],
+        "msg": f"bad {fake_key}",
+        fake_key: [KEY_URI, ("t", fake_key)],
         "n": 1008,
         "none": None,
         "flag": True,
     }
     out = redact_secrets(value)
-    assert not _leaks(json.dumps(out, default=list))
+    assert not _leaks(json.dumps(out, default=list), fake_key)
     assert out["n"] == 1008 and out["none"] is None and out["flag"] is True
     assert isinstance(out[REDACTED][1], tuple)
     # Only the ``key`` query parameter is redacted; neighbours are kept.
     assert out[REDACTED][0].endswith(f"?alt=sse&key={REDACTED}&x=1")
     # ``api_key=`` style text that is not a URL query parameter is left alone.
     assert redact_secrets("monkey=1 api_key=abc") == "monkey=1 api_key=abc"
+
+
+def test_auth_key_pattern_redacts_any_run_of_20_or_more():
+    # The issued auth keys are ``AQ.`` + 50 characters; shorter or longer runs
+    # are redacted too (Google does not document the length). Plain text that
+    # merely contains ``AQ.`` is left alone.
+    for n in (20, 50, 80):
+        assert redact_secrets(f"k={'AQ.' + 'a' * n};") == f"k={REDACTED};"
+    assert redact_secrets("AQ.short and FAQ. notes") == "AQ.short and FAQ. notes"
