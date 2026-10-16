@@ -3,6 +3,7 @@ GOOGLE_MODELS = (
     "gemini-2.5-flash-lite",
     "gemini-3.5-flash",
     "gemini-3.5-flash-lite",
+    "gemini-3.8-flash",
 )
 GOOGLE_VERTEX_MODELS = (
     "gemini-2.5-flash",
@@ -278,3 +279,62 @@ GOOGLE_TTS_LANGUAGES = (
     "ur-IN",
     "vi-VN",
 )
+
+# Gemini API（AI Studio 金鑰）語音：provider `google_gemini`（gemini-key-voice 1.2）。
+# 名稱都是 Gemini API 的名稱，與 Cloud TTS／Cloud STT 不通用（design D2）。
+#
+# TTS 模型：google-genai 2.31.0 的模型列舉（`_gaos/types/interactions/model.py`）與其測試
+# 中可查到的名稱；預設 `gemini-3.8-flash-lite-tts`（SDK 註解為給高吞吐語音 agent、可直接
+# 取代 `gemini-3.1-flash-tts-preview`）。以金鑰實際呼叫是否接受未驗證，PM 實測時定案。
+# 不得放 Cloud TTS 的名稱（例如 `gemini-2.5-flash-tts`）。
+GOOGLE_GEMINI_TTS_MODELS = (
+    "gemini-3.8-flash-lite-tts",
+    "gemini-3.8-flash-tts",
+    "gemini-3.1-flash-tts-preview",
+    "gemini-2.5-flash-preview-tts",
+)
+# Gemini TTS 預建 voice（pipecat `GeminiTTSService.AVAILABLE_VOICES`）。這組名稱在 Gemini
+# API 是否全部可用未驗證。
+GOOGLE_GEMINI_TTS_VOICES = (
+    "Achernar",
+    "Achird",
+    "Algenib",
+    "Algieba",
+    "Alnilam",
+    "Aoede",
+    "Autonoe",
+    "Callirrhoe",
+    "Charon",
+    "Despina",
+    "Enceladus",
+    "Erinome",
+    "Fenrir",
+    "Gacrux",
+    "Iapetus",
+    "Kore",
+    "Laomedeia",
+    "Leda",
+    "Orus",
+    "Puck",
+    "Pulcherrima",
+    "Rasalgethi",
+    "Sadachbia",
+    "Sadaltager",
+    "Schedar",
+    "Sulafat",
+    "Umbriel",
+    "Vindemiatrix",
+    "Zephyr",
+    "Zubenelgenubi",
+)
+# 送進 `SpeechConfig.language_code`。google-genai 說明寫「ISO 639-1」，pipecat 的對照表
+# （出處為 Cloud 的 Gemini-TTS 文件）把台灣國語寫成 `cmn-TW`；`zh-TW` 這類 pipecat 認得的
+# 碼會先被換成對照表的值。Gemini API 接受哪種寫法未驗證；留空＝不送，由模型自行判斷語言。
+GOOGLE_GEMINI_TTS_LANGUAGES = ("cmn-TW", "cmn-CN", "en-US")
+
+# STT 模型：pipecat 移植的 `GeminiSTTService` 預設值；google-genai 套件內查不到這個名稱，
+# 未驗證。
+GOOGLE_GEMINI_STT_MODELS = ("gemini-3.5-transcribe-live",)
+# Live API 轉錄的語言提示（google-genai：BCP-47）。factory 原樣送出介面上填的值；台灣國語
+# 用 `zh-TW` 或 `cmn-Hant-TW` 哪個較準未驗證；留空＝不送提示，自動偵測語言。
+GOOGLE_GEMINI_STT_LANGUAGES = ("zh-TW", "cmn-Hant-TW", "en-US")

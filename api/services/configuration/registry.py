@@ -24,6 +24,11 @@ from api.services.configuration.options import (
     DEEPGRAM_STT_MODELS,
     GLADIA_STT_LANGUAGES,
     GLADIA_STT_MODELS,
+    GOOGLE_GEMINI_STT_LANGUAGES,
+    GOOGLE_GEMINI_STT_MODELS,
+    GOOGLE_GEMINI_TTS_LANGUAGES,
+    GOOGLE_GEMINI_TTS_MODELS,
+    GOOGLE_GEMINI_TTS_VOICES,
     GOOGLE_MODELS,
     GOOGLE_REALTIME_LANGUAGES,
     GOOGLE_REALTIME_MODELS,
@@ -90,6 +95,8 @@ class ServiceProviders(str, Enum):
     ULTRAVOX_REALTIME = "ultravox_realtime"
     GOOGLE_REALTIME = "google_realtime"
     GOOGLE_VERTEX_REALTIME = "google_vertex_realtime"
+    # Gemini API（AI Studio 金鑰）的 STT／TTS；LLM 沿用 GOOGLE。
+    GOOGLE_GEMINI = "google_gemini"
     AZURE_REALTIME = "azure_realtime"
     SMALLEST = "smallest"
 
@@ -268,6 +275,14 @@ SARVAM_PROVIDER_MODEL_CONFIG = provider_model_config("Sarvam")
 CAMB_PROVIDER_MODEL_CONFIG = provider_model_config("Camb.ai")
 RIME_PROVIDER_MODEL_CONFIG = provider_model_config("Rime")
 GOOGLE_CLOUD_PROVIDER_MODEL_CONFIG = provider_model_config("Google Cloud")
+GOOGLE_GEMINI_PROVIDER_MODEL_CONFIG = provider_model_config(
+    "Google Gemini API",
+    description=(
+        "Gemini API (Google AI Studio) speech authenticated with a single Gemini "
+        "API key - the same key as the Google LLM. No service account."
+    ),
+    provider_docs_url="https://ai.google.dev/gemini-api/docs/speech-generation",
+)
 SPEECHMATICS_PROVIDER_MODEL_CONFIG = provider_model_config("Speechmatics")
 ASSEMBLYAI_PROVIDER_MODEL_CONFIG = provider_model_config("AssemblyAI")
 GLADIA_PROVIDER_MODEL_CONFIG = provider_model_config("Gladia")
@@ -943,6 +958,48 @@ class GoogleTTSConfiguration(BaseTTSConfiguration):
     )
 
 
+@register_tts
+class GoogleGeminiTTSConfiguration(BaseTTSConfiguration):
+    model_config = GOOGLE_GEMINI_PROVIDER_MODEL_CONFIG
+    provider: Literal[ServiceProviders.GOOGLE_GEMINI] = ServiceProviders.GOOGLE_GEMINI
+    model: str = Field(
+        default="gemini-3.8-flash-lite-tts",
+        description="Gemini API TTS model (not the Cloud TTS model names).",
+        json_schema_extra={
+            "examples": GOOGLE_GEMINI_TTS_MODELS,
+            "allow_custom_input": True,
+        },
+    )
+    voice: str = Field(
+        default="Kore",
+        description=(
+            "Gemini prebuilt voice name (e.g. 'Kore'). Cloud TTS voices such as "
+            "'cmn-TW-Wavenet-A' do not work here."
+        ),
+        json_schema_extra={
+            "examples": GOOGLE_GEMINI_TTS_VOICES,
+            "allow_custom_input": True,
+        },
+    )
+    language: str = Field(
+        default="cmn-TW",
+        description=(
+            "Language code sent to Gemini TTS. Leave blank to let the model detect "
+            "the language from the text."
+        ),
+        json_schema_extra={
+            "examples": GOOGLE_GEMINI_TTS_LANGUAGES,
+            "allow_custom_input": True,
+        },
+    )
+    api_key: str | list[str] = Field(
+        description=(
+            "Gemini API key (Google AI Studio). Use one key, the same one as the "
+            "Google LLM."
+        ),
+    )
+
+
 OPENAI_TTS_MODELS = ["gpt-4o-mini-tts"]
 
 
@@ -1297,6 +1354,7 @@ TTSConfig = Annotated[
     Union[
         DeepgramTTSConfiguration,
         GoogleTTSConfiguration,
+        GoogleGeminiTTSConfiguration,
         OpenAITTSService,
         ElevenlabsTTSConfiguration,
         CartesiaTTSConfiguration,
@@ -1432,6 +1490,37 @@ class GoogleSTTConfiguration(BaseSTTConfiguration):
     api_key: str | list[str] | None = Field(
         default=None,
         description="Not used for Google Cloud STT. Leave blank.",
+    )
+
+
+@register_stt
+class GoogleGeminiSTTConfiguration(BaseSTTConfiguration):
+    model_config = GOOGLE_GEMINI_PROVIDER_MODEL_CONFIG
+    provider: Literal[ServiceProviders.GOOGLE_GEMINI] = ServiceProviders.GOOGLE_GEMINI
+    model: str = Field(
+        default="gemini-3.5-transcribe-live",
+        description="Gemini Live transcription model.",
+        json_schema_extra={
+            "examples": GOOGLE_GEMINI_STT_MODELS,
+            "allow_custom_input": True,
+        },
+    )
+    language: str = Field(
+        default="zh-TW",
+        description=(
+            "BCP-47 language hint sent as typed. Leave blank for automatic "
+            "language detection."
+        ),
+        json_schema_extra={
+            "examples": GOOGLE_GEMINI_STT_LANGUAGES,
+            "allow_custom_input": True,
+        },
+    )
+    api_key: str | list[str] = Field(
+        description=(
+            "Gemini API key (Google AI Studio). Use one key, the same one as the "
+            "Google LLM."
+        ),
     )
 
 
@@ -1695,6 +1784,7 @@ STTConfig = Annotated[
         CartesiaSTTConfiguration,
         OpenAISTTConfiguration,
         GoogleSTTConfiguration,
+        GoogleGeminiSTTConfiguration,
         DograhSTTService,
         SpeechmaticsSTTConfiguration,
         SarvamSTTConfiguration,

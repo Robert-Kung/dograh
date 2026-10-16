@@ -41,6 +41,7 @@ from pipecat.services.dograh.stt import DograhSTTService, DograhSTTSettings
 from pipecat.services.dograh.tts import DograhTTSService, DograhTTSSettings
 from pipecat.services.elevenlabs.tts import ElevenLabsTTSService, ElevenLabsTTSSettings
 from pipecat.services.gladia.stt import GladiaSTTService, GladiaSTTSettings
+from pipecat.services.google.gemini_live.stt import GeminiSTTService, GeminiSTTSettings
 from pipecat.services.google.llm import (
     GoogleLLMService,
     GoogleLLMSettings,
@@ -48,6 +49,8 @@ from pipecat.services.google.llm import (
 )
 from pipecat.services.google.stt import GoogleSTTService, GoogleSTTSettings
 from pipecat.services.google.tts import (
+    GeminiTTSService,
+    GeminiTTSSettings,
     GoogleHttpTTSService,
     GoogleHttpTTSSettings,
     GoogleTTSService,
@@ -96,6 +99,11 @@ from pipecat.utils.text.xml_function_tag_filter import XMLFunctionTagFilter
 
 if TYPE_CHECKING:
     from api.services.pipecat.audio_config import AudioConfig
+
+
+# The Gemini API returns 24 kHz PCM regardless of the pipeline rate; frames are
+# labelled accordingly and the output transport resamples them.
+GEMINI_TTS_SAMPLE_RATE = 24000
 
 
 DEEPGRAM_FLUX_LANGUAGE_HINTS = {
@@ -230,6 +238,18 @@ def create_stt_service(
             credentials=credentials,
             location=location,
             settings=GoogleSTTSettings(**settings_kwargs),
+            sample_rate=audio_config.transport_in_sample_rate,
+        )
+    elif user_config.stt.provider == ServiceProviders.GOOGLE_GEMINI.value:
+        # The language hint is sent exactly as configured (no Cloud STT mapping);
+        # blank means automatic language detection.
+        language = (getattr(user_config.stt, "language", None) or "").strip()
+        return GeminiSTTService(
+            api_key=user_config.stt.api_key,
+            settings=GeminiSTTSettings(
+                model=user_config.stt.model,
+                languages=[language] if language else [],
+            ),
             sample_rate=audio_config.transport_in_sample_rate,
         )
     elif user_config.stt.provider == ServiceProviders.CARTESIA.value:
@@ -509,6 +529,23 @@ def create_tts_service(
             credentials=credentials,
             location=location,
             settings=GoogleHttpTTSSettings(**http_settings_kwargs),
+            text_filters=[xml_function_tag_filter],
+            skip_aggregator_types=["recording_router", "recording"],
+            silence_time_s=1.0,
+        )
+    elif user_config.tts.provider == ServiceProviders.GOOGLE_GEMINI.value:
+        # use_genai=True: with it an empty api_key raises instead of falling back
+        # to the Cloud TTS service-account / ADC path.
+        language = (getattr(user_config.tts, "language", None) or "").strip() or None
+        return GeminiTTSService(
+            api_key=user_config.tts.api_key,
+            use_genai=True,
+            sample_rate=GEMINI_TTS_SAMPLE_RATE,
+            settings=GeminiTTSSettings(
+                model=user_config.tts.model,
+                voice=user_config.tts.voice,
+                language=language,
+            ),
             text_filters=[xml_function_tag_filter],
             skip_aggregator_types=["recording_router", "recording"],
             silence_time_s=1.0,
