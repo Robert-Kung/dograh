@@ -15,9 +15,12 @@ REDACTED = "[REDACTED]"
 # Google API keys (Gemini API keys included).
 _GOOGLE_API_KEY = re.compile(r"AIza[0-9A-Za-z_-]{35}")
 # Google auth keys, the format AI Studio issues by default since 2026: ``AQ.``
-# followed by URL-safe characters (50 of them in the keys seen so far). Google
-# does not document the length, so any run of 20 or more is treated as a key.
-_GOOGLE_AUTH_KEY = re.compile(r"AQ\.[0-9A-Za-z_-]{20,}")
+# followed by 50 characters in the keys seen so far. Google documents neither
+# the length nor the character set, so the rule errs on the wide side: any run
+# of 20 or more URL-safe, base64 or percent-encoding characters (``.``, ``~``,
+# ``+``, ``/``, ``=`` and ``%`` included) is treated as a key. Over-redacting a
+# neighbouring character is acceptable; leaving part of a key is not.
+_GOOGLE_AUTH_KEY = re.compile(r"AQ\.[0-9A-Za-z._~+/=%-]{20,}")
 # The value of a ``key`` URL query parameter, whatever its format.
 _URL_QUERY_KEY = re.compile(r"([?&]key=)[^&#\s'\"]+")
 

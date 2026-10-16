@@ -211,3 +211,14 @@ def test_auth_key_pattern_redacts_any_run_of_20_or_more():
     for n in (20, 50, 80):
         assert redact_secrets(f"k={'AQ.' + 'a' * n};") == f"k={REDACTED};"
     assert redact_secrets("AQ.short and FAQ. notes") == "AQ.short and FAQ. notes"
+
+
+@pytest.mark.parametrize("char", [".", "~", "+", "/", "=", "%"])
+def test_auth_key_pattern_covers_characters_google_does_not_rule_out(char):
+    # Google does not document the auth key's character set (design D6 "金鑰格式"),
+    # so a key that carries ``.``, ``~`` or base64/percent-encoding characters
+    # must still be redacted whole -- no tail left behind after the character.
+    text = f"k={FAKE_AUTH_KEY}{char}0;"
+    assert redact_secrets(text) == f"k={REDACTED};"
+    # The same character inside the run (right after ``AQ.``) does not split it.
+    assert redact_secrets(f"k=AQ.{char}{FAKE_AUTH_KEY[3:]};") == f"k={REDACTED};"
