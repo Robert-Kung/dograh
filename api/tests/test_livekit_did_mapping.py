@@ -370,7 +370,8 @@ async def test_two_livekit_configs_conflict(
 
     response = await _post(test_client_factory, user, address=DID, workflow_id=wf.id)
 
-    assert response.status_code == 409, response.text
+    # 422, not 409: overwrite cannot fix it, so it must not read as "bound elsewhere".
+    assert response.status_code == 422, response.text
     assert "2 livekit" in response.json()["detail"]
     assert (
         await db_session.get_phone_number_with_provider_by_address(org.id, DID) is None
@@ -391,9 +392,49 @@ async def test_container_name_taken_by_other_provider_conflicts(
 
     response = await _post(test_client_factory, user, address=DID, workflow_id=wf.id)
 
-    assert response.status_code == 409, response.text
+    assert response.status_code == 422, response.text
     assert SECRET not in response.text
     assert await _livekit_configs(db_session, org) == []
+
+
+async def test_rebind_racing_a_delete_is_503_not_500(
+    test_client_factory, db_session, no_provider_sync
+):
+    user, org = await _user_with_org(db_session, "race")
+    old = await _workflow(db_session, user, org, "old")
+    new = await _workflow(db_session, user, org, "new")
+    await _seed_livekit_row(db_session, org, old.id)
+
+    with patch(
+        "api.services.pipecat.livekit_did_mapping.db_client.update_phone_number",
+        new_callable=AsyncMock,
+        return_value=None,
+    ):
+        response = await _post(
+            test_client_factory, user, address=DID, workflow_id=new.id, overwrite=True
+        )
+
+    assert response.status_code == 503, response.text
+
+
+async def test_concurrent_create_is_503(
+    test_client_factory, db_session, no_provider_sync
+):
+    from sqlalchemy.exc import IntegrityError
+
+    user, org = await _user_with_org(db_session, "concurrent")
+    wf = await _workflow(db_session, user, org)
+
+    with patch(
+        "api.services.pipecat.livekit_did_mapping.db_client.create_phone_number",
+        new_callable=AsyncMock,
+        side_effect=IntegrityError("insert", {}, Exception("dup")),
+    ):
+        response = await _post(
+            test_client_factory, user, address=DID, workflow_id=wf.id
+        )
+
+    assert response.status_code == 503, response.text
 
 
 # ── validation / scoping ────────────────────────────────────────────────────

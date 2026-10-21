@@ -17,6 +17,7 @@ since nothing upstream needs to be told about them.
 from dataclasses import dataclass
 from typing import Literal, Optional
 
+from loguru import logger
 from sqlalchemy.exc import IntegrityError
 
 from api.db import db_client
@@ -41,8 +42,12 @@ class WorkflowNotInOrgError(LookupError):
     """The workflow does not exist in the caller's organization."""
 
 
-class DidMappingConflictError(Exception):
-    """The mapping cannot be made without ambiguity or a concurrent write won."""
+class ContainerConfigAmbiguousError(Exception):
+    """The org's livekit container config cannot be determined (operator fix)."""
+
+
+class ConcurrentDidMappingError(Exception):
+    """A concurrent write changed the rows under us (retry)."""
 
 
 @dataclass(frozen=True)
@@ -103,9 +108,13 @@ async def ensure_livekit_did_mapping(
                 is_active=True,
             )
         except IntegrityError as e:
-            raise DidMappingConflictError(
+            raise ConcurrentDidMappingError(
                 f"address {canonical} was registered concurrently"
             ) from e
+        logger.info(
+            f"livekit did-mapping created: org={organization_id} "
+            f"address={canonical} workflow={workflow_id} config={container_id}"
+        )
         return _result("created", row, canonical, workflow_id)
 
     row, provider = existing
@@ -119,11 +128,22 @@ async def ensure_livekit_did_mapping(
     if not overwrite:
         return _conflict(row, provider, canonical, workflow_id)
 
+    previous_workflow, previous_active = row.inbound_workflow_id, row.is_active
     row = await db_client.update_phone_number(
         row.id,
         container_id,
         inbound_workflow_id=workflow_id,
         is_active=True,
+    )
+    if row is None:
+        # Deleted or moved between the read and the update.
+        raise ConcurrentDidMappingError(
+            f"address {canonical} changed concurrently during rebind"
+        )
+    logger.info(
+        f"livekit did-mapping rebound: org={organization_id} address={canonical} "
+        f"workflow={previous_workflow}->{workflow_id} "
+        f"active={previous_active}->True"
     )
     return _result("rebound", row, canonical, workflow_id)
 
@@ -132,7 +152,7 @@ async def _resolve_container_config_id(organization_id: int) -> int:
     configs = await db_client.list_telephony_configurations(organization_id)
     livekit = [c for c in configs if c.provider == LIVEKIT_PROVIDER]
     if len(livekit) > 1:
-        raise DidMappingConflictError(
+        raise ContainerConfigAmbiguousError(
             f"organization has {len(livekit)} livekit telephony configurations; "
             "expected at most one"
         )
@@ -140,7 +160,7 @@ async def _resolve_container_config_id(organization_id: int) -> int:
         return livekit[0].id
 
     if any(c.name == CONTAINER_CONFIG_NAME for c in configs):
-        raise DidMappingConflictError(
+        raise ContainerConfigAmbiguousError(
             f"telephony configuration name {CONTAINER_CONFIG_NAME!r} is taken "
             "by a non-livekit configuration"
         )
@@ -153,7 +173,7 @@ async def _resolve_container_config_id(organization_id: int) -> int:
             never_default_outbound=True,
         )
     except IntegrityError as e:
-        raise DidMappingConflictError(
+        raise ConcurrentDidMappingError(
             f"telephony configuration {CONTAINER_CONFIG_NAME!r} was created "
             "concurrently"
         ) from e

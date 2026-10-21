@@ -31,7 +31,8 @@ from api.schemas.livekit_did_mapping import (
 )
 from api.services.auth.depends import get_user
 from api.services.pipecat.livekit_did_mapping import (
-    DidMappingConflictError,
+    ConcurrentDidMappingError,
+    ContainerConfigAmbiguousError,
     InvalidDidAddressError,
     WorkflowNotInOrgError,
     ensure_livekit_did_mapping,
@@ -104,9 +105,14 @@ _DID_MAPPING_STATUS_CODES = {"created": 201, "conflict": 409}
         201: {"model": LiveKitDidMappingResponse, "description": "Created"},
         409: {
             "model": LiveKitDidMappingResponse,
-            "description": "Number bound elsewhere (status=conflict), or the "
-            "livekit container config is ambiguous (detail)",
+            "description": "Number bound elsewhere (status=conflict; "
+            "current.provider tells whether overwrite can help)",
         },
+        422: {
+            "description": "Not a PSTN number, or the org's livekit "
+            "container config is ambiguous (detail)"
+        },
+        503: {"description": "Concurrent write; retry"},
     },
 )
 async def ensure_did_mapping(
@@ -131,8 +137,10 @@ async def ensure_did_mapping(
         raise HTTPException(status_code=422, detail=str(e))
     except WorkflowNotInOrgError:
         raise HTTPException(status_code=404, detail="Workflow not found")
-    except DidMappingConflictError as e:
-        raise HTTPException(status_code=409, detail=str(e))
+    except ContainerConfigAmbiguousError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    except ConcurrentDidMappingError as e:
+        raise HTTPException(status_code=503, detail=str(e))
 
     body = LiveKitDidMappingResponse.model_validate(result, from_attributes=True)
     return JSONResponse(
