@@ -10,16 +10,33 @@ forging a webhook. Anyone holding the LiveKit signing key who can reach the
 media server — dograh and queue both can — can make the server emit genuine
 events; that limit is a registered residual risk, not something this route
 can close. Access logs mask the secret (``logging_config``).
+
+``POST /livekit/did-mappings`` is the deployment-bootstrap path that binds a
+DID to an AI workflow; see ``livekit_did_mapping`` for why it needs a
+``provider='livekit'`` FK-container config (stop-gap until S-L6-ROUTING).
 """
 
 import os
 import secrets
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 from loguru import logger
 
 from api.db import db_client
+from api.db.models import UserModel
+from api.schemas.livekit_did_mapping import (
+    LiveKitDidMappingRequest,
+    LiveKitDidMappingResponse,
+)
+from api.services.auth.depends import get_user
+from api.services.pipecat.livekit_did_mapping import (
+    ConcurrentDidMappingError,
+    ContainerConfigAmbiguousError,
+    InvalidDidAddressError,
+    WorkflowNotInOrgError,
+    ensure_livekit_did_mapping,
+)
 from api.services.pipecat.livekit_dispatcher import (
     handle_webhook_event,
     record_webhook_rejected,
@@ -76,3 +93,57 @@ async def livekit_inbound(secret: str, request: Request):
 
     handle_webhook_event(event, _did_resolver, _fallback)
     return {"ok": True}
+
+
+_DID_MAPPING_STATUS_CODES = {"created": 201, "conflict": 409}
+
+
+@router.post(
+    "/did-mappings",
+    response_model=LiveKitDidMappingResponse,
+    responses={
+        201: {"model": LiveKitDidMappingResponse, "description": "Created"},
+        409: {
+            "model": LiveKitDidMappingResponse,
+            "description": "Number bound elsewhere (status=conflict; "
+            "current.provider tells whether overwrite can help)",
+        },
+        422: {
+            "description": "Not a PSTN number, or the org's livekit "
+            "container config is ambiguous (detail)"
+        },
+        503: {"description": "Concurrent write; retry"},
+    },
+)
+async def ensure_did_mapping(
+    request: LiveKitDidMappingRequest, user: UserModel = Depends(get_user)
+):
+    """Ensure a DID routes LiveKit inbound calls to an AI workflow (idempotent).
+
+    201 ``created``, 200 ``unchanged`` / ``rebound``, 409 ``conflict`` (pass
+    ``overwrite`` to rebind a number held by the livekit container; numbers of
+    other provider configs are never moved).
+    """
+    if not user.selected_organization_id:
+        raise HTTPException(status_code=400, detail="No organization selected")
+    try:
+        result = await ensure_livekit_did_mapping(
+            organization_id=user.selected_organization_id,
+            address=request.address,
+            workflow_id=request.workflow_id,
+            overwrite=request.overwrite,
+        )
+    except InvalidDidAddressError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    except WorkflowNotInOrgError:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+    except ContainerConfigAmbiguousError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    except ConcurrentDidMappingError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+
+    body = LiveKitDidMappingResponse.model_validate(result, from_attributes=True)
+    return JSONResponse(
+        status_code=_DID_MAPPING_STATUS_CODES.get(result.status, 200),
+        content=body.model_dump(mode="json"),
+    )

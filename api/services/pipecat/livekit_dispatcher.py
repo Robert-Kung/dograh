@@ -55,7 +55,17 @@ Fallback = Callable[[str, str, Optional[int]], Awaitable[None]]
 
 def did_from_sip_attributes(attributes: dict) -> str | None:
     """E.164 DID from the SIP caller's ``sip.trunkPhoneNumber`` (C6), or None."""
-    raw = ((attributes or {}).get(SIP_DIALED_ATTRIBUTE) or "").strip()
+    return normalize_dialed_did((attributes or {}).get(SIP_DIALED_ATTRIBUTE))
+
+
+def normalize_dialed_did(raw: str | None) -> str | None:
+    """E.164 canonical form of a dialed DID, or None when it is not PSTN.
+
+    The single normalization for both sides of the DID lookup: the inbound
+    webhook's dialed number and the number registered through the
+    ``/livekit/did-mappings`` endpoint, so the two always compare equal.
+    """
+    raw = (raw or "").strip()
     # No hint for an explicitly international number: the normalizer strips
     # "+" before comparing dial codes, so hinting "+1555…" or "001555…" would
     # prefix 886 to a foreign number (review D-02). Everything else — "02…",
