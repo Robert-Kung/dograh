@@ -73,6 +73,9 @@ class McpToolSession:
 
         self._client: Optional[MCPClient] = None
         self._session: Any = None  # mcp.ClientSession (read once after start)
+        # The task that enters (and later exits) the client's anyio task group.
+        self._owner: Optional[asyncio.Task] = None
+        self._stop = asyncio.Event()
         self._schemas: List[FunctionSchema] = []
         # namespaced LLM name -> original MCP tool name
         self._name_map: Dict[str, str] = {}
@@ -84,7 +87,55 @@ class McpToolSession:
         Never raises on a connect failure — a dead/unreachable MCP server
         leaves the session marked unavailable (``available = False``). Genuine
         external cancellation, KeyboardInterrupt, and SystemExit are re-raised
-        (see the CancelledError handling below and ``_degrade``)."""
+        (see the CancelledError handling in ``_connect`` and ``_degrade``).
+
+        The connection lives in a dedicated owner task, not in the caller's.
+        The streamable-HTTP client runs an anyio task group; when the server
+        goes silent past the read timeout (or the connection drops), that
+        group cancels the task that entered it. Entered from the caller, that
+        is the pipeline task, and the whole call ends in silence (C4). In the
+        owner task the failure ends this session only; later calls raise and
+        the tool handler answers with its structured error."""
+        ready = asyncio.Event()
+        self._stop = asyncio.Event()
+        self._owner = asyncio.create_task(
+            self._own(ready), name=f"mcp-session-{self._tool_uuid}"
+        )
+        try:
+            await ready.wait()
+        except asyncio.CancelledError:
+            owner, self._owner = self._owner, None
+            owner.cancel()
+            await asyncio.gather(owner, return_exceptions=True)
+            raise
+        if self._owner.done():
+            # Connect failed (degraded) or was cancelled; surface the latter.
+            owner, self._owner = self._owner, None
+            await owner
+
+    async def _own(self, ready: asyncio.Event) -> None:
+        try:
+            await self._connect()
+        finally:
+            ready.set()
+        if not self.available:
+            return
+        try:
+            await self._stop.wait()
+        except asyncio.CancelledError as e:
+            if not _is_anyio_scope_cancel(e):
+                raise
+            self.available = False
+            logger.warning(
+                f"MCP session lost for tool '{self._tool_name}' "
+                f"({self._tool_uuid}): the transport stopped (server silent "
+                f"past the read timeout, or the connection dropped). The call "
+                f"continues; further calls to these tools return an error."
+            )
+        finally:
+            await self._close_client()
+
+    async def _connect(self) -> None:
         try:
             params = build_streamable_http_params(
                 url=self._url,
@@ -133,8 +184,7 @@ class McpToolSession:
             # reliable discriminator. Re-raise genuine external cancellation to
             # preserve structured concurrency; degrade only on the anyio
             # connect-teardown artifact.
-            msg = "" if not e.args else str(e.args[0] or "")
-            if not msg.startswith("Cancelled via cancel scope"):
+            if not _is_anyio_scope_cancel(e):
                 raise
             await self._degrade(e)
         except Exception as e:  # noqa: BLE001 — see _degrade docstring
@@ -226,6 +276,17 @@ class McpToolSession:
         return text or "Sorry, the MCP tool returned no content."
 
     async def close(self) -> None:
+        """Stop the owner task; it closes the client in its own task."""
+        owner, self._owner = self._owner, None
+        if owner is None:
+            return
+        self._stop.set()
+        try:
+            await owner
+        except Exception as e:
+            logger.warning(f"Error closing MCP session {self._tool_uuid}: {e}")
+
+    async def _close_client(self) -> None:
         if self._client is not None:
             try:
                 await self._client.close()
@@ -234,6 +295,14 @@ class McpToolSession:
             finally:
                 self._client = None
                 self._session = None
+
+
+def _is_anyio_scope_cancel(e: asyncio.CancelledError) -> bool:
+    """True for the cancellation anyio's task group delivers when one of its
+    tasks fails ("Cancelled via cancel scope <id>"); False for a genuine
+    external cancellation (bare, or an application-chosen message)."""
+    msg = "" if not e.args else str(e.args[0] or "")
+    return msg.startswith("Cancelled via cancel scope")
 
 
 async def discover_mcp_tools(

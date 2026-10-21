@@ -17,7 +17,9 @@ from fastmcp import FastMCP
 from starlette.responses import JSONResponse
 
 
-def _build_app(required_headers: dict[str, str] | None = None):
+def _build_app(
+    required_headers: dict[str, str] | None = None, *, with_hang_tool: bool = False
+):
     mcp = FastMCP("mock-mcp")
 
     @mcp.tool()
@@ -29,6 +31,14 @@ def _build_app(required_headers: dict[str, str] | None = None):
     def add(a: int, b: int) -> int:
         """Add two integers."""
         return a + b
+
+    if with_hang_tool:
+
+        @mcp.tool()
+        async def hang(seconds: float) -> str:
+            """Accept the call, then stay silent for ``seconds``."""
+            await asyncio.sleep(seconds)
+            return "late"
 
     # FastMCP 3.x: ASGI app for streamable-HTTP transport at "/mcp".
     app = mcp.http_app()
@@ -64,12 +74,17 @@ def _free_port() -> int:
 
 @contextlib.asynccontextmanager
 async def running_mcp_server(
-    *, required_headers: dict[str, str] | None = None
+    *,
+    required_headers: dict[str, str] | None = None,
+    with_hang_tool: bool = False,
 ) -> AsyncIterator[str]:
     """Yield the base streamable-HTTP URL of a live mock MCP server."""
     port = _free_port()
     config = uvicorn.Config(
-        _build_app(required_headers), host="127.0.0.1", port=port, log_level="warning"
+        _build_app(required_headers, with_hang_tool=with_hang_tool),
+        host="127.0.0.1",
+        port=port,
+        log_level="warning",
     )
     server = uvicorn.Server(config)
     thread = threading.Thread(target=server.run, daemon=True)
@@ -101,3 +116,45 @@ async def running_mcp_server(
                 "Mock MCP server thread did not terminate within 5s",
                 ResourceWarning,
             )
+
+
+class FreezableProxy:
+    """Loopback TCP proxy whose ``freeze()`` stops relaying bytes both ways
+    while keeping every connection open -- the shape ``docker pause`` gives a
+    peer (accepted, then silent)."""
+
+    def __init__(self, upstream_port: int) -> None:
+        self._upstream_port = upstream_port
+        self._relaying = asyncio.Event()
+        self._relaying.set()
+        self._server: asyncio.AbstractServer | None = None
+        self.port = 0
+
+    def freeze(self) -> None:
+        self._relaying.clear()
+
+    async def _pipe(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+        try:
+            while data := await reader.read(65536):
+                await self._relaying.wait()
+                writer.write(data)
+                await writer.drain()
+        except (ConnectionError, asyncio.CancelledError):
+            pass
+        finally:
+            writer.close()
+
+    async def _handle(self, client_r, client_w) -> None:
+        up_r, up_w = await asyncio.open_connection("127.0.0.1", self._upstream_port)
+        await asyncio.gather(self._pipe(client_r, up_w), self._pipe(up_r, client_w))
+
+    async def __aenter__(self) -> "FreezableProxy":
+        self._server = await asyncio.start_server(self._handle, "127.0.0.1", 0)
+        self.port = self._server.sockets[0].getsockname()[1]
+        return self
+
+    async def __aexit__(self, *exc) -> None:
+        assert self._server is not None
+        self._server.close()
+        self._server.close_clients()
+        self._relaying.set()

@@ -1,3 +1,4 @@
+import asyncio
 from datetime import timedelta
 from unittest.mock import MagicMock
 
@@ -9,7 +10,7 @@ from api.services.workflow.mcp_tool_session import (
     build_streamable_http_params,
     discover_mcp_tools,
 )
-from api.tests.support.mcp_mock_server import running_mcp_server
+from api.tests.support.mcp_mock_server import FreezableProxy, running_mcp_server
 
 
 @pytest.mark.asyncio
@@ -156,6 +157,57 @@ async def test_session_unreachable_degrades_not_raises():
     assert session.available is False
     assert session.function_schemas() == []
     await session.close()
+
+
+@pytest.mark.asyncio
+async def test_silent_server_does_not_cancel_the_task_that_opened_the_session():
+    """A server that goes silent after the session opened (``docker pause``)
+    must fail the call only. The task that opened the session is the pipeline
+    task in production; cancelling it hangs up the caller with no words
+    (kb-service AC1c ``kb_hang_tool``, C4). Timeouts are the kb tool's."""
+    async with running_mcp_server() as base_url:
+        upstream_port = int(base_url.rsplit(":", 1)[1].split("/", 1)[0])
+        async with FreezableProxy(upstream_port) as proxy:
+            session = McpToolSession(
+                tool_uuid="uuid-1234abcd",
+                tool_name="Acme MCP",
+                url=f"http://127.0.0.1:{proxy.port}/mcp",
+                credential=None,
+                tools_filter=[],
+                timeout_secs=2,
+                sse_read_timeout_secs=3,
+            )
+            call_outcome: dict = {}
+
+            async def tool_call() -> None:
+                try:
+                    await asyncio.wait_for(
+                        session.call("mcp__acme_mcp__echo", {"text": "x"}), timeout=5
+                    )
+                    call_outcome["result"] = "returned"
+                except TimeoutError:
+                    call_outcome["result"] = "deadline"
+                except Exception as e:  # noqa: BLE001
+                    call_outcome["result"] = type(e).__name__
+
+            async def host() -> str:
+                await session.start()
+                try:
+                    assert session.available is True
+                    proxy.freeze()
+                    call_task = asyncio.create_task(tool_call())
+                    await asyncio.sleep(7)
+                    await call_task
+                    # The lost session answers at once, not after a timeout.
+                    assert session.available is False
+                    with pytest.raises(RuntimeError):
+                        await session.call("mcp__acme_mcp__echo", {"text": "y"})
+                    return "host survived"
+                finally:
+                    await session.close()
+
+            assert await asyncio.wait_for(host(), timeout=20) == "host survived"
+            assert call_outcome["result"] != "returned"
 
 
 @pytest.mark.asyncio
