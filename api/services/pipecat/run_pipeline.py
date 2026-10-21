@@ -1045,88 +1045,98 @@ async def _run_pipeline_impl(
 
     # Initialize the engine to set the initial context with
     # System Prompt and Tools
-    await engine.initialize()
+    # initialize() opens the MCP sessions; the finally that closes them starts
+    # only at the pipeline run below, so a failure in between closes them here.
+    try:
+        await engine.initialize()
 
-    # Add real-time feedback observer (always logs to buffer, streams to WS if available)
-    feedback_observer = RealtimeFeedbackObserver(
-        ws_sender=ws_sender,
-        logs_buffer=in_memory_logs_buffer,
-    )
-    task.add_observer(feedback_observer)
+        # Add real-time feedback observer (always logs to buffer, streams to WS if available)
+        feedback_observer = RealtimeFeedbackObserver(
+            ws_sender=ws_sender,
+            logs_buffer=in_memory_logs_buffer,
+        )
+        task.add_observer(feedback_observer)
 
-    # S-L3-SAFETYNET watchdog (LiveKit only): fatal ErrorFrames and owed-reply
-    # silence trigger a one-shot fallback cold transfer (C4).
-    # Install decision lives in livekit_safetynet so its not-installed branch
-    # is testable and visible (ccp#7 D3) — never silent here again.
-    safetynet_watchdog = None
-    if workflow_run and workflow_run.mode == WorkflowRunMode.LIVEKIT.value:
-        from api.services.pipecat.livekit_safetynet import resolve_safetynet_watchdog
+        # S-L3-SAFETYNET watchdog (LiveKit only): fatal ErrorFrames and owed-reply
+        # silence trigger a one-shot fallback cold transfer (C4).
+        # Install decision lives in livekit_safetynet so its not-installed branch
+        # is testable and visible (ccp#7 D3) — never silent here again.
+        safetynet_watchdog = None
+        if workflow_run and workflow_run.mode == WorkflowRunMode.LIVEKIT.value:
+            from api.services.pipecat.livekit_safetynet import (
+                resolve_safetynet_watchdog,
+            )
 
-        safetynet_watchdog = await resolve_safetynet_watchdog(engine, workflow_run)
-        if safetynet_watchdog is not None:
-            task.add_observer(safetynet_watchdog)
+            safetynet_watchdog = await resolve_safetynet_watchdog(engine, workflow_run)
+            if safetynet_watchdog is not None:
+                task.add_observer(safetynet_watchdog)
 
-    # S-L8-RECORD: recording notice before any conversation; recording is
-    # gated on the notice outcome (LIVEKIT inbound only).
-    from api.services.pipecat.livekit_consent import maybe_build_consent_gate
+        # S-L8-RECORD: recording notice before any conversation; recording is
+        # gated on the notice outcome (LIVEKIT inbound only).
+        from api.services.pipecat.livekit_consent import maybe_build_consent_gate
 
-    consent_gate = maybe_build_consent_gate(
-        workflow_run, engine, is_realtime=is_realtime
-    )
+        consent_gate = maybe_build_consent_gate(
+            workflow_run, engine, is_realtime=is_realtime
+        )
 
-    # Register latency observer to log user-to-bot response latency
-    if task.user_bot_latency_observer:
+        # Register latency observer to log user-to-bot response latency
+        if task.user_bot_latency_observer:
 
-        @task.user_bot_latency_observer.event_handler("on_latency_measured")
-        async def on_latency_measured(observer, latency_seconds):
-            message = {
-                "type": RealtimeFeedbackType.LATENCY_MEASURED.value,
-                "payload": {
-                    "latency_seconds": latency_seconds,
-                },
-            }
-            if ws_sender:
+            @task.user_bot_latency_observer.event_handler("on_latency_measured")
+            async def on_latency_measured(observer, latency_seconds):
+                message = {
+                    "type": RealtimeFeedbackType.LATENCY_MEASURED.value,
+                    "payload": {
+                        "latency_seconds": latency_seconds,
+                    },
+                }
+                if ws_sender:
+                    try:
+                        ws_message = message
+                        if in_memory_logs_buffer.current_node_id:
+                            ws_message = {
+                                **message,
+                                "node_id": in_memory_logs_buffer.current_node_id,
+                                "node_name": in_memory_logs_buffer.current_node_name,
+                            }
+                        await ws_sender(ws_message)
+                    except Exception as e:
+                        logger.debug(f"Failed to send latency via WebSocket: {e}")
                 try:
-                    ws_message = message
-                    if in_memory_logs_buffer.current_node_id:
-                        ws_message = {
-                            **message,
-                            "node_id": in_memory_logs_buffer.current_node_id,
-                            "node_name": in_memory_logs_buffer.current_node_name,
-                        }
-                    await ws_sender(ws_message)
+                    await in_memory_logs_buffer.append(message)
                 except Exception as e:
-                    logger.debug(f"Failed to send latency via WebSocket: {e}")
-            try:
-                await in_memory_logs_buffer.append(message)
-            except Exception as e:
-                logger.error(f"Failed to append latency to logs buffer: {e}")
+                    logger.error(f"Failed to append latency to logs buffer: {e}")
 
-    # Register turn log handlers for all call types (WebRTC and telephony)
-    register_turn_log_handlers(
-        in_memory_logs_buffer, user_context_aggregator, assistant_context_aggregator
-    )
+        # Register turn log handlers for all call types (WebRTC and telephony)
+        register_turn_log_handlers(
+            in_memory_logs_buffer, user_context_aggregator, assistant_context_aggregator
+        )
 
-    # Register event handlers — resolve provider_id for PostHog tracking
-    if not user_provider_id:
-        user_obj = await db_client.get_user_by_id(user_id)
-        user_provider_id = str(user_obj.provider_id) if user_obj else None
-    in_memory_audio_buffer = register_event_handlers(
-        task,
-        transport,
-        workflow_run_id,
-        engine=engine,
-        audio_buffer=audio_buffer,
-        in_memory_logs_buffer=in_memory_logs_buffer,
-        pipeline_metrics_aggregator=pipeline_metrics_aggregator,
-        audio_config=audio_config,
-        pre_call_fetch_task=pre_call_fetch_task,
-        user_provider_id=user_provider_id,
-        integration_runtime_sessions=integration_runtime_sessions,
-        consent_gate=consent_gate,
-    )
+        # Register event handlers — resolve provider_id for PostHog tracking
+        if not user_provider_id:
+            user_obj = await db_client.get_user_by_id(user_id)
+            user_provider_id = str(user_obj.provider_id) if user_obj else None
+        in_memory_audio_buffer = register_event_handlers(
+            task,
+            transport,
+            workflow_run_id,
+            engine=engine,
+            audio_buffer=audio_buffer,
+            in_memory_logs_buffer=in_memory_logs_buffer,
+            pipeline_metrics_aggregator=pipeline_metrics_aggregator,
+            audio_config=audio_config,
+            pre_call_fetch_task=pre_call_fetch_task,
+            user_provider_id=user_provider_id,
+            integration_runtime_sessions=integration_runtime_sessions,
+            consent_gate=consent_gate,
+        )
 
-    register_audio_data_handler(audio_buffer, workflow_run_id, in_memory_audio_buffer)
+        register_audio_data_handler(
+            audio_buffer, workflow_run_id, in_memory_audio_buffer
+        )
+    except BaseException:
+        await engine.close_mcp_sessions()
+        raise
 
     try:
         # Run the pipeline
@@ -1140,10 +1150,8 @@ async def _run_pipeline_impl(
     except asyncio.CancelledError:
         logger.warning("Received CancelledError in _run_pipeline")
     finally:
-        # Close MCP sessions here, not in engine.cleanup(). The anyio cancel
-        # scopes opened by MCPClient.start() in engine.initialize() are
-        # task-affine; this finally runs in the same task as initialize(),
-        # whereas engine.cleanup() runs in a pipecat event-handler task.
+        # Close MCP sessions here, where the call's lifetime ends (each
+        # session's transport runs in its own owner task).
         await engine.close_mcp_sessions()
         if safetynet_watchdog is not None:
             await safetynet_watchdog.stop()

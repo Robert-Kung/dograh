@@ -101,3 +101,51 @@ async def running_mcp_server(
                 "Mock MCP server thread did not terminate within 5s",
                 ResourceWarning,
             )
+
+
+class FreezableProxy:
+    """Loopback TCP proxy whose ``freeze()`` stops relaying bytes both ways
+    while keeping every connection open -- the shape ``docker pause`` gives a
+    peer (accepted, then silent)."""
+
+    def __init__(self, upstream_port: int) -> None:
+        self._upstream_port = upstream_port
+        self._relaying = asyncio.Event()
+        self._relaying.set()
+        self._server: asyncio.AbstractServer | None = None
+        self._pipes: set[asyncio.Task] = set()
+        self.port = 0
+
+    def freeze(self) -> None:
+        self._relaying.clear()
+
+    async def _pipe(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+        try:
+            while data := await reader.read(65536):
+                await self._relaying.wait()
+                writer.write(data)
+                await writer.drain()
+        except ConnectionError:
+            pass
+        finally:
+            writer.close()
+
+    async def _handle(self, client_r, client_w) -> None:
+        up_r, up_w = await asyncio.open_connection("127.0.0.1", self._upstream_port)
+        for reader, writer in ((client_r, up_w), (up_r, client_w)):
+            task = asyncio.create_task(self._pipe(reader, writer))
+            self._pipes.add(task)
+            task.add_done_callback(self._pipes.discard)
+
+    async def __aenter__(self) -> "FreezableProxy":
+        self._server = await asyncio.start_server(self._handle, "127.0.0.1", 0)
+        self.port = self._server.sockets[0].getsockname()[1]
+        return self
+
+    async def __aexit__(self, *exc) -> None:
+        assert self._server is not None
+        self._server.close()
+        for task in list(self._pipes):
+            task.cancel()
+        await asyncio.gather(*self._pipes, return_exceptions=True)
+        await self._server.wait_closed()

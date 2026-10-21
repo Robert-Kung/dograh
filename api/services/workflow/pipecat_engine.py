@@ -1266,11 +1266,10 @@ class PipecatEngine:
     async def close_mcp_sessions(self) -> None:
         """Close all open MCP tool sessions.
 
-        Must run in the same task that ran initialize() (which opened the
-        sessions via _open_mcp_sessions). The MCP client's underlying anyio
-        cancel scopes are task-affine — they must be exited from the task that
-        entered them — so this is invoked from _run_pipeline's finally, not
-        from cleanup() (which runs in a pipecat event-handler task).
+        Each session's anyio scopes live in that session's own owner task
+        (McpToolSession.start), so this may run from any task; it is invoked
+        where the call's lifetime ends (_run_pipeline's finally and the
+        text-chat runner).
         """
         for tool_uuid, session in list(self._mcp_sessions.items()):
             try:
@@ -1282,11 +1281,7 @@ class PipecatEngine:
     async def cleanup(self):
         """Clean up engine resources on disconnect.
 
-        MCP tool sessions are intentionally NOT closed here — see
-        close_mcp_sessions(). This method runs in a pipecat event-handler task
-        (on_pipeline_finished), a different task than the one that opened the
-        MCP sessions; closing them here raises "Attempted to exit cancel scope
-        in a different task than it was entered in".
+        MCP tool sessions are closed by close_mcp_sessions(), not here.
         """
         # Cancel any pending timeout tasks
         if (
