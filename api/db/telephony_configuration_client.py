@@ -126,19 +126,27 @@ class TelephonyConfigurationClient(BaseDBClient):
         provider: str,
         credentials: Dict[str, Any],
         is_default_outbound: bool = False,
+        never_default_outbound: bool = False,
     ) -> TelephonyConfigurationModel:
         """Create a new config row. Duplicate-account guarding is the caller's
-        responsibility; this method does not enforce it."""
+        responsibility; this method does not enforce it.
+
+        The org's first config becomes its default outbound unless
+        ``never_default_outbound`` is set — for rows that cannot place calls
+        (the LiveKit DID container, see ``livekit_did_mapping``)."""
         async with self.async_session() as session:
-            existing_count = await session.scalar(
-                select(func.count(TelephonyConfigurationModel.id)).where(
-                    TelephonyConfigurationModel.organization_id == organization_id,
+            if never_default_outbound:
+                is_default_outbound = False
+            else:
+                existing_count = await session.scalar(
+                    select(func.count(TelephonyConfigurationModel.id)).where(
+                        TelephonyConfigurationModel.organization_id == organization_id,
+                    )
                 )
-            )
-            if existing_count == 0:
-                is_default_outbound = True
-            elif is_default_outbound:
-                await self._clear_default_outbound(session, organization_id)
+                if existing_count == 0:
+                    is_default_outbound = True
+                elif is_default_outbound:
+                    await self._clear_default_outbound(session, organization_id)
 
             row = TelephonyConfigurationModel(
                 organization_id=organization_id,

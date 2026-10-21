@@ -94,6 +94,28 @@ class TelephonyPhoneNumberClient(BaseDBClient):
             )
             return result.scalars().first()
 
+    async def get_phone_number_with_provider_by_address(
+        self, organization_id: int, address_normalized: str
+    ) -> Optional[Tuple[TelephonyPhoneNumberModel, str]]:
+        """The org's row for a canonical address — whichever config owns it —
+        with that config's provider. (organization_id, address_normalized) is
+        unique, so there is at most one."""
+        async with self.async_session() as session:
+            result = await session.execute(
+                select(TelephonyPhoneNumberModel, TelephonyConfigurationModel.provider)
+                .join(
+                    TelephonyConfigurationModel,
+                    TelephonyConfigurationModel.id
+                    == TelephonyPhoneNumberModel.telephony_configuration_id,
+                )
+                .where(
+                    TelephonyPhoneNumberModel.organization_id == organization_id,
+                    TelephonyPhoneNumberModel.address_normalized == address_normalized,
+                )
+            )
+            row = result.first()
+            return (row[0], row[1]) if row else None
+
     async def find_inbound_workflow_for_did(
         self,
         address: str,
