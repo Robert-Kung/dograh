@@ -76,6 +76,8 @@ class McpToolSession:
         # The task that enters (and later exits) the client's anyio task group.
         self._owner: Optional[asyncio.Task] = None
         self._stop = asyncio.Event()
+        # Set once the owner task ends; fails calls still waiting on it.
+        self._lost = asyncio.Event()
         self._schemas: List[FunctionSchema] = []
         # namespaced LLM name -> original MCP tool name
         self._name_map: Dict[str, str] = {}
@@ -90,14 +92,17 @@ class McpToolSession:
         (see the CancelledError handling in ``_connect`` and ``_degrade``).
 
         The connection lives in a dedicated owner task, not in the caller's.
-        The streamable-HTTP client runs an anyio task group; when the server
-        goes silent past the read timeout (or the connection drops), that
-        group cancels the task that entered it. Entered from the caller, that
-        is the pipeline task, and the whole call ends in silence (C4). In the
-        owner task the failure ends this session only; later calls raise and
-        the tool handler answers with its structured error."""
+        The streamable-HTTP client runs an anyio task group; when a request
+        fails at the transport (the server silent past the read timeout while
+        a call is in flight, an HTTP error, a dropped connection), that group
+        cancels the task that entered it. Entered from the caller, that is the
+        pipeline task, and the whole call ends in silence (C4). In the owner
+        task the failure ends this session only: the call in flight and every
+        later call raise, and the tool handler answers with its structured
+        error. A lost session is not reopened for the rest of the call."""
+        if self._owner is not None:
+            return
         ready = asyncio.Event()
-        self._stop = asyncio.Event()
         self._owner = asyncio.create_task(
             self._own(ready), name=f"mcp-session-{self._tool_uuid}"
         )
@@ -107,6 +112,8 @@ class McpToolSession:
             owner, self._owner = self._owner, None
             owner.cancel()
             await asyncio.gather(owner, return_exceptions=True)
+            self._client = None
+            self._session = None
             raise
         if self._owner.done():
             # Connect failed (degraded) or was cancelled; surface the latter.
@@ -125,14 +132,14 @@ class McpToolSession:
         except asyncio.CancelledError as e:
             if not _is_anyio_scope_cancel(e):
                 raise
-            self.available = False
             logger.warning(
                 f"MCP session lost for tool '{self._tool_name}' "
-                f"({self._tool_uuid}): the transport stopped (server silent "
-                f"past the read timeout, or the connection dropped). The call "
-                f"continues; further calls to these tools return an error."
+                f"({self._tool_uuid}): a request failed at the transport. The "
+                f"call continues; calls to these tools now return an error."
             )
         finally:
+            self.available = False
+            self._lost.set()
             await self._close_client()
 
     async def _connect(self) -> None:
@@ -204,14 +211,7 @@ class McpToolSession:
         self._name_map = {}
         # Self-contained cleanup: _client.start() may have succeeded before a
         # later step (e.g. get_tools_schema()) failed, leaving an open client.
-        if self._client is not None:
-            try:
-                await self._client.close()
-            except Exception:
-                pass
-            finally:
-                self._client = None
-                self._session = None
+        await self._close_client()
         logger.warning(
             f"MCP session unavailable for tool '{self._tool_name}' "
             f"({self._tool_uuid}) at {self._url}: {e!r}. "
@@ -268,7 +268,22 @@ class McpToolSession:
         original = self._name_map.get(namespaced_name)
         if original is None:
             raise RuntimeError(f"Unknown MCP function {namespaced_name}")
-        result = await self._session.call_tool(original, arguments=arguments)
+        call = asyncio.ensure_future(
+            self._session.call_tool(original, arguments=arguments)
+        )
+        lost = asyncio.ensure_future(self._lost.wait())
+        try:
+            await asyncio.wait({call, lost}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            lost.cancel()
+            if not call.done():
+                call.cancel()
+        if not call.done() or call.cancelled():
+            # The transport failure that ended the session does not reach the
+            # request still waiting on it (the session's receive loop is
+            # cancelled before it can fail pending requests).
+            raise RuntimeError(f"MCP session lost during {namespaced_name}")
+        result = call.result()
         text = ""
         for content in getattr(result, "content", []) or []:
             if getattr(content, "text", None):
@@ -276,22 +291,32 @@ class McpToolSession:
         return text or "Sorry, the MCP tool returned no content."
 
     async def close(self) -> None:
-        """Stop the owner task; it closes the client in its own task."""
+        """Stop the owner task; it closes the client in its own task.
+
+        Never raises for the owner's own failure or cancellation, so the
+        caller's remaining cleanup still runs; the caller's own cancellation
+        still propagates."""
         owner, self._owner = self._owner, None
         if owner is None:
             return
         self._stop.set()
-        try:
-            await owner
-        except Exception as e:
-            logger.warning(f"Error closing MCP session {self._tool_uuid}: {e}")
+        (outcome,) = await asyncio.gather(owner, return_exceptions=True)
+        if isinstance(outcome, BaseException):
+            logger.warning(
+                f"MCP session owner {self._tool_uuid} ended abnormally: {outcome!r}"
+            )
 
     async def _close_client(self) -> None:
         if self._client is not None:
             try:
                 await self._client.close()
             except Exception as e:
-                logger.warning(f"Error closing MCP session {self._tool_uuid}: {e}")
+                # A transport failure resurfaces here as an ExceptionGroup;
+                # name its members so the cause (timeout, HTTP error) shows.
+                detail = getattr(e, "exceptions", None) or e
+                logger.warning(
+                    f"Error closing MCP session {self._tool_uuid}: {detail!r}"
+                )
             finally:
                 self._client = None
                 self._session = None

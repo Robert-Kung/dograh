@@ -1268,7 +1268,8 @@ class PipecatEngine:
 
         Each session's anyio scopes live in that session's own owner task
         (McpToolSession.start), so this may run from any task; it is invoked
-        from _run_pipeline's finally, where the call's lifetime ends.
+        where the call's lifetime ends (_run_pipeline's finally and the
+        text-chat runner).
         """
         for tool_uuid, session in list(self._mcp_sessions.items()):
             try:
@@ -1280,8 +1281,7 @@ class PipecatEngine:
     async def cleanup(self):
         """Clean up engine resources on disconnect.
 
-        MCP tool sessions are closed by close_mcp_sessions() from
-        _run_pipeline's finally, not here.
+        MCP tool sessions are closed by close_mcp_sessions(), not here.
         """
         # Cancel any pending timeout tasks
         if (

@@ -5,6 +5,7 @@ from unittest.mock import MagicMock
 import httpx
 import pytest
 
+from api.services.kb_tool import fixed
 from api.services.workflow.mcp_tool_session import (
     McpToolSession,
     build_streamable_http_params,
@@ -159,46 +160,54 @@ async def test_session_unreachable_degrades_not_raises():
     await session.close()
 
 
+def _kb_shaped_session(url: str) -> McpToolSession:
+    return McpToolSession(
+        tool_uuid="uuid-1234abcd",
+        tool_name="Acme MCP",
+        url=url,
+        credential=None,
+        tools_filter=[],
+        timeout_secs=fixed.KB_TIMEOUT_SECS,
+        sse_read_timeout_secs=fixed.KB_SSE_READ_TIMEOUT_SECS,
+    )
+
+
 @pytest.mark.asyncio
-async def test_silent_server_does_not_cancel_the_task_that_opened_the_session():
+async def test_silent_server_fails_the_call_and_spares_the_opening_task():
     """A server that goes silent after the session opened (``docker pause``)
-    must fail the call only. The task that opened the session is the pipeline
-    task in production; cancelling it hangs up the caller with no words
-    (kb-service AC1c ``kb_hang_tool``, C4). Timeouts are the kb tool's."""
+    must fail the call in flight -- before the kb handler deadline -- and
+    nothing else. The task that opened the session is the pipeline task in
+    production; cancelling it hangs up the caller with no words (kb-service
+    AC1c ``kb_hang_tool``, C4)."""
     async with running_mcp_server() as base_url:
         upstream_port = int(base_url.rsplit(":", 1)[1].split("/", 1)[0])
         async with FreezableProxy(upstream_port) as proxy:
-            session = McpToolSession(
-                tool_uuid="uuid-1234abcd",
-                tool_name="Acme MCP",
-                url=f"http://127.0.0.1:{proxy.port}/mcp",
-                credential=None,
-                tools_filter=[],
-                timeout_secs=2,
-                sse_read_timeout_secs=3,
-            )
-            call_outcome: dict = {}
+            session = _kb_shaped_session(f"http://127.0.0.1:{proxy.port}/mcp")
+            outcome: dict = {}
 
             async def tool_call() -> None:
+                loop = asyncio.get_running_loop()
+                t0 = loop.time()
                 try:
                     await asyncio.wait_for(
-                        session.call("mcp__acme_mcp__echo", {"text": "x"}), timeout=5
+                        session.call("mcp__acme_mcp__echo", {"text": "x"}),
+                        timeout=fixed.KB_HANDLER_DEADLINE_SECS,
                     )
-                    call_outcome["result"] = "returned"
+                    outcome["result"] = "returned"
                 except TimeoutError:
-                    call_outcome["result"] = "deadline"
-                except Exception as e:  # noqa: BLE001
-                    call_outcome["result"] = type(e).__name__
+                    outcome["result"] = "deadline"
+                except RuntimeError:
+                    outcome["result"] = "error"
+                outcome["elapsed"] = loop.time() - t0
 
             async def host() -> str:
                 await session.start()
                 try:
                     assert session.available is True
                     proxy.freeze()
-                    call_task = asyncio.create_task(tool_call())
-                    await asyncio.sleep(7)
-                    await call_task
-                    # The lost session answers at once, not after a timeout.
+                    await asyncio.create_task(tool_call())
+                    # Room for a late cancellation of this task to land.
+                    await asyncio.sleep(1)
                     assert session.available is False
                     with pytest.raises(RuntimeError):
                         await session.call("mcp__acme_mcp__echo", {"text": "y"})
@@ -207,7 +216,27 @@ async def test_silent_server_does_not_cancel_the_task_that_opened_the_session():
                     await session.close()
 
             assert await asyncio.wait_for(host(), timeout=20) == "host survived"
-            assert call_outcome["result"] != "returned"
+            assert outcome["result"] == "error"
+            assert outcome["elapsed"] < fixed.KB_HANDLER_DEADLINE_SECS
+
+
+@pytest.mark.asyncio
+async def test_close_does_not_raise_when_the_session_task_was_cancelled():
+    """close() runs in the pipeline's finally ahead of other cleanup; the
+    session task ending cancelled must not abort that cleanup."""
+    async with running_mcp_server() as base_url:
+        session = _kb_shaped_session(base_url)
+        await session.start()
+        assert session.available is True
+        (owner,) = [
+            t
+            for t in asyncio.all_tasks()
+            if t.get_name() == "mcp-session-uuid-1234abcd"
+        ]
+        owner.cancel()
+        await asyncio.sleep(0.1)
+        await session.close()  # must not raise
+        assert session.available is False
 
 
 @pytest.mark.asyncio

@@ -17,9 +17,7 @@ from fastmcp import FastMCP
 from starlette.responses import JSONResponse
 
 
-def _build_app(
-    required_headers: dict[str, str] | None = None, *, with_hang_tool: bool = False
-):
+def _build_app(required_headers: dict[str, str] | None = None):
     mcp = FastMCP("mock-mcp")
 
     @mcp.tool()
@@ -31,14 +29,6 @@ def _build_app(
     def add(a: int, b: int) -> int:
         """Add two integers."""
         return a + b
-
-    if with_hang_tool:
-
-        @mcp.tool()
-        async def hang(seconds: float) -> str:
-            """Accept the call, then stay silent for ``seconds``."""
-            await asyncio.sleep(seconds)
-            return "late"
 
     # FastMCP 3.x: ASGI app for streamable-HTTP transport at "/mcp".
     app = mcp.http_app()
@@ -74,17 +64,12 @@ def _free_port() -> int:
 
 @contextlib.asynccontextmanager
 async def running_mcp_server(
-    *,
-    required_headers: dict[str, str] | None = None,
-    with_hang_tool: bool = False,
+    *, required_headers: dict[str, str] | None = None
 ) -> AsyncIterator[str]:
     """Yield the base streamable-HTTP URL of a live mock MCP server."""
     port = _free_port()
     config = uvicorn.Config(
-        _build_app(required_headers, with_hang_tool=with_hang_tool),
-        host="127.0.0.1",
-        port=port,
-        log_level="warning",
+        _build_app(required_headers), host="127.0.0.1", port=port, log_level="warning"
     )
     server = uvicorn.Server(config)
     thread = threading.Thread(target=server.run, daemon=True)
@@ -128,6 +113,7 @@ class FreezableProxy:
         self._relaying = asyncio.Event()
         self._relaying.set()
         self._server: asyncio.AbstractServer | None = None
+        self._pipes: set[asyncio.Task] = set()
         self.port = 0
 
     def freeze(self) -> None:
@@ -139,14 +125,17 @@ class FreezableProxy:
                 await self._relaying.wait()
                 writer.write(data)
                 await writer.drain()
-        except (ConnectionError, asyncio.CancelledError):
+        except ConnectionError:
             pass
         finally:
             writer.close()
 
     async def _handle(self, client_r, client_w) -> None:
         up_r, up_w = await asyncio.open_connection("127.0.0.1", self._upstream_port)
-        await asyncio.gather(self._pipe(client_r, up_w), self._pipe(up_r, client_w))
+        for reader, writer in ((client_r, up_w), (up_r, client_w)):
+            task = asyncio.create_task(self._pipe(reader, writer))
+            self._pipes.add(task)
+            task.add_done_callback(self._pipes.discard)
 
     async def __aenter__(self) -> "FreezableProxy":
         self._server = await asyncio.start_server(self._handle, "127.0.0.1", 0)
@@ -156,5 +145,7 @@ class FreezableProxy:
     async def __aexit__(self, *exc) -> None:
         assert self._server is not None
         self._server.close()
-        self._server.close_clients()
-        self._relaying.set()
+        for task in list(self._pipes):
+            task.cancel()
+        await asyncio.gather(*self._pipes, return_exceptions=True)
+        await self._server.wait_closed()
