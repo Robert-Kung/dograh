@@ -46,10 +46,10 @@ from api.services.observability.call_outcome import (
 )
 from api.services.pipecat.livekit_dispatcher import DEFAULT_ROOM_PREFIX
 from api.services.pipecat.livekit_transfer_flow import valid_destination
-from api.utils.secret_redaction import redact_secrets
 from api.utils.background import (
     spawn,  # noqa: F401 — re-export; callers import from here
 )
+from api.utils.secret_redaction import redact_secrets
 from pipecat.frames.frames import (
     BotStartedSpeakingFrame,
     ClientConnectedFrame,
