@@ -7,6 +7,7 @@ import types
 import pytest
 from pipecat.frames.frames import (
     BotStartedSpeakingFrame,
+    BotStoppedSpeakingFrame,
     ClientConnectedFrame,
     ErrorFrame,
     FunctionCallInProgressFrame,
@@ -403,8 +404,8 @@ def _fake_engine():
     async def queue_frame(frame, *_direction):
         frames.append(frame)
         if isinstance(frame, TTSSpeakFrame):
-            state.playback.note_audio()
-            state.playback.note_stopped()
+            state.playback.note_started(BotStartedSpeakingFrame())
+            state.playback.note_stopped(BotStoppedSpeakingFrame())
 
     async def end_call_with_reason(reason, abort_immediately=False):
         calls.append(reason)
@@ -417,6 +418,7 @@ def _fake_engine():
         task=types.SimpleNamespace(queue_frame=queue_frame),
         end_call_with_reason=end_call_with_reason,
         resolve_transfer_call_config=resolve_transfer_call_config,
+        is_call_disposed=lambda: False,
         failure_state=state,
     )
     return engine, frames, calls

@@ -999,10 +999,16 @@ async def _run_pipeline_impl(
     # caller DTMF '0', reusing the workflow's transfer_call tool config.
     press0_gate = await resolve_press0_gate(engine, workflow_run)
 
-    # la-only-go-live D9 (LiveKit only): per-call failure-exit state shared by
-    # the safetynet watchdog and the LLM gates in the pipeline.
+    # la-only-go-live D9 (LiveKit, cascaded STT/LLM/TTS only): per-call
+    # failure-exit state shared by the safetynet watchdog and the LLM gates.
+    # Realtime pipelines have no STT to stop and no gate slot; their watchdog
+    # keeps a state of its own.
     failure_state = None
-    if workflow_run and workflow_run.mode == WorkflowRunMode.LIVEKIT.value:
+    if (
+        workflow_run
+        and workflow_run.mode == WorkflowRunMode.LIVEKIT.value
+        and not is_realtime
+    ):
         from api.services.pipecat.livekit_failure_exits import CallFailureState
 
         failure_state = CallFailureState()

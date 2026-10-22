@@ -449,7 +449,14 @@ async def execute_cold_transfer(
 
         if decision is TransferDecision.REFER:
             if before_refer is not None:
+                # The bound is for the REFER, not for the prompt before it: a
+                # transfer prompt must not eat into the ring window. The
+                # safetynet's prompt is bounded by its own playback timeout.
+                settle_watchdog.cancel()
                 await before_refer()
+                settle_watchdog = asyncio.create_task(
+                    _transfer_settle_watchdog(engine, room_name, transfer_reason)
+                )
             return await _do_refer(
                 engine, room_name, destination, lk, transfer_reason, play_dialtone
             )

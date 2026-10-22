@@ -12,6 +12,7 @@ the processor types the pipeline actually has.
 """
 
 import asyncio
+import itertools
 import types
 from unittest.mock import AsyncMock, MagicMock
 
@@ -38,8 +39,10 @@ from api.services.pipecat import livekit_safetynet as sn
 from api.services.pipecat.livekit_failure_exits import (
     STT_ERROR_THRESHOLD,
     STT_ERROR_WINDOW_SECONDS,
+    STT_STABLE_CONNECTION_SECONDS,
     CallFailureState,
     ErrorSource,
+    PlaybackOutcome,
     SafetynetLLMGate,
     classify_error_source,
 )
@@ -155,18 +158,20 @@ class FakeEngine:
         if isinstance(frame, TTSSpeakFrame):
             self.log.append(("tts", frame.text))
             if self.tts == "healthy":
-                self.state.playback.note_audio()
-                self.state.playback.note_stopped()
+                self.state.playback.note_started(BotStartedSpeakingFrame())
+                self.state.playback.note_stopped(BotStoppedSpeakingFrame())
             elif self.tts == "stall":
-                self.state.playback.note_audio()
+                self.state.playback.note_started(BotStartedSpeakingFrame())
             elif self.tts == "error":
                 await self.watchdog.on_push_frame(_push(_tts_error(self.services)))
 
     async def end_call_with_reason(self, reason, abort_immediately=False):
         self.log.append(("end", reason, abort_immediately))
 
+    disposed = False
+
     def is_call_disposed(self):
-        return any(entry[0] == "end" for entry in self.log)
+        return self.disposed or any(entry[0] == "end" for entry in self.log)
 
     async def resolve_transfer_call_config(self):
         return {"destination": FALLBACK}
@@ -205,30 +210,38 @@ def refer(monkeypatch):
 
 
 def _call(services, refer, *, tts="healthy"):
-    """A watchdog wired the way run_pipeline wires it, with a fake engine."""
+    """A watchdog built the way run_pipeline builds it, with a fake engine."""
+    from api.enums import WorkflowRunMode
+
     state = CallFailureState(
         playback_start_timeout=START_TIMEOUT, playback_gap_timeout=GAP_TIMEOUT
     )
     stt = FakeSTT(refer.order)
     state.attach_stt(stt)
     engine = FakeEngine(state, tts=tts, services=services)
-
-    async def on_fatal(reason):
-        await sn.midcall_safetynet(
-            engine, room_name=ROOM, reason=reason, workflow_run_id=RUN, state=state
-        )
-
-    wd = sn.SafetynetWatchdog(
-        on_fatal=on_fatal,
-        threshold_seconds=8.0,
-        poll_seconds=999,
-        room_name=ROOM,
-        workflow_run_id=RUN,
-        state=state,
+    run = types.SimpleNamespace(
+        id=RUN,
+        mode=WorkflowRunMode.LIVEKIT.value,
+        initial_context={"room_name": ROOM},
     )
-    engine.watchdog = wd
-    refer.engine = engine
-    return types.SimpleNamespace(state=state, stt=stt, engine=engine, wd=wd)
+    return _Call(state=state, stt=stt, engine=engine, run=run, refer=refer)
+
+
+class _Call(types.SimpleNamespace):
+    """Holds the pieces; ``await call.ready()`` builds the real watchdog."""
+
+
+async def _ready(call):
+    call.wd = await sn.resolve_safetynet_watchdog(call.engine, call.run, call.state)
+    ticks = itertools.count()
+    # Each reading is a second later: back-to-back errors arrive at the STT
+    # reconnect cadence. Tests that need exact times set their own clock.
+    call.wd._clock = lambda: float(next(ticks))
+    call.wd._poll_seconds = 0.02
+    call.wd._threshold = 999.0  # owed-reply silence is not under test here
+    call.engine.watchdog = call.wd
+    call.refer.engine = call.engine
+    return call
 
 
 async def _settle(seconds=0.05):
@@ -289,7 +302,7 @@ def _register_handlers(monkeypatch, engine, watchdog):
 async def test_single_nonfatal_stt_error_does_not_end_the_call(
     monkeypatch, services, refer
 ):
-    call = _call(services, refer)
+    call = await _ready(_call(services, refer))
     on_pipeline_error = _register_handlers(monkeypatch, call.engine, call.wd)
     frame = _stt_error(services)  # e.g. a Gemini Live session ending
     await call.wd.on_push_frame(_push(frame))
@@ -301,7 +314,7 @@ async def test_single_nonfatal_stt_error_does_not_end_the_call(
 
 @pytest.mark.asyncio
 async def test_fatal_error_still_cancels(monkeypatch, services, refer):
-    call = _call(services, refer)
+    call = await _ready(_call(services, refer))
     on_pipeline_error = _register_handlers(monkeypatch, call.engine, call.wd)
     await on_pipeline_error(None, ErrorFrame(error="boom", fatal=True))
     assert ("end", "pipeline_error", True) in call.engine.log
@@ -324,7 +337,7 @@ async def test_without_the_watchdog_errors_keep_cancelling(monkeypatch, services
 @pytest.mark.asyncio
 async def test_stt_errors_reaching_the_threshold_transfer(services, refer):
     t = [0.0]
-    call = _call(services, refer)
+    call = await _ready(_call(services, refer))
     call.wd._clock = lambda: t[0]
     for i in range(STT_ERROR_THRESHOLD):
         t[0] = float(i)  # the 1 s reconnect cadence
@@ -337,7 +350,7 @@ async def test_stt_errors_reaching_the_threshold_transfer(services, refer):
 @pytest.mark.asyncio
 async def test_stt_errors_spread_beyond_the_window_do_not_transfer(services, refer):
     t = [0.0]
-    call = _call(services, refer)
+    call = await _ready(_call(services, refer))
     call.wd._clock = lambda: t[0]
     spacing = STT_ERROR_WINDOW_SECONDS / (STT_ERROR_THRESHOLD - 1) + 0.5
     for i in range(STT_ERROR_THRESHOLD * 2):
@@ -349,10 +362,13 @@ async def test_stt_errors_spread_beyond_the_window_do_not_transfer(services, ref
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("recovery", ["transcription", "reconnected"])
+@pytest.mark.parametrize("recovery", ["transcription", "stable_reconnect"])
 async def test_stt_recovery_resets_the_count(services, refer, recovery):
-    call = _call(services, refer)
-    for _ in range(STT_ERROR_THRESHOLD - 1):
+    t = [0.0]
+    call = await _ready(_call(services, refer))
+    call.wd._clock = lambda: t[0]
+    for i in range(STT_ERROR_THRESHOLD - 1):
+        t[0] = float(i)
         await call.wd.on_push_frame(_push(_stt_error(services)))
     if recovery == "transcription":
         await call.wd.on_push_frame(
@@ -360,6 +376,7 @@ async def test_stt_recovery_resets_the_count(services, refer, recovery):
         )
     else:
         call.wd.note_stt_connected()
+        t[0] += STT_STABLE_CONNECTION_SECONDS  # stayed up, then dropped
     await call.wd.on_push_frame(_push(_stt_error(services)))
     await _settle()
     assert call.engine.log == []
@@ -368,7 +385,7 @@ async def test_stt_recovery_resets_the_count(services, refer, recovery):
 
 @pytest.mark.asyncio
 async def test_one_stt_error_is_counted_once_across_processor_hops(services, refer):
-    call = _call(services, refer)
+    call = await _ready(_call(services, refer))
     frame = _stt_error(services)
     for _ in range(STT_ERROR_THRESHOLD + 2):  # same frame seen at every hop
         await call.wd.on_push_frame(_push(frame))
@@ -382,7 +399,7 @@ async def test_one_stt_error_is_counted_once_across_processor_hops(services, ref
 
 @pytest.mark.asyncio
 async def test_llm_429_transfers_with_prompt_when_tts_works(services, refer):
-    call = _call(services, refer)
+    call = await _ready(_call(services, refer))
     await call.wd.on_push_frame(_push(_llm_429(services)))
     await _until(lambda: call.engine.entries("refer"))
     await _until(lambda: call.engine.entries("end"))
@@ -396,7 +413,7 @@ async def test_llm_429_transfers_with_prompt_when_tts_works(services, refer):
 
 @pytest.mark.asyncio
 async def test_llm_429_transfers_without_prompt_when_tts_unavailable(services, refer):
-    call = _call(services, refer)
+    call = await _ready(_call(services, refer))
     call.state.mark_tts_unavailable("earlier TTS error")
     await call.wd.on_push_frame(_push(_llm_429(services)))
     await _until(lambda: call.engine.entries("end"))
@@ -407,7 +424,7 @@ async def test_llm_429_transfers_without_prompt_when_tts_unavailable(services, r
 @pytest.mark.asyncio
 async def test_llm_429_refer_rejected_ends_with_bye(services, refer):
     refer.result = {"status": "failed", "reason": "sip_refer_rejected"}
-    call = _call(services, refer)
+    call = await _ready(_call(services, refer))
     await call.wd.on_push_frame(_push(_llm_429(services)))
     await _until(lambda: call.engine.entries("end"))
     kinds = [e[0] for e in call.engine.log]
@@ -423,7 +440,7 @@ async def test_llm_429_refer_rejected_tts_unavailable_bye_without_prompt(
     services, refer
 ):
     refer.result = {"status": "failed", "reason": "sip_refer_rejected"}
-    call = _call(services, refer)
+    call = await _ready(_call(services, refer))
     call.state.mark_tts_unavailable("earlier TTS error")
     await call.wd.on_push_frame(_push(_llm_429(services)))
     await _until(lambda: call.engine.entries("bye"))
@@ -437,7 +454,7 @@ async def test_llm_429_refer_rejected_tts_unavailable_bye_without_prompt(
 
 @pytest.mark.asyncio
 async def test_tts_error_transfers_without_prompt(services, refer):
-    call = _call(services, refer)
+    call = await _ready(_call(services, refer))
     await call.wd.on_push_frame(_push(_tts_error(services)))
     await _until(lambda: call.engine.entries("end"))
     assert call.state.tts_unavailable
@@ -447,7 +464,7 @@ async def test_tts_error_transfers_without_prompt(services, refer):
 
 @pytest.mark.asyncio
 async def test_unclassified_error_is_not_silent(services, refer):
-    call = _call(services, refer)
+    call = await _ready(_call(services, refer))
     await call.wd.on_push_frame(_push(ErrorFrame(error="from somewhere else")))
     await _until(lambda: call.engine.entries("refer"))
     assert call.engine.entries("refer")
@@ -456,7 +473,7 @@ async def test_unclassified_error_is_not_silent(services, refer):
 
 @pytest.mark.asyncio
 async def test_single_stt_error_is_not_taken_for_llm_or_unclassified(services, refer):
-    call = _call(services, refer)
+    call = await _ready(_call(services, refer))
     await call.wd.on_push_frame(_push(_stt_error(services, code=1008)))
     await _settle()
     assert call.engine.log == []
@@ -470,7 +487,7 @@ async def test_single_stt_error_is_not_taken_for_llm_or_unclassified(services, r
 @pytest.mark.asyncio
 @pytest.mark.parametrize("tts", ["silent", "stall", "error"])
 async def test_stuck_or_failing_tts_does_not_hold_the_refer(services, refer, tts):
-    call = _call(services, refer, tts=tts)
+    call = await _ready(_call(services, refer, tts=tts))
     loop = asyncio.get_running_loop()
     t0 = loop.time()
     await call.wd.on_push_frame(_push(_llm_429(services)))
@@ -483,7 +500,7 @@ async def test_stuck_or_failing_tts_does_not_hold_the_refer(services, refer, tts
 @pytest.mark.asyncio
 async def test_stuck_tts_and_rejected_refer_bye_within_the_timeout(services, refer):
     refer.result = {"status": "failed", "reason": "sip_refer_rejected"}
-    call = _call(services, refer, tts="silent")
+    call = await _ready(_call(services, refer, tts="silent"))
     loop = asyncio.get_running_loop()
     t0 = loop.time()
     await call.wd.on_push_frame(_push(_llm_429(services)))
@@ -518,19 +535,20 @@ async def _play_long_prompt(state, wd, *, one_shot):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("one_shot", [True, False], ids=["one_shot", "streaming"])
 async def test_healthy_long_prompt_is_not_cut(services, refer, one_shot):
-    call = _call(services, refer, tts="silent")  # playback driven below
-    since = call.state.clock()
+    call = await _ready(_call(services, refer, tts="silent"))  # playback driven below
+    tracker = call.state.playback
     player = asyncio.create_task(
         _play_long_prompt(call.state, call.wd, one_shot=one_shot)
     )
-    played = await call.state.playback.wait_played(
-        since,
+    outcome = await tracker.wait_played(
+        started_mark=tracker.started,
+        user_mark=tracker.user_spoke,
         start_timeout=START_TIMEOUT,
         gap_timeout=GAP_TIMEOUT,
         abort=lambda: call.state.tts_unavailable,
     )
     await player
-    assert played
+    assert outcome is PlaybackOutcome.PLAYED
     assert not call.state.tts_unavailable
     await call.wd.stop()
 
@@ -541,7 +559,7 @@ async def test_healthy_long_prompt_is_not_cut(services, refer, one_shot):
 @pytest.mark.asyncio
 async def test_two_paths_on_one_call_send_one_refer(services, refer):
     """STT threshold and owed-reply silence firing together: one REFER."""
-    call = _call(services, refer)
+    call = await _ready(_call(services, refer))
     for _ in range(STT_ERROR_THRESHOLD):
         await call.wd.on_push_frame(_push(_stt_error(services)))
     await asyncio.gather(
@@ -562,7 +580,7 @@ async def test_two_paths_on_one_call_send_one_refer(services, refer):
 @pytest.mark.asyncio
 async def test_after_refer_stt_is_stopped_and_its_errors_do_nothing(services, refer):
     refer.hang = True  # the REFER is ringing
-    call = _call(services, refer)
+    call = await _ready(_call(services, refer))
     await call.wd.on_push_frame(_push(_llm_429(services)))
     await _until(lambda: call.engine.entries("refer"))
     assert call.stt.cancelled  # no more reconnects, no more failed requests
@@ -576,7 +594,7 @@ async def test_after_refer_stt_is_stopped_and_its_errors_do_nothing(services, re
 
 @pytest.mark.asyncio
 async def test_stt_is_stopped_before_the_refer(services, refer):
-    call = _call(services, refer)
+    call = await _ready(_call(services, refer))
     await call.wd.on_push_frame(_push(_tts_error(services)))
     await _until(lambda: call.engine.entries("refer"))
     assert refer.order == ["stt_stopped", "refer"]
@@ -587,7 +605,7 @@ async def test_stt_is_stopped_before_the_refer(services, refer):
 async def test_end_prompt_after_failed_refer_does_not_reach_the_llm(services, refer):
     """The end prompt is fixed text; the LLM gate is already closed."""
     refer.result = {"status": "failed", "reason": "sip_refer_rejected"}
-    call = _call(services, refer)
+    call = await _ready(_call(services, refer))
     seen_gate = []
     original_queue = call.engine.queue_frame
 
@@ -599,7 +617,7 @@ async def test_end_prompt_after_failed_refer_does_not_reach_the_llm(services, re
     call.engine.task = types.SimpleNamespace(queue_frame=queue_frame)
     await call.wd.on_push_frame(_push(_llm_429(services)))
     await _until(lambda: call.engine.entries("end"))
-    assert seen_gate == [False, True]  # transfer prompt, then the end prompt
+    assert seen_gate == [True, True]  # gated from the trigger on
     await call.wd.stop()
 
 
@@ -608,7 +626,7 @@ async def test_key_failure_combination(services, refer):
     """Shared key dead: STT keeps failing, TTS fails, the REFER is rejected →
     one REFER without prompt, then BYE without the end prompt."""
     refer.result = {"status": "failed", "reason": "sip_refer_rejected"}
-    call = _call(services, refer, tts="error")
+    call = await _ready(_call(services, refer, tts="error"))
     await call.wd.on_push_frame(_push(_tts_error(services)))
     for _ in range(STT_ERROR_THRESHOLD):
         await call.wd.on_push_frame(_push(_stt_error(services, code=1008)))
@@ -653,9 +671,8 @@ async def test_stopping_gemini_stt_latches_its_reconnects(services):
     state = CallFailureState()
     stt = GeminiSTTService(api_key=FAKE_KEY)
     state.attach_stt(stt)
-    await state.stop_stt_and_llm()
+    await state.stop_stt()
     assert stt._stopped  # _connect / reconnect loop no longer open sessions
-    assert state.llm_gate_closed
 
 
 # --- REFER bounds ----------------------------------------------------------
@@ -714,9 +731,249 @@ async def test_refer_timeout_is_a_failure_and_ends_the_call(services, refer):
         "reason": "sip_refer_error",
         "message": "TimeoutError",
     }
-    call = _call(services, refer)
+    call = await _ready(_call(services, refer))
     call.state.mark_tts_unavailable("earlier TTS error")
     await call.wd.on_push_frame(_push(_llm_429(services)))
     await _until(lambda: call.engine.entries("bye"))
     assert [e[0] for e in call.engine.log] == ["refer", "end", "bye"]
     await call.wd.stop()
+
+
+# --- review gate regressions (la-only 1.4 review R1–R9) -----------------------
+
+
+@pytest.mark.asyncio
+async def test_failed_inflight_transfer_rearms_the_watchdog(
+    monkeypatch, services, refer
+):
+    """R1: the safetynet yields to a press-0 transfer; that REFER fails and the
+    call is back with the AI. A still-dead LLM must get its exit again."""
+    from api.services.pipecat import livekit_transfer_flow
+
+    monkeypatch.setattr(livekit_transfer_flow, "TRANSFER_SETTLE_TIMEOUT_SECONDS", 1.0)
+    call = await _ready(_call(services, refer))
+    call.wd._poll_seconds = 0.02
+    call.engine._livekit_transfer_in_progress = True  # press-0 REFER ringing
+    await call.wd.on_push_frame(_push(_llm_429(services)))
+    await _settle(0.1)
+    assert call.engine.log == []  # yielded
+    call.engine._livekit_transfer_in_progress = False  # it failed: back to AI
+    await _settle(0.1)
+    await call.wd.on_push_frame(_push(_llm_429(services)))
+    await _until(lambda: call.engine.entries("refer"))
+    assert len(call.engine.entries("refer")) == 1
+    await call.wd.stop()
+
+
+@pytest.mark.asyncio
+async def test_rearm_waits_for_the_inflight_transfer_and_skips_ended_calls(
+    services, refer
+):
+    call = await _ready(_call(services, refer))
+    call.wd._poll_seconds = 0.02
+    call.engine._livekit_transfer_in_progress = True
+    await call.wd.on_push_frame(_push(_llm_429(services)))
+    await _settle(0.1)
+    assert call.wd._fired  # still spent while the other transfer runs
+    call.engine.disposed = True  # that transfer succeeded and ended the call
+    call.engine._livekit_transfer_in_progress = False
+    await _settle(0.1)
+    assert call.wd._fired
+    await call.wd.stop()
+
+
+@pytest.mark.asyncio
+async def test_no_refer_on_a_call_that_is_already_ending(services, refer):
+    """R8: the goodbye's TTS fails after end_call; no transfer on top of it."""
+    call = await _ready(_call(services, refer))
+    call.engine.disposed = True
+    await call.wd.on_push_frame(_push(_tts_error(services)))
+    await _settle(0.1)
+    assert call.engine.log == []
+
+
+@pytest.mark.asyncio
+async def test_reconnect_that_fails_at_once_does_not_reset_the_count(services, refer):
+    """R2: setup succeeds, the stream is closed straight away, again and again."""
+    t = [0.0]
+    call = await _ready(_call(services, refer))
+    call.wd._clock = lambda: t[0]
+    for i in range(STT_ERROR_THRESHOLD):
+        t[0] = i * 1.2
+        call.wd.note_stt_connected()
+        t[0] += 0.2
+        await call.wd.on_push_frame(_push(_stt_error(services)))
+    await _until(lambda: call.engine.entries("refer"))
+    await call.wd.stop()
+
+
+@pytest.mark.asyncio
+async def test_hung_setup_failures_reach_the_threshold(services, refer):
+    """R3: 5 s setup timeout + 1 s retry → one error every ~6 s."""
+    t = [0.0]
+    call = await _ready(_call(services, refer))
+    call.wd._clock = lambda: t[0]
+    for at in (5.0, 11.0, 17.0):
+        t[0] = at
+        await call.wd.on_push_frame(_push(_stt_error(services)))
+    await _until(lambda: call.engine.entries("refer"))
+    await call.wd.stop()
+
+
+@pytest.mark.asyncio
+async def test_one_failure_reported_twice_counts_once(services, refer):
+    """R7b: Cloud STT pushes two ErrorFrames for one mid-stream failure."""
+    t = [0.0]
+    call = await _ready(_call(services, refer))
+    call.wd._clock = lambda: t[0]
+    for at in (0.0, 0.01, 1.0, 1.01):
+        t[0] = at
+        await call.wd.on_push_frame(_push(_stt_error(services)))
+    await _settle()
+    assert call.engine.log == []  # two failures, not four
+    await call.wd.stop()
+
+
+@pytest.mark.asyncio
+async def test_tail_of_an_interrupted_utterance_is_not_the_prompt(services, refer):
+    """R4: the greeting is still sending heartbeats when the prompt is queued;
+    only speech that starts after the bot fell silent counts."""
+    call = await _ready(_call(services, refer, tts="silent"))
+    await call.wd.on_push_frame(_push(BotStartedSpeakingFrame()))
+    play = asyncio.create_task(call.state.play_bounded(call.engine, "提示"))
+    await asyncio.sleep(0.02)
+    await call.wd.on_push_frame(_push(BotSpeakingFrame()))  # greeting tail
+    await call.wd.on_push_frame(_push(BotStoppedSpeakingFrame()))  # interrupted
+    assert await play is False
+    assert call.state.tts_unavailable  # the prompt itself never played
+
+
+@pytest.mark.asyncio
+async def test_caller_talking_over_the_prompt_does_not_condemn_tts(services, refer):
+    """R5: the caller's speech clears the prompt before it starts."""
+    from pipecat.frames.frames import VADUserStartedSpeakingFrame
+
+    call = await _ready(_call(services, refer, tts="silent"))
+    play = asyncio.create_task(call.state.play_bounded(call.engine, "提示"))
+    await asyncio.sleep(0.02)
+    await call.wd.on_push_frame(
+        _push(VADUserStartedSpeakingFrame(start_secs=0.2, timestamp=0.0))
+    )
+    assert await play is False
+    assert not call.state.tts_unavailable
+
+
+@pytest.mark.asyncio
+async def test_closed_gate_holds_back_deferred_function_calls():
+    """R9: the LLM releases deferred tool calls on an upstream BotStopped."""
+    state = CallFailureState()
+    gate = SafetynetLLMGate(state)
+    pushed = []
+
+    async def push_frame(frame, d=FrameDirection.DOWNSTREAM):
+        pushed.append((frame, d))
+
+    gate.push_frame = push_frame
+    state.llm_gate_closed = True
+    up = BotStoppedSpeakingFrame()
+    down = BotStoppedSpeakingFrame()
+    await gate.process_frame(up, FrameDirection.UPSTREAM)
+    await gate.process_frame(down, FrameDirection.DOWNSTREAM)
+    assert pushed == [(down, FrameDirection.DOWNSTREAM)]
+
+
+@pytest.mark.asyncio
+async def test_settle_bound_starts_after_the_transfer_prompt(monkeypatch):
+    """R6: a long prompt before the REFER must not count against its bound."""
+    from api.services.pipecat import livekit_transfer_flow
+
+    monkeypatch.setattr(livekit_transfer_flow, "TRANSFER_SETTLE_TIMEOUT_SECONDS", 0.2)
+    ended = []
+
+    async def end_call_with_reason(reason, abort_immediately=False):
+        ended.append(reason)
+
+    async def queue_frame(frame, *a):
+        pass
+
+    engine = types.SimpleNamespace(
+        task=types.SimpleNamespace(queue_frame=queue_frame),
+        end_call_with_reason=end_call_with_reason,
+        is_call_disposed=lambda: bool(ended),
+    )
+
+    async def long_prompt():
+        await asyncio.sleep(0.3)
+
+    async def refer_after_ringing(room_name, destination, **kwargs):
+        await asyncio.sleep(0.1)
+        return {"status": "success"}
+
+    from api.services.pipecat import livekit_cold_transfer
+
+    monkeypatch.setattr(
+        livekit_cold_transfer, "cold_transfer_to_human", refer_after_ringing
+    )
+    result = await livekit_transfer_flow.execute_cold_transfer(
+        engine,
+        room_name=ROOM,
+        destination=FALLBACK,
+        before_refer=long_prompt,
+        transfer_reason="safetynet",
+    )
+    assert result["status"] == "success"
+    assert livekit_transfer_flow.TRANSFER_UNKNOWN_REASON not in ended
+
+
+@pytest.mark.asyncio
+async def test_stt_threshold_with_tts_down_and_refer_rejected(services, refer):
+    """SEC-43: the STT path, too, ends without the end prompt when TTS is down."""
+    refer.result = {"status": "failed", "reason": "sip_refer_rejected"}
+    call = await _ready(_call(services, refer))
+    call.state.mark_tts_unavailable("earlier TTS error")
+    for _ in range(STT_ERROR_THRESHOLD):
+        await call.wd.on_push_frame(_push(_stt_error(services)))
+    await _until(lambda: call.engine.entries("bye"))
+    assert call.engine.log == [
+        ("refer", True),
+        ("end", "pipeline_error", True),
+        ("bye", ROOM),
+    ]
+    await call.wd.stop()
+
+
+def test_build_pipeline_puts_the_gates_around_the_llm():
+    from api.services.pipecat.pipeline_builder import build_pipeline
+
+    marks = {name: types.SimpleNamespace(name=name) for name in ("stt", "llm", "tts")}
+    transport = types.SimpleNamespace(
+        input=lambda: types.SimpleNamespace(name="in"),
+        output=lambda: types.SimpleNamespace(name="out"),
+    )
+    captured = {}
+
+    import api.services.pipecat.pipeline_builder as pb
+
+    original = pb.Pipeline
+    pb.Pipeline = lambda processors: captured.setdefault("p", processors)
+    try:
+        state = CallFailureState()
+        build_pipeline(
+            transport,
+            marks["stt"],
+            object(),
+            marks["llm"],
+            marks["tts"],
+            object(),
+            object(),
+            object(),
+            object(),
+            failure_state=state,
+        )
+    finally:
+        pb.Pipeline = original
+    processors = captured["p"]
+    i = processors.index(marks["llm"])
+    assert isinstance(processors[i - 1], SafetynetLLMGate)
+    assert isinstance(processors[i + 1], SafetynetLLMGate)
+    assert processors[i - 1]._state is state and processors[i + 1]._state is state

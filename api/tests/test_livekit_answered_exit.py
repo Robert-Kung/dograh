@@ -16,6 +16,7 @@ from api.services.observability import call_events
 from api.services.pipecat import capacity_gate
 from api.services.pipecat import livekit_safetynet as sn
 from api.services.pipecat.livekit_cold_transfer import SIP_KIND
+from api.services.pipecat.livekit_failure_exits import CallFailureState
 from api.tests.support.answer_fakes import install
 
 ROOM = "cs-_+886212345678_abc"
@@ -406,9 +407,16 @@ async def test_midcall_safetynet_error_takes_the_same_exit(
     from api.services.pipecat import livekit_transfer_flow
 
     monkeypatch.setattr(livekit_transfer_flow, "execute_cold_transfer", broken)
-    engine = types.SimpleNamespace(task=types.SimpleNamespace(queue_frame=broken))
+    engine = types.SimpleNamespace(
+        task=types.SimpleNamespace(queue_frame=broken),
+        is_call_disposed=lambda: False,
+    )
     await sn.midcall_safetynet(
-        engine, room_name=ROOM, reason="bot_silence", workflow_run_id=11
+        engine,
+        room_name=ROOM,
+        reason="bot_silence",
+        workflow_run_id=11,
+        state=CallFailureState(),
     )
     assert log == [
         ("answer", ROOM),
