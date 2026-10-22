@@ -13,7 +13,7 @@ from contextlib import asynccontextmanager
 from livekit import api
 from livekit.protocol.models import ParticipantInfo
 from livekit.protocol.room import ListParticipantsRequest
-from livekit.protocol.sip import TransferSIPParticipantRequest
+from livekit.protocol.sip import SIPTransferStatus, TransferSIPParticipantRequest
 
 SIP_KIND = ParticipantInfo.Kind.SIP
 
@@ -116,7 +116,7 @@ async def cold_transfer_to_human(
                     "action": "transfer_failed",
                     "reason": "no_sip_caller",
                 }
-            await client.sip.transfer_sip_participant(
+            resp = await client.sip.transfer_sip_participant(
                 TransferSIPParticipantRequest(
                     room_name=room_name,
                     participant_identity=identity,
@@ -125,6 +125,15 @@ async def cold_transfer_to_human(
                     headers=headers or {},
                 )
             )
+            # Servers that report the outcome in the response may say FAILED
+            # without raising; older ones leave it unset and raise instead.
+            if getattr(resp, "status", None) == SIPTransferStatus.STS_TRANSFER_FAILED:
+                return {
+                    "status": "failed",
+                    "action": "transfer_failed",
+                    "reason": "sip_refer_rejected",
+                    "message": f"{resp.reason} (SIP {resp.sip_status})",
+                }
             return {"status": "success", "action": "transferred"}
     except Exception as e:
         return {

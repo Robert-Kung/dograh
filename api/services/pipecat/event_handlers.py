@@ -74,8 +74,12 @@ def register_event_handlers(
     user_provider_id: str | None = None,
     integration_runtime_sessions: list[IntegrationRuntimeSession] | None = None,
     consent_gate=None,
+    safetynet_watchdog=None,
 ):
     """Register all event handlers for transport and task events.
+
+    ``safetynet_watchdog`` (LIVEKIT runs with the watchdog installed) owns the
+    exit for every non-fatal pipeline error; see ``on_pipeline_error``.
 
     Returns:
         In-memory recording buffers for use by other handlers.
@@ -222,6 +226,13 @@ def register_event_handlers(
     @task.event_handler("on_pipeline_error")
     async def on_pipeline_error(_task: PipelineWorker, frame: Frame):
         logger.warning(f"Pipeline error for workflow run {workflow_run_id}: {frame}")
+        if safetynet_watchdog is not None and not getattr(frame, "fatal", False):
+            # la-only-go-live D9: a non-fatal error is not a reason to hang up.
+            # Cancelling here cut the caller off on the first STT reconnect
+            # (a Gemini Live session ending is one) with no transfer and no
+            # word said. The watchdog sees the same frame and picks the exit:
+            # transfer after repeated STT errors, at once for TTS/LLM/other.
+            return
         try:
             workflow_run = await db_client.get_workflow_run_by_id(workflow_run_id)
             if workflow_run and workflow_run.campaign_id:
