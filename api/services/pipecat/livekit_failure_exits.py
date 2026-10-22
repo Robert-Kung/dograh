@@ -129,8 +129,9 @@ class PlaybackTracker:
     """Output-transport playback progress, for bounded failure-path prompts.
 
     Frames are observed once per processor hop and delivered through the
-    observer queue, so each distinct frame counts once and progress is read
-    as counts, not clock comparisons.
+    observer queue, so a frame counts once per id (the transport's upstream
+    and downstream copies are two ids — both counters move in step) and
+    progress is read as counts, not clock comparisons.
     """
 
     def __init__(self, clock: Callable[[], float] = time.monotonic):

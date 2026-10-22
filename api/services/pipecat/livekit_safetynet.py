@@ -464,25 +464,31 @@ async def midcall_safetynet(
     Runs the shared cold-transfer flow with ``schedule=None`` so the transfer
     happens regardless of business hours. Exits follow la-only-go-live D9:
 
-    - the LLM is gated off from the trigger on (a transfer is under way);
+    - once the transfer flow owns the call (``before_refer``), the LLM is
+      gated off and whatever holds the floor is interrupted;
     - the transfer prompt plays only while TTS is usable, bounded by the
       playback timeout (a timeout marks TTS unavailable and moves on);
     - STT stops as the REFER goes out, so a dead key stops costing a failed
       request per second;
-    - a failed REFER ends the call: with TTS unavailable the room is deleted
-      straight away (no end prompt to wait on), otherwise after the bounded
-      end prompt.
+    - a failed REFER ends the call: after the bounded end prompt when the
+      transfer prompt got through, otherwise (TTS unavailable, or the
+      transfer prompt never played out) the room is deleted straight away.
 
-    Does nothing on a call that is already ending. Returns ``"yielded"`` when
-    a voice/press-0 transfer is in flight: that transfer owns the exit, and
-    if it fails the call is back with the AI, so the caller must re-arm.
+    On a call that is already ending, only makes sure the end happens within
+    a bound. Returns ``"yielded"`` when a voice/press-0 transfer is in
+    flight: that transfer owns the exit, nothing here has touched the call,
+    and if it fails the call is back with the AI, so the caller must re-arm.
 
     If the engine is too broken for any of this (``execute_cold_transfer``'s
     never-raises contract doesn't survive a half-dead engine), falls back to
     the server-side path. Never raises.
     """
     if engine.is_call_disposed():
-        logger.info(f"call already ending; safetynet not needed for {reason}")
+        # No transfer on top of an ending call (e.g. the goodbye's TTS
+        # failed) — but the ending itself can stall, e.g. the final variable
+        # extraction on the same dead LLM; bound it.
+        logger.info(f"call already ending; safetynet only bounds it ({reason})")
+        spawn(_force_end_after_deadline(engine, room_name, workflow_run_id))
         return None
     if getattr(engine, "_livekit_transfer_in_progress", False):
         logger.info(f"safetynet yielded to in-flight transfer for {room_name}")
@@ -498,8 +504,15 @@ async def midcall_safetynet(
     def _elapsed() -> int:
         return int((time.monotonic() - started) * 1000)
 
+    # None: no transfer prompt was attempted (no REFER, e.g. a refused
+    # destination); otherwise whether it played out.
+    announced: Optional[bool] = None
+
     async def _before_refer() -> None:
-        await state.play_bounded(engine, _ANNOUNCE_MESSAGE)
+        nonlocal announced
+        state.llm_gate_closed = True
+        await _interrupt_stalled_turn(engine)
+        announced = await state.play_bounded(engine, _ANNOUNCE_MESSAGE)
         await state.stop_stt()
 
     try:
@@ -512,7 +525,7 @@ async def midcall_safetynet(
 
         from api.services.pipecat.livekit_transfer_flow import execute_cold_transfer
 
-        state.llm_gate_closed = True
+        # A stalled LLM stream would hold the prompt and the REFER back.
         await _interrupt_stalled_turn(engine)
 
         destination = fallback_queue()
@@ -529,6 +542,7 @@ async def midcall_safetynet(
             destination=destination,
             schedule=None,  # bypass the business-hours gate: back_to_ai is dead air here
             before_refer=_before_refer,
+            before_refer_bounded=True,  # play_bounded carries its own bound
             transfer_reason="safetynet",
             play_dialtone=True,  # LiveKit-made tone: no Google service needed
         )
@@ -543,9 +557,8 @@ async def midcall_safetynet(
             return None
         if result.get("reason") == "already_transferring":
             # A voice/press-0 transfer started since the check above; it owns
-            # the call's exit, and the AI needs its LLM back if it fails.
+            # the call's exit. _before_refer never ran, so nothing to undo.
             logger.info(f"safetynet yielded to in-flight transfer for {room_name}")
-            state.llm_gate_closed = False
             release(workflow_run_id)
             return "yielded"
         if getattr(engine, "_livekit_caller_left", False) is True:
@@ -566,10 +579,13 @@ async def midcall_safetynet(
         await state.stop_stt()
         from pipecat.utils.enums import EndTaskReason
 
-        if not state.tts_unavailable:
-            await state.play_bounded(engine, _FAILURE_MESSAGE)
-        if state.tts_unavailable:
-            # TTS unavailable: BYE now, no end prompt to wait on (D9 SEC-35).
+        # The end prompt only when there is reason to think it will be heard:
+        # if the transfer prompt did not get through, the EndFrame would only
+        # queue behind the same stuck or cut-off TTS (D9 SEC-35).
+        ended_with_prompt = announced is not False and await state.play_bounded(
+            engine, _FAILURE_MESSAGE
+        )
+        if not ended_with_prompt:
             await engine.end_call_with_reason(
                 EndTaskReason.PIPELINE_ERROR.value, abort_immediately=True
             )
@@ -805,21 +821,22 @@ class SafetynetWatchdog(BaseObserver):
 
         A failed voice/press-0 transfer hands the call back to the AI; with
         the watchdog spent, a still-broken STT/LLM would then have no exit
-        at all. The wait is bounded by the transfer flow's own settle bound.
+        at all. The wait ends when the flow clears its flag or the call ends
+        — a flow stuck past its settle bound ends the call itself
+        (``transfer_unknown``). The AI owes the caller a word about the failed
+        transfer, so the silence clock starts afresh.
         """
-        from api.services.pipecat.livekit_transfer_flow import (
-            TRANSFER_SETTLE_TIMEOUT_SECONDS,
-        )
-
-        deadline = time.monotonic() + TRANSFER_SETTLE_TIMEOUT_SECONDS + 5.0
         while getattr(engine, "_livekit_transfer_in_progress", False):
-            if time.monotonic() > deadline:
-                break
+            if self._stopped or engine.is_call_disposed():
+                return
             await asyncio.sleep(self._poll_seconds)
         if self._stopped or engine.is_call_disposed():
             return
         self.state.stt_errors.reset()
         self._fired = False
+        self._arm()
+        if self._monitor is not None:
+            self._monitor.cancel()
         self._monitor = asyncio.create_task(self._run_monitor())
 
     def _arm(self) -> None:

@@ -13,6 +13,7 @@ the processor types the pipeline actually has.
 
 import asyncio
 import itertools
+import time
 import types
 from unittest.mock import AsyncMock, MagicMock
 
@@ -152,7 +153,9 @@ class FakeEngine:
         self.services = services
         self.log = []
         self._livekit_transfer_in_progress = False
-        self.task = types.SimpleNamespace(queue_frame=self.queue_frame)
+        self.task = types.SimpleNamespace(
+            queue_frame=self.queue_frame, has_finished=lambda: True
+        )
 
     async def queue_frame(self, frame, direction=FrameDirection.DOWNSTREAM):
         if isinstance(frame, TTSSpeakFrame):
@@ -783,13 +786,21 @@ async def test_rearm_waits_for_the_inflight_transfer_and_skips_ended_calls(
 
 
 @pytest.mark.asyncio
-async def test_no_refer_on_a_call_that_is_already_ending(services, refer):
-    """R8: the goodbye's TTS fails after end_call; no transfer on top of it."""
+async def test_no_refer_on_a_call_that_is_already_ending(monkeypatch, services, refer):
+    """R8: the goodbye's TTS fails after end_call; no transfer on top of it —
+    but the ending is bounded (it may be stuck on the same dead LLM)."""
+    bounded = []
+
+    async def fake_force_end(engine, room_name, workflow_run_id):
+        bounded.append(room_name)
+
+    monkeypatch.setattr(sn, "_force_end_after_deadline", fake_force_end)
     call = await _ready(_call(services, refer))
     call.engine.disposed = True
     await call.wd.on_push_frame(_push(_tts_error(services)))
     await _settle(0.1)
     assert call.engine.log == []
+    assert bounded == [ROOM]
 
 
 @pytest.mark.asyncio
@@ -919,6 +930,7 @@ async def test_settle_bound_starts_after_the_transfer_prompt(monkeypatch):
         room_name=ROOM,
         destination=FALLBACK,
         before_refer=long_prompt,
+        before_refer_bounded=True,
         transfer_reason="safetynet",
     )
     assert result["status"] == "success"
@@ -977,3 +989,127 @@ def test_build_pipeline_puts_the_gates_around_the_llm():
     assert isinstance(processors[i - 1], SafetynetLLMGate)
     assert isinstance(processors[i + 1], SafetynetLLMGate)
     assert processors[i - 1]._state is state and processors[i + 1]._state is state
+
+
+# --- recheck regressions (la-only 1.4 recheck R13–R17, R29) -------------------
+
+
+@pytest.mark.asyncio
+async def test_late_yield_touches_nothing_and_releases_the_latch(
+    monkeypatch, services, refer
+):
+    """A voice transfer wins the race inside execute_cold_transfer: the
+    safetynet has not gated the LLM, interrupted, or stopped STT."""
+    from api.services.pipecat import livekit_transfer_flow
+
+    async def already(engine, **kwargs):
+        return {"status": "failed", "reason": "already_transferring"}
+
+    monkeypatch.setattr(livekit_transfer_flow, "execute_cold_transfer", already)
+    call = await _ready(_call(services, refer))
+    outcome = await sn.midcall_safetynet(
+        call.engine,
+        room_name=ROOM,
+        reason="llm_error",
+        workflow_run_id=RUN,
+        state=call.state,
+    )
+    assert outcome == "yielded"
+    assert not call.state.llm_gate_closed and not call.stt.cancelled
+    assert sn.claim(RUN)  # released
+    await call.wd.stop()
+
+
+@pytest.mark.asyncio
+async def test_rearm_restarts_the_silence_clock(services, refer):
+    """After a failed press-0 transfer the AI owes the caller a word; if it
+    stays silent, bot_silence transfers — not at once, and not never."""
+    call = await _ready(_call(services, refer))
+    call.wd._clock = time.monotonic
+    call.engine._livekit_transfer_in_progress = True
+    await call.wd.on_push_frame(_push(_llm_429(services)))  # yields
+    await _settle(0.05)
+    call.wd._threshold = 0.3
+    call.engine._livekit_transfer_in_progress = False  # it failed: back to AI
+    await _settle(0.1)
+    assert call.engine.entries("refer") == []  # not immediately
+    await _until(lambda: call.engine.entries("refer"))
+    await call.wd.stop()
+
+
+@pytest.mark.asyncio
+async def test_rearm_gives_up_when_the_call_ends_meanwhile(services, refer):
+    call = await _ready(_call(services, refer))
+    call.engine._livekit_transfer_in_progress = True  # stuck, never clears
+    await call.wd.on_push_frame(_push(_llm_429(services)))
+    await _settle(0.05)
+    call.engine.disposed = True  # its settle bound ended the call
+    await _settle(0.1)
+    assert call.wd._fired
+    await call.wd.stop()
+
+
+@pytest.mark.asyncio
+async def test_voice_transfer_prompt_stays_inside_the_settle_bound(monkeypatch):
+    """R14: only the safetynet's self-bounded prompt pauses the bound."""
+    from api.services.pipecat import livekit_cold_transfer, livekit_transfer_flow
+
+    monkeypatch.setattr(livekit_transfer_flow, "TRANSFER_SETTLE_TIMEOUT_SECONDS", 0.1)
+    ended = []
+
+    async def end_call_with_reason(reason, abort_immediately=False):
+        ended.append(reason)
+
+    async def queue_frame(frame, *a):
+        pass
+
+    engine = types.SimpleNamespace(
+        task=types.SimpleNamespace(queue_frame=queue_frame),
+        end_call_with_reason=end_call_with_reason,
+        is_call_disposed=lambda: bool(ended),
+    )
+
+    async def stuck_recording_fetch():
+        await asyncio.sleep(0.3)
+
+    async def refer_ok(room_name, destination, **kwargs):
+        return {"status": "success"}
+
+    monkeypatch.setattr(livekit_cold_transfer, "cold_transfer_to_human", refer_ok)
+    await livekit_transfer_flow.execute_cold_transfer(
+        engine,
+        room_name=ROOM,
+        destination=FALLBACK,
+        before_refer=stuck_recording_fetch,
+        transfer_reason="voice_tool",
+    )
+    assert livekit_transfer_flow.TRANSFER_UNKNOWN_REASON in ended
+
+
+@pytest.mark.asyncio
+async def test_transfer_prompt_talked_over_then_refer_rejected_byes_at_once(
+    services, refer
+):
+    """R17: the transfer prompt never played out (the caller spoke into a
+    stuck TTS) → after a rejected REFER, BYE without the end prompt."""
+    from pipecat.frames.frames import VADUserStartedSpeakingFrame
+
+    refer.result = {"status": "failed", "reason": "sip_refer_rejected"}
+    call = await _ready(_call(services, refer, tts="silent"))
+    original = call.engine.queue_frame
+
+    async def queue_frame(frame, direction=FrameDirection.DOWNSTREAM):
+        await original(frame, direction)
+        if isinstance(frame, TTSSpeakFrame):
+            await call.wd.on_push_frame(
+                _push(VADUserStartedSpeakingFrame(start_secs=0.2, timestamp=0.0))
+            )
+
+    call.engine.task = types.SimpleNamespace(
+        queue_frame=queue_frame, has_finished=lambda: True
+    )
+    await call.wd.on_push_frame(_push(_llm_429(services)))
+    await _until(lambda: call.engine.entries("bye"))
+    assert [e[0] for e in call.engine.log] == ["tts", "refer", "end", "bye"]
+    assert not call.state.tts_unavailable  # not blamed, but not retried either
+    await call.wd.stop()

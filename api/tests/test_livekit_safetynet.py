@@ -518,13 +518,15 @@ async def test_midcall_yields_to_inflight_transfer(monkeypatch, events):
         },
     )
     engine, _, calls = _fake_engine()
-    await midcall_safetynet(
+    outcome = await midcall_safetynet(
         engine,
         room_name="cs-+886912",
         reason="fatal_error",
         workflow_run_id=11,
         state=engine.failure_state,
     )
+    assert outcome == "yielded"  # the watchdog re-arms on this
+    assert claim(11)  # latch released for the next trigger
     assert calls == []  # the in-flight transfer owns the exit
     assert [e["event"] for e in events] == ["safetynet.triggered"]
 

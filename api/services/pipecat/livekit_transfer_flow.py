@@ -300,6 +300,7 @@ async def execute_cold_transfer(
     unavailable_message: str | None = None,
     unavailable_announce_limit: int | None = None,
     play_dialtone: bool = False,
+    before_refer_bounded: bool = False,
 ) -> dict:
     """Run the shared cold-transfer flow and return a structured result (never raises).
 
@@ -329,6 +330,9 @@ async def execute_cold_transfer(
             AI ↔ gate forever (C4, default 2).
         play_dialtone: Have LiveKit play a dial tone to the caller while the
             REFER is pending (the safetynet path: no Google TTS needed).
+        before_refer_bounded: ``before_refer`` bounds itself (the safetynet's
+            playback-timed prompt); the settle bound then pauses while it runs,
+            so a prompt cannot eat into the REFER's ring window.
     """
     if not valid_destination(destination):
         # Pre-flight failure never reaches _do_refer — emit here so a config
@@ -448,15 +452,14 @@ async def execute_cold_transfer(
             decision = TransferDecision.AFTER_HOURS_BACK_TO_AI
 
         if decision is TransferDecision.REFER:
-            if before_refer is not None:
-                # The bound is for the REFER, not for the prompt before it: a
-                # transfer prompt must not eat into the ring window. The
-                # safetynet's prompt is bounded by its own playback timeout.
+            if before_refer is not None and before_refer_bounded:
                 settle_watchdog.cancel()
                 await before_refer()
                 settle_watchdog = asyncio.create_task(
                     _transfer_settle_watchdog(engine, room_name, transfer_reason)
                 )
+            elif before_refer is not None:
+                await before_refer()
             return await _do_refer(
                 engine, room_name, destination, lk, transfer_reason, play_dialtone
             )
