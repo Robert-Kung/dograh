@@ -66,6 +66,23 @@ def _reset_latch():
     yield
 
 
+@pytest.fixture(autouse=True)
+async def _no_leaked_background_tasks():
+    """The test loop is session-scoped: an exit left running here (a REFER
+    still ringing, a forced-end deadline) would outlive the test and block
+    other suites that drain ``api.utils.background``."""
+    from api.utils import background
+
+    before = set(background._background_tasks)
+    yield
+    leaked = [
+        t for t in background._background_tasks if t not in before and not t.done()
+    ]
+    for t in leaked:
+        t.cancel()
+    await asyncio.gather(*leaked, return_exceptions=True)
+
+
 @pytest.fixture(scope="module")
 def services():
     return types.SimpleNamespace(
