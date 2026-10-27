@@ -865,7 +865,9 @@ class PipecatEngine:
                         f"Failed to fetch audio greeting {greeting_value}, "
                         "falling back to LLM generation"
                     )
-                elif greeting_value and self.task is not None:
+                elif (
+                    greeting_type == "text" and greeting_value and self.task is not None
+                ):
                     logger.debug("Playing text greeting via TTS")
                     # append_to_context=True so the assistant aggregator commits
                     # the greeting to the LLM context once TTS finishes; without

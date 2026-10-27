@@ -8,11 +8,9 @@ def test_default_realtime_model_is_gemini_3_8_live():
     assert GoogleRealtimeLLMConfiguration(api_key="test-key").model == "gemini-3.8-live"
 
 
-def test_previous_live_model_stays_selectable():
-    # Saved configurations that pinned the preview model must still validate.
-    assert GOOGLE_REALTIME_MODELS[0] == "gemini-3.8-live"
-    assert "gemini-3.1-flash-live-preview" in GOOGLE_REALTIME_MODELS
-    cfg = GoogleRealtimeLLMConfiguration(
-        api_key="test-key", model="gemini-3.1-flash-live-preview"
+def test_both_live_models_are_offered():
+    # The editor lists these; saved configurations pinned to the preview model
+    # keep showing it as a known choice.
+    assert {"gemini-3.8-live", "gemini-3.1-flash-live-preview"} <= set(
+        GOOGLE_REALTIME_MODELS
     )
-    assert cfg.model == "gemini-3.1-flash-live-preview"

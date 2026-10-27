@@ -40,6 +40,15 @@ from pipecat.services.llm_service import FunctionCallFromLLM
 from pipecat.utils.tracing.service_decorators import traced_gemini_live
 
 
+def _ends_with_model_text(turns: list, text: str) -> bool:
+    if not turns or getattr(turns[-1], "role", None) != "model":
+        return False
+    parts = getattr(turns[-1], "parts", None) or []
+    return (
+        "".join(getattr(p, "text", None) or "" for p in parts).strip() == text.strip()
+    )
+
+
 class DograhGeminiLiveLLMService(GeminiLiveLLMService):
     """Gemini Live with Dograh engine integration quirks. See module docstring."""
 
@@ -196,9 +205,9 @@ class DograhGeminiLiveLLMService(GeminiLiveLLMService):
         await self._create_prerecorded_greeting_response(transcript)
 
     async def _create_prerecorded_greeting_response(self, transcript: str | None):
-        if self._disconnecting:
-            return
-        if not self._session:
+        if self._disconnecting or not self._session:
+            # Mid-reconnect counts as not ready: keep the seed for the next
+            # session instead of dropping it.
             self._pending_prerecorded_greeting = (transcript,)
             self._run_llm_when_session_ready = True
             return
@@ -208,7 +217,9 @@ class DograhGeminiLiveLLMService(GeminiLiveLLMService):
         turns = list(
             adapter.get_llm_invocation_params(self._context).get("messages", [])
         )
-        if transcript:
+        if transcript and not _ends_with_model_text(turns, transcript):
+            # A late session finds the greeting already committed by the
+            # assistant aggregator; seed it once.
             turns.append(Content(role="model", parts=[Part(text=transcript)]))
         if not self._is_gemini_3 and (
             not turns or getattr(turns[-1], "role", None) != "user"

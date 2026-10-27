@@ -475,13 +475,17 @@ class TestStartGreeting:
         assert isinstance(queued_frame, LLMContextFrame)
         assert queued_frame.context is context
 
-    # ─── Tests: Transition Speech (Pipeline) ────────────────────────
-
-    async def _open_with_recorded_greeting(self, llm, workflow: WorkflowGraph):
+    async def _open_with_recorded_greeting(
+        self, llm, workflow: WorkflowGraph, order: list | None = None
+    ):
         task = Mock()
         task.queue_frame = AsyncMock()
         transport_output = Mock()
-        transport_output.queue_frame = AsyncMock()
+        transport_output.queue_frame = AsyncMock(
+            side_effect=lambda frame: (
+                order.append("audio") if order is not None else None
+            )
+        )
         context = LLMContext()
         engine = PipecatEngine(
             llm=llm,
@@ -516,13 +520,48 @@ class TestStartGreeting:
         llm.queue_frame = AsyncMock()
         llm.handle_prerecorded_greeting = AsyncMock()
 
-        result, context = await self._open_with_recorded_greeting(llm, text_workflow)
+        order = []
+        llm.handle_prerecorded_greeting.side_effect = lambda *a: order.append("seed")
+
+        result, context = await self._open_with_recorded_greeting(
+            llm, text_workflow, order=order
+        )
 
         assert result == "greeting"
+        # The recording is queued to the transport before the session is seeded.
+        assert order[0] == "audio" and order[-1] == "seed"
         llm.handle_prerecorded_greeting.assert_awaited_once_with(
             context, "您好，本通電話將會錄音。"
         )
         llm.queue_frame.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_recorded_greeting_without_transport_is_not_spoken_as_text(
+        self, text_workflow: WorkflowGraph
+    ):
+        """No output transport (text chat): never TTS the recording id."""
+        llm = Mock(spec=["queue_frame"])
+        llm.queue_frame = AsyncMock()
+        task = Mock()
+        task.queue_frame = AsyncMock()
+        engine = PipecatEngine(
+            llm=llm,
+            context=LLMContext(),
+            workflow=text_workflow,
+            call_context_vars={},
+            workflow_run_id=1,
+        )
+        engine.set_task(task)
+        engine.get_node_greeting = lambda node_id: ("audio", "7")
+
+        result = await engine.queue_node_opening(
+            node_id=text_workflow.start_node_id,
+            previous_node_id=None,
+            generate_if_no_greeting=True,
+        )
+
+        assert result == "llm"
+        task.queue_frame.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_recorded_greeting_is_a_no_op_for_text_llms(
@@ -535,6 +574,9 @@ class TestStartGreeting:
 
         assert result == "greeting"
         llm.queue_frame.assert_not_awaited()
+
+
+# ─── Tests: Transition Speech (Pipeline) ────────────────────────
 
 
 class TestTransitionSpeech:

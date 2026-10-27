@@ -119,3 +119,49 @@ async def test_untranscribed_recording_still_opens_the_input_gate():
     assert all(getattr(t, "role", None) != "model" for t in _sent_turns(session)[0])
     assert service._ready_for_realtime_input is True
     assert service._handled_initial_context is True
+
+
+@pytest.mark.asyncio
+async def test_late_session_seeds_an_already_committed_greeting_once():
+    service = _make_service()
+    context = _context()
+    await service.handle_prerecorded_greeting(context, GREETING)
+    # Playback drained before the session opened: the aggregator committed it.
+    context.add_message({"role": "assistant", "content": GREETING})
+
+    session = _FakeSession()
+    await service._handle_session_ready(session)
+
+    turns, _ = _sent_turns(session)
+    model_turns = [t for t in turns if t.role == "model"]
+    assert [t.parts[0].text for t in model_turns] == [GREETING]
+
+
+@pytest.mark.asyncio
+async def test_greeting_during_a_reconnect_is_kept_for_the_next_session():
+    service = _make_service()
+    service._session = _FakeSession()
+    service._disconnecting = True
+
+    await service.handle_prerecorded_greeting(_context(), GREETING)
+
+    assert service._pending_prerecorded_greeting == (GREETING,)
+    service._disconnecting = False
+    session = _FakeSession()
+    await service._handle_session_ready(session)
+    assert _sent_turns(session)[0][-1].parts[0].text == GREETING
+
+
+@pytest.mark.asyncio
+async def test_failed_seed_reports_an_error_instead_of_going_quiet():
+    # C4: the ErrorFrame from push_error is what the LIVEKIT watchdog turns
+    # into a transfer.
+    service = _make_service()
+    session = _FakeSession()
+    session.send_client_content.side_effect = RuntimeError("socket closed")
+    service._session = session
+
+    await service.handle_prerecorded_greeting(_context(), GREETING)
+
+    service.push_error.assert_awaited()
+    session.send_client_content.assert_awaited_once()
