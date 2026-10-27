@@ -10,6 +10,7 @@ import pytest
 
 from api.services.pipecat import livekit_dispatcher, livekit_safetynet
 from api.services.pipecat.livekit_dispatcher import DispatchDedup
+from api.services.pipecat.livekit_failure_exits import CallFailureState
 
 # --- D-02: the TW hint only applies to national format ---------------------
 
@@ -233,7 +234,8 @@ async def test_midcall_safetynet_quiet_when_caller_left_during_transfer(monkeypa
         _livekit_caller_left = True  # the hangup handler deferred to the flow
 
         def is_call_disposed(self):
-            return True
+            # Still live when the safetynet starts; the flow ended it since.
+            return False
 
     async def failed_transfer(engine, **kw):
         return {"status": "failed", "reason": "no_sip_caller"}
@@ -244,7 +246,11 @@ async def test_midcall_safetynet_quiet_when_caller_left_during_transfer(monkeypa
     )
     engine = Engine()
     await livekit_safetynet.midcall_safetynet(
-        engine, room_name="cs-x", reason="bot_silence", workflow_run_id=987654
+        engine,
+        room_name="cs-x",
+        reason="bot_silence",
+        workflow_run_id=987654,
+        state=CallFailureState(),
     )
     assert "safetynet.terminated" not in emitted
     assert "safetynet.transfer_failed" not in emitted

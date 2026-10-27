@@ -108,6 +108,7 @@ class Press0Gate(FrameProcessor):
                 alternate_destination=self._alternate_destination,
                 after_hours_message=self._after_hours_message,
                 transfer_reason="press0",
+                play_dialtone=True,  # LiveKit-made tone: no Google service needed
                 queue_health_config=self._queue_health_config,
                 unavailable_message=self._unavailable_message,
                 unavailable_announce_limit=self._unavailable_limit,

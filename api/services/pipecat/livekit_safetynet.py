@@ -10,8 +10,9 @@ press-0 transfers don't cover:
   REFER an unanswered call), then REFERs to the fallback human queue — no
   engine involved. Unset fallback or a failed REFER: the end prompt, then the
   room is deleted so the caller hears a BYE, never a silent room.
-- **Mid-call fatal conditions** (fatal pipeline errors, the bot owing a reply
-  and staying silent past the threshold): :class:`SafetynetWatchdog` observes
+- **Mid-call fatal conditions** (fatal pipeline errors, voice-service errors
+  that call for an exit — see :mod:`livekit_failure_exits` — and the bot
+  owing a reply and staying silent past the threshold): :class:`SafetynetWatchdog` observes
   the pipeline and :func:`midcall_safetynet` runs the shared cold-transfer
   flow with ``schedule=None`` — the business-hours gate is deliberately
   bypassed, because ``back_to_ai`` with a dead pipeline *is* dead air.
@@ -45,17 +46,26 @@ from api.services.observability.call_outcome import (
     record_call_outcome,
 )
 from api.services.pipecat.livekit_dispatcher import DEFAULT_ROOM_PREFIX
+from api.services.pipecat.livekit_failure_exits import (
+    CallFailureState,
+    ErrorSource,
+    classify_error_source,
+)
 from api.services.pipecat.livekit_transfer_flow import valid_destination
 from api.utils.background import (
     spawn,  # noqa: F401 — re-export; callers import from here
 )
 from api.utils.secret_redaction import redact_secrets
 from pipecat.frames.frames import (
+    BotSpeakingFrame,
     BotStartedSpeakingFrame,
+    BotStoppedSpeakingFrame,
     ClientConnectedFrame,
     ErrorFrame,
     FunctionCallInProgressFrame,
     FunctionCallResultFrame,
+    InterimTranscriptionFrame,
+    TranscriptionFrame,
     UserStoppedSpeakingFrame,
     VADUserStartedSpeakingFrame,
 )
@@ -64,7 +74,6 @@ from pipecat.observers.base_observer import BaseObserver
 _DEFAULT_MAX_SILENCE_SECONDS = 8.0
 _ANNOUNCE_MESSAGE = "為您轉接專員，請稍候。"
 _FAILURE_MESSAGE = "系統發生問題無法繼續服務，請稍後再撥，謝謝。"
-_ANNOUNCE_TIMEOUT_SECONDS = 2.0
 
 _MAX_FIRED = 1024
 _fired_runs: set[int] = set()
@@ -285,6 +294,7 @@ async def answer_then_exit(
                 destination,
                 lk=client,
                 participant_identity=identity,
+                play_dialtone=True,  # LiveKit-made tone: no Google service needed
             )
             if result.get("status") == "success":
                 transferred = True
@@ -448,37 +458,63 @@ async def midcall_safetynet(
     room_name: str,
     reason: str,
     workflow_run_id: Optional[int] = None,
-) -> None:
+    state: CallFailureState,
+) -> Optional[str]:
     """Fatal-condition transfer while the agent is (partially) alive.
 
-    Announces best-effort (TTS may be dead — bounded, never blocking), then
-    runs the shared cold-transfer flow with ``schedule=None`` so the transfer
-    happens regardless of business hours. On failure announces an explicit
-    message and ends the call; if even that raises (half-dead engine —
-    ``execute_cold_transfer``'s never-raises contract doesn't survive one),
-    falls back to the server-side path. Never raises.
+    Runs the shared cold-transfer flow with ``schedule=None`` so the transfer
+    happens regardless of business hours. Exits follow la-only-go-live D9:
+
+    - once the transfer flow owns the call (``before_refer``), the LLM is
+      gated off and whatever holds the floor is interrupted;
+    - the transfer prompt plays only while TTS is usable, bounded by the
+      playback timeout (a timeout marks TTS unavailable and moves on);
+    - STT stops as the REFER goes out, so a dead key stops costing a failed
+      request per second;
+    - a failed REFER ends the call: after the bounded end prompt when the
+      transfer prompt got through, otherwise (TTS unavailable, or the
+      transfer prompt never played out) the room is deleted straight away.
+
+    On a call that is already ending, only makes sure the end happens within
+    a bound. Returns ``"yielded"`` when a voice/press-0 transfer is in
+    flight: that transfer owns the exit, nothing here has touched the call,
+    and if it fails the call is back with the AI, so the caller must re-arm.
+
+    If the engine is too broken for any of this (``execute_cold_transfer``'s
+    never-raises contract doesn't survive a half-dead engine), falls back to
+    the server-side path. Never raises.
     """
+    if engine.is_call_disposed():
+        # No transfer on top of an ending call (e.g. the goodbye's TTS
+        # failed) — but the ending itself can stall, e.g. the final variable
+        # extraction on the same dead LLM; bound it.
+        logger.info(f"call already ending; safetynet only bounds it ({reason})")
+        spawn(_force_end_after_deadline(engine, room_name, workflow_run_id))
+        return None
+    if getattr(engine, "_livekit_transfer_in_progress", False):
+        logger.info(f"safetynet yielded to in-flight transfer for {room_name}")
+        return "yielded"
     if not claim(workflow_run_id):
         logger.info(
             f"safetynet already fired for run {workflow_run_id}; skipping {reason}"
         )
-        return
+        return None
 
     started = time.monotonic()
 
     def _elapsed() -> int:
         return int((time.monotonic() - started) * 1000)
 
-    async def _announce(message: str) -> None:
-        from pipecat.frames.frames import TTSSpeakFrame
+    # None: no transfer prompt was attempted (no REFER, e.g. a refused
+    # destination); otherwise whether it played out.
+    announced: Optional[bool] = None
 
-        try:
-            await asyncio.wait_for(
-                engine.task.queue_frame(TTSSpeakFrame(message, persist_to_logs=True)),
-                timeout=_ANNOUNCE_TIMEOUT_SECONDS,
-            )
-        except Exception as e:
-            logger.warning(f"safetynet announce skipped (TTS unavailable): {e}")
+    async def _before_refer() -> None:
+        nonlocal announced
+        state.llm_gate_closed = True
+        await _interrupt_stalled_turn(engine)
+        announced = await state.play_bounded(engine, _ANNOUNCE_MESSAGE)
+        await state.stop_stt()
 
     try:
         log_event(
@@ -490,6 +526,7 @@ async def midcall_safetynet(
 
         from api.services.pipecat.livekit_transfer_flow import execute_cold_transfer
 
+        # A stalled LLM stream would hold the prompt and the REFER back.
         await _interrupt_stalled_turn(engine)
 
         destination = fallback_queue()
@@ -505,8 +542,10 @@ async def midcall_safetynet(
             room_name=room_name,
             destination=destination,
             schedule=None,  # bypass the business-hours gate: back_to_ai is dead air here
-            before_refer=lambda: _announce(_ANNOUNCE_MESSAGE),
+            before_refer=_before_refer,
+            before_refer_bounded=True,  # play_bounded carries its own bound
             transfer_reason="safetynet",
+            play_dialtone=True,  # LiveKit-made tone: no Google service needed
         )
         if result.get("status") == "success":
             log_event(
@@ -516,17 +555,19 @@ async def midcall_safetynet(
                 workflow_run_id=workflow_run_id,
                 elapsed_ms=_elapsed(),
             )
-            return
+            return None
         if result.get("reason") == "already_transferring":
-            # A voice/press-0 transfer is mid-flight; it owns the call's exit.
+            # A voice/press-0 transfer started since the check above; it owns
+            # the call's exit. _before_refer never ran, so nothing to undo.
             logger.info(f"safetynet yielded to in-flight transfer for {room_name}")
-            return
+            release(workflow_run_id)
+            return "yielded"
         if getattr(engine, "_livekit_caller_left", False) is True:
             # The caller left during the transfer and the flow already ended
             # the call (livekit-event-wiring 設計 B): nobody to announce to,
             # and not a safetynet termination (review D-09).
             logger.info(f"safetynet transfer ended by caller hangup for {room_name}")
-            return
+            return None
         log_event(
             "safetynet.transfer_failed",
             room_name=room_name,
@@ -534,19 +575,36 @@ async def midcall_safetynet(
             workflow_run_id=workflow_run_id,
             elapsed_ms=_elapsed(),
         )
-        await _announce(_FAILURE_MESSAGE)
+        # The call is ending; STT is already stopped unless no REFER went out
+        # (e.g. an invalid destination).
+        await state.stop_stt()
         from pipecat.utils.enums import EndTaskReason
 
-        await engine.end_call_with_reason(
-            EndTaskReason.PIPELINE_ERROR.value, abort_immediately=False
+        # The end prompt only when there is reason to think it will be heard:
+        # if the transfer prompt did not get through, the EndFrame would only
+        # queue behind the same stuck or cut-off TTS (D9 SEC-35).
+        ended_with_prompt = announced is not False and await state.play_bounded(
+            engine, _FAILURE_MESSAGE
         )
-        # The announcement and the EndFrame enter at the pipeline source and
-        # queue behind whatever stalled the bot — the usual reason this path
-        # runs at all is a hung LLM stream. Measured (livekit-event-wiring
-        # 5.3): the caller sat in silence for the full 30 s stall before the
-        # message and the BYE. Bound it: past the deadline the room is deleted
-        # server-side (the SIP leg gets its BYE) and the pipeline cancelled.
-        spawn(_force_end_after_deadline(engine, room_name, workflow_run_id))
+        if not ended_with_prompt:
+            await engine.end_call_with_reason(
+                EndTaskReason.PIPELINE_ERROR.value, abort_immediately=True
+            )
+            from api.services.pipecat.livekit_call_events import (
+                delete_room_at_run_end,
+            )
+
+            await delete_room_at_run_end(room_name, workflow_run_id)
+        else:
+            await engine.end_call_with_reason(
+                EndTaskReason.PIPELINE_ERROR.value, abort_immediately=False
+            )
+            # The EndFrame enters at the pipeline source and can queue behind
+            # whatever stalled the bot (measured in livekit-event-wiring 5.3:
+            # a hung LLM stream held it for 30 s). Bound it: past the deadline
+            # the room is deleted server-side (the SIP leg gets its BYE) and
+            # the pipeline cancelled.
+            spawn(_force_end_after_deadline(engine, room_name, workflow_run_id))
         log_event(
             "safetynet.terminated",
             room_name=room_name,
@@ -567,6 +625,7 @@ async def midcall_safetynet(
         await server_side_safetynet(
             room_name, "midcall_safetynet_error", workflow_run_id
         )
+    return None
 
 
 async def _interrupt_stalled_turn(engine) -> None:
@@ -625,11 +684,23 @@ async def _force_end_after_deadline(
 class SafetynetWatchdog(BaseObserver):
     """Pipeline observer detecting mid-call fatal conditions (S-L3-SAFETYNET).
 
-    Fires ``on_fatal(reason)`` at most once when either:
+    Fires ``on_fatal(reason)`` once per arming when any of:
 
-    - a fatal ``ErrorFrame`` passes through the pipeline, or
+    - a fatal ``ErrorFrame`` passes through the pipeline;
+    - a non-fatal ``ErrorFrame`` calls for an exit (la-only-go-live D9): the
+      STT error threshold is met, or any TTS, LLM or unclassified error —
+      ``on_pipeline_error`` no longer cancels the call on these, so this is
+      their only exit;
     - the bot owes a reply (a user turn ended, or the call just connected and
       the greeting is due) and produces no speech within the threshold.
+
+    It is re-armed (:meth:`rearm_after_transfer`) only when the safetynet
+    yielded to a voice/press-0 transfer that then left the call with the AI.
+
+    It also feeds the call's :class:`CallFailureState`: TTS errors mark TTS
+    unavailable (also after firing — a prompt may be playing), the transport's
+    bot-speaking frames and the caller's speech drive the bounded prompt
+    playback, and transcriptions reset the STT error count.
 
     The silence clock only runs while a reply is owed: it arms on
     ``UserStoppedSpeakingFrame`` / ``ClientConnectedFrame``, disarms on
@@ -638,8 +709,9 @@ class SafetynetWatchdog(BaseObserver):
     legitimately hold the floor longer than the threshold (healthy calls must
     not be transferred).
 
-    Frame handling is idempotent, so the same frame passing multiple processor
-    hops needs no dedup. ``on_fatal`` runs in a background task: observers are
+    The silence clock is idempotent across the processor hops a frame is
+    observed at; error counting and playback progress dedup by frame id.
+    ``on_fatal`` runs in a background task: observers are
     awaited inline on the frame path, and the safetynet does announce + SIP
     REFER network I/O that must not stall frame processing.
     """
@@ -653,10 +725,12 @@ class SafetynetWatchdog(BaseObserver):
         clock: Callable[[], float] = time.monotonic,
         room_name: Optional[str] = None,
         workflow_run_id: Optional[int] = None,
+        state: Optional[CallFailureState] = None,
         **kwargs,
     ):
         super().__init__(**kwargs)
         self._on_fatal = on_fatal
+        self.state = state if state is not None else CallFailureState()
         self._room_name = room_name
         self._workflow_run_id = workflow_run_id
         # An ErrorFrame is observed once per processor hop; dedup by frame id
@@ -674,6 +748,7 @@ class SafetynetWatchdog(BaseObserver):
         self._reply_owed = False  # survives tool-call suspension
         self._tool_calls: set[str] = set()
         self._fired = False
+        self._stopped = False
         # Raw asyncio task on purpose: observers added via add_observer never
         # get setup(), so BaseObject.create_task has no task manager here.
         self._monitor: Optional[asyncio.Task] = None
@@ -698,7 +773,20 @@ class SafetynetWatchdog(BaseObserver):
                     reason=redact_secrets(str(frame.error))[:200],
                     workflow_run_id=self._workflow_run_id,
                 )
+                self._on_nonfatal_error(frame)
             return
+
+        playback = self.state.playback
+        if isinstance(frame, BotStartedSpeakingFrame):
+            playback.note_started(frame)
+        elif isinstance(frame, BotSpeakingFrame):
+            playback.note_audio(frame)
+        elif isinstance(frame, BotStoppedSpeakingFrame):
+            playback.note_stopped(frame)
+        elif isinstance(frame, VADUserStartedSpeakingFrame):
+            playback.note_user_speech(frame)
+        elif isinstance(frame, (TranscriptionFrame, InterimTranscriptionFrame)):
+            self.state.stt_errors.reset()
 
         if isinstance(frame, (ClientConnectedFrame, UserStoppedSpeakingFrame)):
             self._arm()
@@ -711,6 +799,46 @@ class SafetynetWatchdog(BaseObserver):
             self._tool_calls.discard(frame.tool_call_id)
             if not self._tool_calls and self._reply_owed:
                 self._deadline = self._clock() + self._threshold
+
+    def _on_nonfatal_error(self, frame: ErrorFrame) -> None:
+        source = classify_error_source(frame)
+        if source is ErrorSource.STT:
+            if self.state.stt_errors.record(self._clock()):
+                self._fire("stt_errors")
+        elif source is ErrorSource.TTS:
+            self.state.mark_tts_unavailable("TTS error")
+            self._fire("tts_error")
+        elif source is ErrorSource.LLM:
+            self._fire("llm_error")
+        else:
+            self._fire("unclassified_error")
+
+    def note_stt_connected(self) -> None:
+        """An STT (re)connect; it ends a run of errors once it stays up."""
+        self.state.stt_errors.connected(self._clock())
+
+    async def rearm_after_transfer(self, engine) -> None:
+        """Watch again once the transfer the safetynet yielded to has settled.
+
+        A failed voice/press-0 transfer hands the call back to the AI; with
+        the watchdog spent, a still-broken STT/LLM would then have no exit
+        at all. The wait ends when the flow clears its flag or the call ends
+        — a flow stuck past its settle bound ends the call itself
+        (``transfer_unknown``). The AI owes the caller a word about the failed
+        transfer, so the silence clock starts afresh.
+        """
+        while getattr(engine, "_livekit_transfer_in_progress", False):
+            if self._stopped or engine.is_call_disposed():
+                return
+            await asyncio.sleep(self._poll_seconds)
+        if self._stopped or engine.is_call_disposed():
+            return
+        self.state.stt_errors.reset()
+        self._fired = False
+        self._arm()
+        if self._monitor is not None:
+            self._monitor.cancel()
+        self._monitor = asyncio.create_task(self._run_monitor())
 
     def _arm(self) -> None:
         self._reply_owed = True
@@ -751,6 +879,7 @@ class SafetynetWatchdog(BaseObserver):
                 self._fire("bot_silence")
 
     async def stop(self) -> None:
+        self._stopped = True
         self._fired = True
         if self._monitor is not None:
             self._monitor.cancel()
@@ -762,7 +891,7 @@ class SafetynetWatchdog(BaseObserver):
 
 
 async def resolve_safetynet_watchdog(
-    engine, workflow_run
+    engine, workflow_run, state: Optional[CallFailureState] = None
 ) -> "SafetynetWatchdog | None":
     """Build the mid-call watchdog for a LIVEKIT run, or say why it could not be.
 
@@ -816,16 +945,23 @@ async def resolve_safetynet_watchdog(
         return None
 
     async def _on_fatal(reason: str) -> None:
-        await midcall_safetynet(
+        outcome = await midcall_safetynet(
             engine,
             room_name=room_name,
             reason=reason,
             workflow_run_id=workflow_run.id,
+            state=watchdog.state,
         )
+        if outcome == "yielded":
+            await watchdog.rearm_after_transfer(engine)
 
-    return SafetynetWatchdog(
-        on_fatal=_on_fatal, room_name=room_name, workflow_run_id=workflow_run.id
+    watchdog = SafetynetWatchdog(
+        on_fatal=_on_fatal,
+        room_name=room_name,
+        workflow_run_id=workflow_run.id,
+        state=state,
     )
+    return watchdog
 
 
 # --- reconciliation of undispatched rooms (livekit-event-wiring 設計 C) -----

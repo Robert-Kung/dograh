@@ -32,8 +32,11 @@ from api.services.pipecat.business_hours import is_open
 logger = logging.getLogger(__name__)
 
 # Upper bound on a cold transfer's in-flight window (livekit-event-wiring
-# 設計 B); must exceed the LiveKit API's 10 s total timeout (security L2).
-TRANSFER_SETTLE_TIMEOUT_SECONDS = 30.0
+# 設計 B). The REFER call itself is bounded by the LiveKit client: it stays
+# open through the destination's ring window (30 s) plus a 2 s margin
+# (livekit-api ``dial_timeout``). This must outlast that, or a transfer that
+# is still ringing gets cut by our own timeout (la-only-go-live D9).
+TRANSFER_SETTLE_TIMEOUT_SECONDS = 40.0
 TRANSFER_UNKNOWN_REASON = "transfer_unknown"
 
 # The pipecat frame / enum and the SIP REFER primitive are imported lazily inside
@@ -149,7 +152,12 @@ def plan_transfer(
 
 
 async def _do_refer(
-    engine, room_name: str, destination: str, lk, transfer_reason: str = "unknown"
+    engine,
+    room_name: str,
+    destination: str,
+    lk,
+    transfer_reason: str = "unknown",
+    play_dialtone: bool = False,
 ) -> dict:
     """Issue the SIP REFER; on success end the call, on failure stay structured (C4, §3.5).
 
@@ -175,6 +183,7 @@ async def _do_refer(
     result = await cold_transfer_to_human(
         room_name,
         destination,
+        play_dialtone=play_dialtone,
         headers=plan.refer_headers if plan else None,
         lk=lk,
     )
@@ -290,6 +299,8 @@ async def execute_cold_transfer(
     queue_health_config: dict | None = None,
     unavailable_message: str | None = None,
     unavailable_announce_limit: int | None = None,
+    play_dialtone: bool = False,
+    before_refer_bounded: bool = False,
 ) -> dict:
     """Run the shared cold-transfer flow and return a structured result (never raises).
 
@@ -317,6 +328,11 @@ async def execute_cold_transfer(
         unavailable_announce_limit: Per-call cap on unavailable announcements;
             once exceeded the call is ended explicitly instead of looping
             AI ↔ gate forever (C4, default 2).
+        play_dialtone: Have LiveKit play a dial tone to the caller while the
+            REFER is pending (the safetynet path: no Google TTS needed).
+        before_refer_bounded: ``before_refer`` bounds itself (the safetynet's
+            playback-timed prompt); the settle bound then pauses while it runs,
+            so a prompt cannot eat into the REFER's ring window.
     """
     if not valid_destination(destination):
         # Pre-flight failure never reaches _do_refer — emit here so a config
@@ -436,9 +452,17 @@ async def execute_cold_transfer(
             decision = TransferDecision.AFTER_HOURS_BACK_TO_AI
 
         if decision is TransferDecision.REFER:
-            if before_refer is not None:
+            if before_refer is not None and before_refer_bounded:
+                settle_watchdog.cancel()
                 await before_refer()
-            return await _do_refer(engine, room_name, destination, lk, transfer_reason)
+                settle_watchdog = asyncio.create_task(
+                    _transfer_settle_watchdog(engine, room_name, transfer_reason)
+                )
+            elif before_refer is not None:
+                await before_refer()
+            return await _do_refer(
+                engine, room_name, destination, lk, transfer_reason, play_dialtone
+            )
 
         # After-hours announce branches.
         from pipecat.frames.frames import TTSSpeakFrame
@@ -491,8 +515,8 @@ async def _settle_after_transfer(engine) -> None:
 async def _transfer_settle_watchdog(engine, room_name: str, transfer_reason: str):
     """Bound the transfer window (設計 B): past it, record ``transfer_unknown``.
 
-    Longer than the LiveKit API's 10 s total timeout, so it only fires when
-    the flow is stuck somewhere unbounded. The outcome is unknown — the REFER
+    Longer than the LiveKit client's REFER timeout, so it only fires when the
+    flow is stuck somewhere unbounded. The outcome is unknown — the REFER
     may or may not have landed — so it is recorded as such, never as success.
     """
     await asyncio.sleep(TRANSFER_SETTLE_TIMEOUT_SECONDS)

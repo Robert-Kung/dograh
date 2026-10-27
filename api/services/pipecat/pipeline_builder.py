@@ -4,6 +4,7 @@ from loguru import logger
 
 from api.services.pipecat.audio_config import AudioConfig
 from api.services.pipecat.empty_llm_turn_fallback import EmptyLLMTurnFallbackProcessor
+from api.services.pipecat.livekit_failure_exits import SafetynetLLMGate
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.worker import PipelineParams, PipelineWorker
 from pipecat.processors.aggregators.llm_context import LLMContext
@@ -39,6 +40,7 @@ def build_pipeline(
     voicemail_detector=None,
     recording_router=None,
     press0_gate=None,
+    failure_state=None,
 ):
     """Build the main pipeline with all components.
 
@@ -52,6 +54,9 @@ def build_pipeline(
             pre-recorded audio playback and dynamic TTS.
         press0_gate: Optional Press0Gate. When provided (LiveKit), inserts right
             after transport input so it sees InputDTMFFrame before the LLM.
+        failure_state: Optional CallFailureState (LiveKit). When provided,
+            gates directly before and after the LLM stop it once the call is
+            being transferred.
     """
     # Build processors list with optional voicemail detection
     processors = [transport.input()]  # Transport user input
@@ -83,9 +88,17 @@ def build_pipeline(
     if voicemail_detector:
         processors.append(voicemail_detector.llm_gate())
 
+    llm_stage = [llm]
+    if failure_state is not None:
+        llm_stage = [
+            SafetynetLLMGate(failure_state),
+            llm,
+            SafetynetLLMGate(failure_state),
+        ]
+
     processors.extend(
         [
-            llm,  # LLM
+            *llm_stage,  # LLM
             *post_llm,
             tts,  # TTS
             transport.output(),  # Transport bot output

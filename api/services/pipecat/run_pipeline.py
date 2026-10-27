@@ -999,6 +999,21 @@ async def _run_pipeline_impl(
     # caller DTMF '0', reusing the workflow's transfer_call tool config.
     press0_gate = await resolve_press0_gate(engine, workflow_run)
 
+    # la-only-go-live D9 (LiveKit, cascaded STT/LLM/TTS only): per-call
+    # failure-exit state shared by the safetynet watchdog and the LLM gates.
+    # Realtime pipelines have no STT to stop and no gate slot; their watchdog
+    # keeps a state of its own.
+    failure_state = None
+    if (
+        workflow_run
+        and workflow_run.mode == WorkflowRunMode.LIVEKIT.value
+        and not is_realtime
+    ):
+        from api.services.pipecat.livekit_failure_exits import CallFailureState
+
+        failure_state = CallFailureState()
+        failure_state.attach_stt(stt)
+
     # Build the pipeline
     if is_realtime:
         pipeline = build_realtime_pipeline(
@@ -1026,6 +1041,7 @@ async def _run_pipeline_impl(
             voicemail_detector=voicemail_detector,
             recording_router=recording_router,
             press0_gate=press0_gate,
+            failure_state=failure_state,
         )
 
     # Create pipeline task with audio configuration
@@ -1067,9 +1083,16 @@ async def _run_pipeline_impl(
                 resolve_safetynet_watchdog,
             )
 
-            safetynet_watchdog = await resolve_safetynet_watchdog(engine, workflow_run)
+            safetynet_watchdog = await resolve_safetynet_watchdog(
+                engine, workflow_run, failure_state
+            )
             if safetynet_watchdog is not None:
                 task.add_observer(safetynet_watchdog)
+                if stt is not None:
+
+                    @stt.event_handler("on_connected")
+                    async def _on_stt_connected(*_args):
+                        safetynet_watchdog.note_stt_connected()
 
         # S-L8-RECORD: recording notice before any conversation; recording is
         # gated on the notice outcome (LIVEKIT inbound only).
@@ -1129,6 +1152,7 @@ async def _run_pipeline_impl(
             user_provider_id=user_provider_id,
             integration_runtime_sessions=integration_runtime_sessions,
             consent_gate=consent_gate,
+            safetynet_watchdog=safetynet_watchdog,
         )
 
         register_audio_data_handler(

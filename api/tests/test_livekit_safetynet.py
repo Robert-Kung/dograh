@@ -7,6 +7,7 @@ import types
 import pytest
 from pipecat.frames.frames import (
     BotStartedSpeakingFrame,
+    BotStoppedSpeakingFrame,
     ClientConnectedFrame,
     ErrorFrame,
     FunctionCallInProgressFrame,
@@ -369,7 +370,11 @@ async def test_e2e_route_fallback_refers_caller(monkeypatch, events):
     captured = {}
 
     async def fake_transfer(room, destination, **kwargs):
-        captured.update(room=room, destination=destination)
+        captured.update(
+            room=room,
+            destination=destination,
+            play_dialtone=kwargs.get("play_dialtone"),
+        )
         return {"status": "success", "action": "transferred"}
 
     async def fake_wait(room, **kwargs):
@@ -381,6 +386,7 @@ async def test_e2e_route_fallback_refers_caller(monkeypatch, events):
     assert captured == {
         "room": "cs-+886912345678",
         "destination": "sip:queue@pbx.example",
+        "play_dialtone": True,
     }
     assert [e["event"] for e in events] == [
         "safetynet.triggered",
@@ -392,10 +398,19 @@ async def test_e2e_route_fallback_refers_caller(monkeypatch, events):
 
 
 def _fake_engine():
-    frames = []
+    """Engine whose TTS is healthy: a queued prompt plays and ends at once."""
+    from pipecat.frames.frames import TTSSpeakFrame
 
-    async def queue_frame(frame):
+    from api.services.pipecat.livekit_failure_exits import CallFailureState
+
+    frames = []
+    state = CallFailureState()
+
+    async def queue_frame(frame, *_direction):
         frames.append(frame)
+        if isinstance(frame, TTSSpeakFrame):
+            state.playback.note_started(BotStartedSpeakingFrame())
+            state.playback.note_stopped(BotStoppedSpeakingFrame())
 
     async def end_call_with_reason(reason, abort_immediately=False):
         calls.append(reason)
@@ -408,6 +423,8 @@ def _fake_engine():
         task=types.SimpleNamespace(queue_frame=queue_frame),
         end_call_with_reason=end_call_with_reason,
         resolve_transfer_call_config=resolve_transfer_call_config,
+        is_call_disposed=lambda: False,
+        failure_state=state,
     )
     return engine, frames, calls
 
@@ -435,7 +452,11 @@ async def test_midcall_bypasses_business_hours(monkeypatch, events):
     )
     engine, frames, _ = _fake_engine()
     await midcall_safetynet(
-        engine, room_name="cs-+886912", reason="bot_silence", workflow_run_id=11
+        engine,
+        room_name="cs-+886912",
+        reason="bot_silence",
+        workflow_run_id=11,
+        state=engine.failure_state,
     )
     assert captured["schedule"] is None
     assert captured["destination"] == "tel:+886900000000"
@@ -457,7 +478,11 @@ async def test_midcall_destination_falls_back_to_workflow_config(monkeypatch, ev
     )
     engine, _, _ = _fake_engine()
     await midcall_safetynet(
-        engine, room_name="cs-+886912", reason="fatal_error", workflow_run_id=11
+        engine,
+        room_name="cs-+886912",
+        reason="fatal_error",
+        workflow_run_id=11,
+        state=engine.failure_state,
     )
     assert captured["destination"] == "tel:+886955555555"
 
@@ -471,7 +496,11 @@ async def test_midcall_failure_announces_and_ends(monkeypatch, events):
     )
     engine, frames, calls = _fake_engine()
     await midcall_safetynet(
-        engine, room_name="cs-+886912", reason="bot_silence", workflow_run_id=11
+        engine,
+        room_name="cs-+886912",
+        reason="bot_silence",
+        workflow_run_id=11,
+        state=engine.failure_state,
     )
     assert any("請稍後再撥" in getattr(f, "text", "") for f in frames)
     assert calls == ["pipeline_error"]
@@ -494,9 +523,15 @@ async def test_midcall_yields_to_inflight_transfer(monkeypatch, events):
         },
     )
     engine, _, calls = _fake_engine()
-    await midcall_safetynet(
-        engine, room_name="cs-+886912", reason="fatal_error", workflow_run_id=11
+    outcome = await midcall_safetynet(
+        engine,
+        room_name="cs-+886912",
+        reason="fatal_error",
+        workflow_run_id=11,
+        state=engine.failure_state,
     )
+    assert outcome == "yielded"  # the watchdog re-arms on this
+    assert claim(11)  # latch released for the next trigger
     assert calls == []  # the in-flight transfer owns the exit
     assert [e["event"] for e in events] == ["safetynet.triggered"]
 
@@ -519,7 +554,11 @@ async def test_midcall_engine_exception_falls_back_to_server_side(monkeypatch, e
     monkeypatch.setattr(sn, "server_side_safetynet", fake_server_side)
     engine, _, _ = _fake_engine()
     await midcall_safetynet(
-        engine, room_name="cs-+886912", reason="bot_silence", workflow_run_id=11
+        engine,
+        room_name="cs-+886912",
+        reason="bot_silence",
+        workflow_run_id=11,
+        state=engine.failure_state,
     )
     # release() reopened the claim so the server-side path can take over
     assert called == {
@@ -539,11 +578,19 @@ async def test_midcall_second_trigger_skipped(monkeypatch, events):
     )
     engine, _, _ = _fake_engine()
     await midcall_safetynet(
-        engine, room_name="cs-+886912", reason="bot_silence", workflow_run_id=11
+        engine,
+        room_name="cs-+886912",
+        reason="bot_silence",
+        workflow_run_id=11,
+        state=engine.failure_state,
     )
     captured.clear()
     await midcall_safetynet(
-        engine, room_name="cs-+886912", reason="fatal_error", workflow_run_id=11
+        engine,
+        room_name="cs-+886912",
+        reason="fatal_error",
+        workflow_run_id=11,
+        state=engine.failure_state,
     )
     assert captured == {}  # sticky latch: no second transfer even after failure
 
@@ -677,16 +724,6 @@ async def test_watchdog_fatal_error_does_not_block_frame_path():
     )
     await asyncio.wait_for(started.wait(), timeout=1.0)
     release_cb.set()
-    await wd.stop()
-
-
-@pytest.mark.asyncio
-async def test_watchdog_nonfatal_error_ignored():
-    t, fired = [0.0], []
-    wd = _watchdog(t, fired)
-    await wd.on_push_frame(_push(ErrorFrame("transient", fatal=False)))
-    await asyncio.sleep(0)
-    assert fired == []
     await wd.stop()
 
 
@@ -853,7 +890,7 @@ async def test_watchdog_on_fatal_routes_to_midcall_with_the_run_room(
 ):
     captured = {}
 
-    async def fake_midcall(engine, *, room_name, reason, workflow_run_id):
+    async def fake_midcall(engine, *, room_name, reason, workflow_run_id, state):
         captured.update(room_name=room_name, reason=reason, run=workflow_run_id)
 
     monkeypatch.setattr(sn, "midcall_safetynet", fake_midcall)
@@ -884,7 +921,11 @@ async def test_midcall_survives_resolver_returning_none(monkeypatch, events):
 
     engine.resolve_transfer_call_config = resolve_none
     await midcall_safetynet(
-        engine, room_name="cs-+886912", reason="fatal_error", workflow_run_id=11
+        engine,
+        room_name="cs-+886912",
+        reason="fatal_error",
+        workflow_run_id=11,
+        state=engine.failure_state,
     )
     assert captured["destination"] == ""
     assert calls  # explicit end, not silence

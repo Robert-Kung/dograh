@@ -119,6 +119,8 @@ async def test_press_zero_transfers_and_is_swallowed(monkeypatch):
 
     assert len(calls["execute"]) == 1
     assert calls["execute"][0]["destination"] == "tel:+886912345678"
+    # D9 REFER waiting period: LiveKit dial tone, no Google service needed
+    assert calls["execute"][0]["play_dialtone"] is True
     assert calls["queued"] == []  # success → no fallback announcement
 
 
