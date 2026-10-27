@@ -370,7 +370,11 @@ async def test_e2e_route_fallback_refers_caller(monkeypatch, events):
     captured = {}
 
     async def fake_transfer(room, destination, **kwargs):
-        captured.update(room=room, destination=destination)
+        captured.update(
+            room=room,
+            destination=destination,
+            play_dialtone=kwargs.get("play_dialtone"),
+        )
         return {"status": "success", "action": "transferred"}
 
     async def fake_wait(room, **kwargs):
@@ -382,6 +386,7 @@ async def test_e2e_route_fallback_refers_caller(monkeypatch, events):
     assert captured == {
         "room": "cs-+886912345678",
         "destination": "sip:queue@pbx.example",
+        "play_dialtone": True,
     }
     assert [e["event"] for e in events] == [
         "safetynet.triggered",

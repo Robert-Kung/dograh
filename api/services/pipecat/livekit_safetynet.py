@@ -294,6 +294,7 @@ async def answer_then_exit(
                 destination,
                 lk=client,
                 participant_identity=identity,
+                play_dialtone=True,  # LiveKit-made tone: no Google service needed
             )
             if result.get("status") == "success":
                 transferred = True
