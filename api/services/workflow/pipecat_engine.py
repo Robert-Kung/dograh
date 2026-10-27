@@ -857,6 +857,9 @@ class PipecatEngine:
                             transcript=result.transcript,
                             append_to_context=True,
                         )
+                        await self._open_realtime_after_recorded_greeting(
+                            result.transcript
+                        )
                         return "greeting"
                     logger.warning(
                         f"Failed to fetch audio greeting {greeting_value}, "
@@ -884,6 +887,21 @@ class PipecatEngine:
             return "llm"
 
         return "none"
+
+    async def _open_realtime_after_recorded_greeting(
+        self, transcript: Optional[str]
+    ) -> None:
+        """Hand the opening turn to a realtime service after a recording.
+
+        A recorded greeting is queued straight to the output transport, so a
+        realtime service never sees the opening turn and would greet again on
+        the caller's first utterance. A no-op for text LLMs and for realtime
+        services without the hook.
+        """
+        handle = getattr(self.llm, "handle_prerecorded_greeting", None)
+        if handle is None or self.context is None:
+            return
+        await handle(self.context, transcript)
 
     async def _handle_end_node(self, node: Node) -> None:
         """Handle end node execution."""

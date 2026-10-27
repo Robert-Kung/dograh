@@ -20,6 +20,7 @@ Layers Dograh engine integration quirks onto upstream-pristine
 
 from typing import Any
 
+from google.genai.types import Content, Part
 from loguru import logger
 
 from api.services.pipecat.gemini_json_schema_adapter import (
@@ -63,6 +64,8 @@ class DograhGeminiLiveLLMService(GeminiLiveLLMService):
         # Function calls emitted by Gemini mid-bot-turn are deferred here and
         # invoked when the turn ends, so they don't race the turn's audio.
         self._pending_function_calls: list[FunctionCallFromLLM] = []
+        # Transcript of a recorded greeting waiting for the session to open.
+        self._pending_prerecorded_greeting: tuple[str | None] | None = None
 
     # ------------------------------------------------------------------
     # Hooks from upstream GeminiLiveLLMService
@@ -174,6 +177,61 @@ class DograhGeminiLiveLLMService(GeminiLiveLLMService):
     # runtime via _update_settings, not via init).
     # ------------------------------------------------------------------
 
+    async def handle_prerecorded_greeting(
+        self, context: LLMContext, transcript: str | None
+    ) -> None:
+        """Open the conversation after a recording has greeted the caller.
+
+        The recording goes straight to the output transport, so the opening
+        TTSSpeakFrame never reaches this service. The session still has to be
+        seeded, but nothing may be generated: the caller has been greeted.
+        ``transcript`` is seeded as a model turn so Gemini does not greet a
+        second time; the assistant aggregator only commits it to the context
+        once playback drains, which is after this seed.
+        """
+        if self._handled_initial_context:
+            return
+        self._handled_initial_context = True
+        self._context = context
+        await self._create_prerecorded_greeting_response(transcript)
+
+    async def _create_prerecorded_greeting_response(self, transcript: str | None):
+        if self._disconnecting:
+            return
+        if not self._session:
+            self._pending_prerecorded_greeting = (transcript,)
+            self._run_llm_when_session_ready = True
+            return
+        self._pending_prerecorded_greeting = None
+
+        adapter = self.get_llm_adapter()
+        turns = list(
+            adapter.get_llm_invocation_params(self._context).get("messages", [])
+        )
+        if transcript:
+            turns.append(Content(role="model", parts=[Part(text=transcript)]))
+        if not self._is_gemini_3 and (
+            not turns or getattr(turns[-1], "role", None) != "user"
+        ):
+            # Gemini 2.5 requires the seed to end on a user turn.
+            turns.append(Content(role="user", parts=[Part(text=" ")]))
+
+        logger.debug("Seeding Gemini Live with a prerecorded greeting")
+        try:
+            if turns:
+                # turn_complete=False: take the history, wait for the caller.
+                await self._session.send_client_content(
+                    turns=turns, turn_complete=False
+                )
+        except Exception as e:
+            await self._handle_send_error(e)
+
+        if not self._is_gemini_3:
+            # 2.5 only picks seeded history up once a turn completes; let the
+            # caller's first utterance carry that completion.
+            self._needs_initial_turn_complete_message = True
+        self._ready_for_realtime_input = True
+
     async def _handle_context(self, context: LLMContext):
         if not self._handled_initial_context:
             self._handled_initial_context = True
@@ -201,7 +259,11 @@ class DograhGeminiLiveLLMService(GeminiLiveLLMService):
             # Context arrived before session was ready — fulfil the queued
             # initial response now.
             self._run_llm_when_session_ready = False
-            await self._create_initial_response()
+            if self._pending_prerecorded_greeting is not None:
+                (transcript,) = self._pending_prerecorded_greeting
+                await self._create_prerecorded_greeting_response(transcript)
+            else:
+                await self._create_initial_response()
         await self._drain_pending_tool_results()
         # Otherwise: no automatic seed. Reconnect after a session-resumption
         # update relies on the server-side restored state; reconnects without
