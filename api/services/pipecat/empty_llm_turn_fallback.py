@@ -6,6 +6,11 @@ pipecat 不推任何 LLMTextFrame；TTS 也會丟掉純空白文字。結果電�
 LLMFullResponseEndFrame 之後推一個 TTSSpeakFrame，並寫入 context，讓下一輪的 LLM
 看得到自己剛請對方再說一次。
 
+**「有說話」以整輪文字判斷。** 只吐標點、空白或標記（SSML、`<function=…>…</function>`
+函式標記）的一輪，TTS 前的 XMLFunctionTagFilter 與合成器都不會唸出任何字，等同空輪。
+判斷用 pipecat 的 ``has_alnum``（與 LLM service 決定是否延後工具呼叫的是同一條規則），
+並在 End 時對整輪累積的文字判斷：標記可能被切在多個 LLMTextFrame 之間。
+
 **連續空輪只補第一次。** LLM 出錯（400、429、連不上）時各家 service 也是
 push_error 後照推 End，看起來就是空輪；若每輪都補話，bot 會一直請對方再說一次，
 而 LiveKit safetynet 的 bot_silence 計時被補話解除、永遠轉不到真人。第二個連續空輪
@@ -37,6 +42,7 @@ from pipecat.frames.frames import (
     UserStartedSpeakingFrame,
 )
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
+from pipecat.utils.text.alnum_utils import has_alnum
 
 EMPTY_LLM_TURN_FALLBACK_TEXT = (
     "不好意思，我這邊剛剛沒有處理好，可以請您再說一次您的問題嗎？"
@@ -60,7 +66,8 @@ class EmptyLLMTurnFallbackProcessor(FrameProcessor):
         super().__init__()
         self._fallback_text = fallback_text
         self._in_response = False
-        self._spoke = False
+        self._called_function = False
+        self._text = ""
         self._fell_back_last_turn = False
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
@@ -68,23 +75,23 @@ class EmptyLLMTurnFallbackProcessor(FrameProcessor):
 
         if isinstance(frame, LLMFullResponseStartFrame):
             self._in_response = True
-            self._spoke = False
+            self._called_function = False
+            self._text = ""
         elif isinstance(
             frame, (InterruptionFrame, UserStartedSpeakingFrame, CallerBargeInFrame)
         ):
             # 被插話打斷的那一輪不補話。
             self._in_response = False
-        elif self._in_response and (
-            (isinstance(frame, LLMTextFrame) and frame.text.strip())
-            or _is_function_call(frame)
-        ):
-            self._spoke = True
+        elif self._in_response and isinstance(frame, LLMTextFrame):
+            self._text += frame.text
+        elif self._in_response and _is_function_call(frame):
+            self._called_function = True
 
         await self.push_frame(frame, direction)
 
         if isinstance(frame, LLMFullResponseEndFrame) and self._in_response:
             self._in_response = False
-            if self._spoke:
+            if self._called_function or has_alnum(self._text):
                 self._fell_back_last_turn = False
             elif not self._fell_back_last_turn:
                 self._fell_back_last_turn = True

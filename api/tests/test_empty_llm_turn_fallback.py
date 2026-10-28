@@ -77,6 +77,41 @@ async def test_whitespace_only_text_counts_as_empty():
     assert len(_fallbacks(pushed)) == 1
 
 
+@pytest.mark.parametrize(
+    "texts",
+    [
+        ["。"],
+        ["……", "！"],
+        ["<break/>"],
+        # TTS 前的 XMLFunctionTagFilter 會把整段函式標記（含參數）刪掉，一個字都不唸。
+        ['<function=transfer_call>{"reason":"x"}</function>'],
+        ['<function=transfer_call>{"reason":', '"x"}</function>'],
+    ],
+)
+async def test_unspeakable_text_counts_as_empty(texts):
+    """整輪只吐標點或標記：TTS 沒東西可唸，跟空輪一樣要補話。"""
+    proc, pushed = _processor()
+    await _feed(
+        proc,
+        LLMFullResponseStartFrame(),
+        *[LLMTextFrame(text=t) for t in texts],
+        LLMFullResponseEndFrame(),
+    )
+    assert len(_fallbacks(pushed)) == 1
+
+
+async def test_speakable_text_split_across_frames_is_left_alone():
+    proc, pushed = _processor()
+    await _feed(
+        proc,
+        LLMFullResponseStartFrame(),
+        LLMTextFrame(text="。"),
+        LLMTextFrame(text="好"),
+        LLMFullResponseEndFrame(),
+    )
+    assert _fallbacks(pushed) == []
+
+
 async def test_turn_with_text_is_left_alone():
     proc, pushed = _processor()
     await _feed(
