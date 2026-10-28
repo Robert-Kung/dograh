@@ -13,6 +13,7 @@ from api.services.pipecat.realtime.gemini_live_vertex import (
     DograhGeminiLiveVertexLLMService,
 )
 from api.services.pipecat.service_factory import (
+    GEMINI_STREAM_IDLE_TIMEOUT_SECS,
     DograhGoogleLLMService,
     DograhGoogleVertexLLMService,
     create_llm_service_from_provider,
@@ -105,6 +106,10 @@ def test_google_llm_service_factory_uses_dograh_service_class():
     assert result is mock_service.return_value
     assert mock_service.call_args.kwargs["api_key"] == "test-api-key"
     assert mock_service.call_args.kwargs["settings"].model == "gemini-2.5-flash"
+    assert (
+        mock_service.call_args.kwargs["stream_idle_timeout_secs"]
+        == GEMINI_STREAM_IDLE_TIMEOUT_SECS
+    )
 
 
 def test_google_vertex_llm_service_factory_uses_dograh_service_class():
@@ -124,6 +129,10 @@ def test_google_vertex_llm_service_factory_uses_dograh_service_class():
     assert mock_service.call_args.kwargs["project_id"] == "demo-project"
     assert mock_service.call_args.kwargs["location"] == "us-central1"
     assert mock_service.call_args.kwargs["settings"].model == "gemini-2.5-pro"
+    assert (
+        mock_service.call_args.kwargs["stream_idle_timeout_secs"]
+        == GEMINI_STREAM_IDLE_TIMEOUT_SECS
+    )
 
 
 def test_gemini_live_service_classes_use_dograh_gemini_adapter_class():

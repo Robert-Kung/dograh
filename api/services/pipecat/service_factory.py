@@ -135,6 +135,15 @@ def stt_uses_external_turns(user_config) -> bool:
     return False
 
 
+# Gemini 串流在兩個 chunk 之間停住多久就放棄這一輪（pipecat 預設 20 秒）。
+# 對齊 LiveKit safetynet 的 bot_silence（8 秒，livekit_safetynet.py
+# _DEFAULT_MAX_SILENCE_SECONDS）：bot 欠回覆時是 bot_silence 先觸發並轉真人，
+# 這個逾時只涵蓋「已開口後串流卡住」——bot_silence 已被開口解除、沒有別的計時在等；
+# 從 20 秒縮到 10 秒，縮短那段死寂。逾時推非致命 ErrorFrame，safetynet 據此以
+# llm_error 轉真人（C4）。首 chunk 重送（retry_on_timeout）維持上游預設關閉。
+GEMINI_STREAM_IDLE_TIMEOUT_SECS = 10.0
+
+
 class DograhGoogleLLMService(GoogleLLMService):
     adapter_class = DograhGeminiJSONSchemaAdapter
 
@@ -910,6 +919,7 @@ def create_llm_service_from_provider(
                 temperature=0.1,
                 thinking=_google_thinking_for_model(model),
             ),
+            stream_idle_timeout_secs=GEMINI_STREAM_IDLE_TIMEOUT_SECS,
         )
     elif provider == ServiceProviders.GOOGLE_VERTEX.value:
         return DograhGoogleVertexLLMService(
@@ -921,6 +931,7 @@ def create_llm_service_from_provider(
                 temperature=0.1,
                 thinking=_google_thinking_for_model(model),
             ),
+            stream_idle_timeout_secs=GEMINI_STREAM_IDLE_TIMEOUT_SECS,
         )
     elif provider == ServiceProviders.AZURE.value:
         if endpoint:
