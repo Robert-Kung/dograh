@@ -135,12 +135,16 @@ def stt_uses_external_turns(user_config) -> bool:
     return False
 
 
-# Gemini 串流在兩個 chunk 之間停住多久就放棄這一輪（pipecat 預設 20 秒）。
-# 對齊 LiveKit safetynet 的 bot_silence（8 秒，livekit_safetynet.py
-# _DEFAULT_MAX_SILENCE_SECONDS）：bot 欠回覆時是 bot_silence 先觸發並轉真人，
-# 這個逾時只涵蓋「已開口後串流卡住」——bot_silence 已被開口解除、沒有別的計時在等；
-# 從 20 秒縮到 10 秒，縮短那段死寂。逾時推非致命 ErrorFrame，safetynet 據此以
-# llm_error 轉真人（C4）。首 chunk 重送（retry_on_timeout）維持上游預設關閉。
+# Gemini 串流等下一個 chunk 最多等多久就放棄這一輪（pipecat 預設 20 秒）。
+# 首 chunk 重送（retry_on_timeout）維持上游預設關閉，此時**第一個 chunk 也受這
+# 10 秒限制**，而首 chunk 的等待涵蓋整個往返＋模型思考：交付用的 gemini-3.8-flash
+# （thinking low）在範圍內，但 pro 或高思考量的模型在沒有 safetynet 的模式（文字
+# 對話等）可能還沒開口就逾時。
+# LiveKit 上對齊 safetynet 的 bot_silence（8 秒，livekit_safetynet.py
+# _DEFAULT_MAX_SILENCE_SECONDS）：bot 欠回覆時是 bot_silence 先觸發並轉真人；
+# 這個逾時實際作用在「已開口後串流卡住」——bot_silence 已被開口解除、沒有別的
+# 計時在等；從 20 秒縮到 10 秒，縮短那段死寂。逾時推非致命 ErrorFrame，safetynet
+# 據此以 llm_error 轉真人（C4）。
 GEMINI_STREAM_IDLE_TIMEOUT_SECS = 10.0
 
 
