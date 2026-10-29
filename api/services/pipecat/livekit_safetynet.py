@@ -65,6 +65,7 @@ from pipecat.frames.frames import (
     FunctionCallInProgressFrame,
     FunctionCallResultFrame,
     InterimTranscriptionFrame,
+    LLMMessagesAppendFrame,
     TranscriptionFrame,
     UserStoppedSpeakingFrame,
     VADUserStartedSpeakingFrame,
@@ -686,13 +687,22 @@ class SafetynetWatchdog(BaseObserver):
 
     Fires ``on_fatal(reason)`` once per arming when any of:
 
-    - a fatal ``ErrorFrame`` passes through the pipeline;
+    - a fatal ``ErrorFrame`` passes through the pipeline — **best effort**
+      (5.1 review R7): pipecat's worker queues a ``CancelFrame`` after every
+      fatal error and ``on_pipeline_error`` still ends the call with
+      ``abort_immediately=True``, racing this exit. If the call is disposed
+      first, ``midcall_safetynet`` only arms the forced end; if this exit gets
+      there first, the cancel can cut the transfer prompt and the room
+      deletion races the REFER. Either way the call ends explicitly (C4), but
+      a transfer is not guaranteed. The la-only Gemini services push no fatal
+      errors (design D9);
     - a non-fatal ``ErrorFrame`` calls for an exit (la-only-go-live D9): the
       STT error threshold is met, or any TTS, LLM or unclassified error —
       ``on_pipeline_error`` no longer cancels the call on these, so this is
       their only exit;
-    - the bot owes a reply (a user turn ended, or the call just connected and
-      the greeting is due) and produces no speech within the threshold.
+    - the bot owes a reply (a user turn ended, the call just connected and
+      the greeting is due, or the idle-timeout prompt asked the LLM to speak)
+      and produces no speech within the threshold.
 
     It is re-armed (:meth:`rearm_after_transfer`) only when the safetynet
     yielded to a voice/press-0 transfer that then left the call with the AI.
@@ -703,7 +713,8 @@ class SafetynetWatchdog(BaseObserver):
     playback, and transcriptions reset the STT error count.
 
     The silence clock only runs while a reply is owed: it arms on
-    ``UserStoppedSpeakingFrame`` / ``ClientConnectedFrame``, disarms on
+    ``UserStoppedSpeakingFrame`` / ``ClientConnectedFrame`` / an
+    ``LLMMessagesAppendFrame`` that runs the LLM (the idle prompt), disarms on
     ``BotStartedSpeakingFrame`` or when the user starts speaking again, and is
     suspended while a function call is in flight — an MCP ticket lookup may
     legitimately hold the floor longer than the threshold (healthy calls must
@@ -789,6 +800,11 @@ class SafetynetWatchdog(BaseObserver):
             self.state.stt_errors.reset()
 
         if isinstance(frame, (ClientConnectedFrame, UserStoppedSpeakingFrame)):
+            self._arm()
+        elif isinstance(frame, LLMMessagesAppendFrame) and frame.run_llm:
+            # The idle-timeout prompt (UserIdleHandler): the caller said
+            # nothing, so no UserStoppedSpeakingFrame arms this turn, yet the
+            # bot owes a reply all the same (5.1 fix review R2).
             self._arm()
         elif isinstance(frame, (BotStartedSpeakingFrame, VADUserStartedSpeakingFrame)):
             self._disarm()
@@ -962,6 +978,68 @@ async def resolve_safetynet_watchdog(
         state=state,
     )
     return watchdog
+
+
+class LiveKitFailureExits:
+    """The la-only-go-live D9 failure exits of one call, from pipeline build to end.
+
+    Split out of ``_run_pipeline_impl`` (5.1 review R4): the watchdog, the LLM
+    gates and the STT stop must share one ``CallFailureState``, the watchdog
+    must hear the STT's ``on_connected``, and ``register_event_handlers`` must
+    get the watchdog (without it ``on_pipeline_error`` cancels the call on
+    every ErrorFrame). Inline in ``_run_pipeline_impl`` none of this was
+    reachable by a test; ``test_livekit_failure_wiring`` tests this class and
+    reads ``_run_pipeline_impl``'s source to pin the two hand-offs left there
+    (the gates get ``state``, the event handlers get ``watchdog``).
+
+    Two steps, because the pipeline setup has what each needs at different
+    points:
+
+    - construction (before the pipeline is built): on a LIVEKIT, non-realtime
+      run, build ``state`` and attach the STT, for ``build_pipeline``'s gates.
+      Realtime pipelines have no STT to stop and no gate slot: ``state`` is
+      None and the watchdog keeps a state of its own.
+    - :meth:`install_watchdog` (once the task exists): build the watchdog on
+      the same ``state``, add it as a task observer, and register the STT's
+      ``on_connected``.
+    """
+
+    def __init__(self, workflow_run, stt, *, is_realtime: bool):
+        from api.enums import WorkflowRunMode
+
+        self._workflow_run = workflow_run
+        self._stt = stt
+        self.state: Optional[CallFailureState] = None
+        self.watchdog: Optional[SafetynetWatchdog] = None
+        if (
+            workflow_run
+            and workflow_run.mode == WorkflowRunMode.LIVEKIT.value
+            and not is_realtime
+        ):
+            self.state = CallFailureState()
+            self.state.attach_stt(stt)
+
+    async def install_watchdog(self, engine, task) -> Optional[SafetynetWatchdog]:
+        """Build the watchdog and wire it into the task, or return None.
+
+        Not installed (not LIVEKIT, no ``room_name``): the reason is recorded by
+        :func:`resolve_safetynet_watchdog`, and nothing is added to the task or
+        registered on the STT.
+        """
+        watchdog = await resolve_safetynet_watchdog(
+            engine, self._workflow_run, self.state
+        )
+        if watchdog is None:
+            return None
+        self.watchdog = watchdog
+        task.add_observer(watchdog)
+        if self._stt is not None:
+
+            @self._stt.event_handler("on_connected")
+            async def _on_stt_connected(*_args):
+                watchdog.note_stt_connected()
+
+        return watchdog
 
 
 # --- reconciliation of undispatched rooms (livekit-event-wiring 設計 C) -----

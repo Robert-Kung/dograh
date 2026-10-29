@@ -103,6 +103,27 @@ ensure_tracing()
 
 DEFAULT_USER_TURN_STOP_TIMEOUT = 5.0
 EXTERNAL_TURN_USER_STOP_TIMEOUT = 30.0
+# Caller silence before the idle prompt; a workflow's run_configs
+# ("max_user_idle_timeout") can override it.
+DEFAULT_MAX_USER_IDLE_TIMEOUT_SECS = 10.0
+# The same on LIVEKIT calls, where it is the first term of the idle path's
+# silence budget (design D9). 8 s, not 10, so that the idle turn's worst exit —
+# bot_silence (8 s, polled every 0.5 s) and then a transfer prompt bounded by
+# the 3 s playback start timeout — fits the 20 s cap: 8 + 0.35 + 8 + 0.5 + 3
+# ≈ 19.85 s (5.1 fix recheck N1). The sums are pinned in
+# api/tests/support/silence_budget.py's users. A run_configs override is still
+# honored, and lengthens that path one for one.
+LIVEKIT_MAX_USER_IDLE_TIMEOUT_SECS = 8.0
+
+
+def resolve_max_user_idle_timeout(run_configs: dict, *, livekit_call: bool) -> float:
+    """Caller silence before the idle prompt: the workflow's setting, else the
+    default for the call's mode."""
+    if run_configs and "max_user_idle_timeout" in run_configs:
+        return run_configs["max_user_idle_timeout"]
+    if livekit_call:
+        return LIVEKIT_MAX_USER_IDLE_TIMEOUT_SECS
+    return DEFAULT_MAX_USER_IDLE_TIMEOUT_SECS
 
 
 def _resolve_user_turn_stop_timeout(
@@ -578,7 +599,10 @@ async def _run_pipeline_impl(
 
     # Extract configurations from the version's workflow_configurations
     max_call_duration_seconds = 300  # Default 5 minutes
-    max_user_idle_timeout = 10.0  # Default 10 seconds
+    livekit_call = workflow_run.mode == WorkflowRunMode.LIVEKIT.value
+    max_user_idle_timeout = resolve_max_user_idle_timeout(
+        run_configs, livekit_call=livekit_call
+    )
     smart_turn_stop_secs = 2.0  # Default 2 seconds for incomplete turn timeout
     turn_stop_strategy = "transcription"  # Default to transcription-based detection
     keyterms = None  # Dictionary words for STT boosting
@@ -586,9 +610,6 @@ async def _run_pipeline_impl(
     if run_configs:
         if "max_call_duration" in run_configs:
             max_call_duration_seconds = run_configs["max_call_duration"]
-
-        if "max_user_idle_timeout" in run_configs:
-            max_user_idle_timeout = run_configs["max_user_idle_timeout"]
 
         if "smart_turn_stop_secs" in run_configs:
             smart_turn_stop_secs = run_configs["smart_turn_stop_secs"]
@@ -657,6 +678,7 @@ async def _run_pipeline_impl(
             user_config,
             audio_config,
             correlation_id=mps_correlation_id,
+            livekit_call=livekit_call,
         )
         llm = create_llm_service(user_config, correlation_id=mps_correlation_id)
         inference_llm = None
@@ -999,20 +1021,14 @@ async def _run_pipeline_impl(
     # caller DTMF '0', reusing the workflow's transfer_call tool config.
     press0_gate = await resolve_press0_gate(engine, workflow_run)
 
-    # la-only-go-live D9 (LiveKit, cascaded STT/LLM/TTS only): per-call
-    # failure-exit state shared by the safetynet watchdog and the LLM gates.
-    # Realtime pipelines have no STT to stop and no gate slot; their watchdog
-    # keeps a state of its own.
-    failure_state = None
-    if (
-        workflow_run
-        and workflow_run.mode == WorkflowRunMode.LIVEKIT.value
-        and not is_realtime
-    ):
-        from api.services.pipecat.livekit_failure_exits import CallFailureState
+    # la-only-go-live D9 (LiveKit): per-call failure exits. Their state is
+    # shared by the safetynet watchdog (installed below), the LLM gates and
+    # the STT stop; cascaded STT/LLM/TTS only — realtime pipelines have no STT
+    # to stop and no gate slot. The wiring is tested in
+    # test_livekit_failure_wiring (5.1 review R4).
+    from api.services.pipecat.livekit_safetynet import LiveKitFailureExits
 
-        failure_state = CallFailureState()
-        failure_state.attach_stt(stt)
+    failure_exits = LiveKitFailureExits(workflow_run, stt, is_realtime=is_realtime)
 
     # Build the pipeline
     if is_realtime:
@@ -1041,7 +1057,7 @@ async def _run_pipeline_impl(
             voicemail_detector=voicemail_detector,
             recording_router=recording_router,
             press0_gate=press0_gate,
-            failure_state=failure_state,
+            failure_state=failure_exits.state,
         )
 
     # Create pipeline task with audio configuration
@@ -1073,26 +1089,12 @@ async def _run_pipeline_impl(
         )
         task.add_observer(feedback_observer)
 
-        # S-L3-SAFETYNET watchdog (LiveKit only): fatal ErrorFrames and owed-reply
-        # silence trigger a one-shot fallback cold transfer (C4).
-        # Install decision lives in livekit_safetynet so its not-installed branch
-        # is testable and visible (ccp#7 D3) — never silent here again.
-        safetynet_watchdog = None
-        if workflow_run and workflow_run.mode == WorkflowRunMode.LIVEKIT.value:
-            from api.services.pipecat.livekit_safetynet import (
-                resolve_safetynet_watchdog,
-            )
-
-            safetynet_watchdog = await resolve_safetynet_watchdog(
-                engine, workflow_run, failure_state
-            )
-            if safetynet_watchdog is not None:
-                task.add_observer(safetynet_watchdog)
-                if stt is not None:
-
-                    @stt.event_handler("on_connected")
-                    async def _on_stt_connected(*_args):
-                        safetynet_watchdog.note_stt_connected()
+        # S-L3-SAFETYNET watchdog (LiveKit only): fatal ErrorFrames, the
+        # failure exits' non-fatal errors and owed-reply silence trigger a
+        # one-shot fallback cold transfer (C4). Install decision lives in
+        # livekit_safetynet so its not-installed branch is testable and
+        # visible (ccp#7 D3) — never silent here again.
+        await failure_exits.install_watchdog(engine, task)
 
         # S-L8-RECORD: recording notice before any conversation; recording is
         # gated on the notice outcome (LIVEKIT inbound only).
@@ -1152,7 +1154,7 @@ async def _run_pipeline_impl(
             user_provider_id=user_provider_id,
             integration_runtime_sessions=integration_runtime_sessions,
             consent_gate=consent_gate,
-            safetynet_watchdog=safetynet_watchdog,
+            safetynet_watchdog=failure_exits.watchdog,
         )
 
         register_audio_data_handler(
@@ -1177,7 +1179,7 @@ async def _run_pipeline_impl(
         # Close MCP sessions here, where the call's lifetime ends (each
         # session's transport runs in its own owner task).
         await engine.close_mcp_sessions()
-        if safetynet_watchdog is not None:
-            await safetynet_watchdog.stop()
+        if failure_exits.watchdog is not None:
+            await failure_exits.watchdog.stop()
         await feedback_observer.cleanup()
         logger.debug(f"Cleaned up context providers for workflow run {workflow_run_id}")

@@ -135,17 +135,42 @@ def stt_uses_external_turns(user_config) -> bool:
     return False
 
 
-# Gemini 串流等下一個 chunk 最多等多久就放棄這一輪（pipecat 預設 20 秒）。
-# 首 chunk 重送（retry_on_timeout）維持上游預設關閉，此時**第一個 chunk 也受這
-# 10 秒限制**，而首 chunk 的等待涵蓋整個往返＋模型思考：交付用的 gemini-3.8-flash
-# （thinking low）在範圍內，但 pro 或高思考量的模型在沒有 safetynet 的模式（文字
-# 對話等）可能還沒開口就逾時。
-# LiveKit 上對齊 safetynet 的 bot_silence（8 秒，livekit_safetynet.py
-# _DEFAULT_MAX_SILENCE_SECONDS）：bot 欠回覆時是 bot_silence 先觸發並轉真人；
-# 這個逾時實際作用在「已開口後串流卡住」——bot_silence 已被開口解除、沒有別的
-# 計時在等；從 20 秒縮到 10 秒，縮短那段死寂。逾時推非致命 ErrorFrame，safetynet
-# 據此以 llm_error 轉真人（C4）。
+# Gemini LLM 串流已開始後，等下一個 chunk 最多等多久就放棄這一輪（pipecat 預設
+# 20 秒）。LiveKit 上對齊 safetynet 的 bot_silence（8 秒，livekit_safetynet.py
+# _DEFAULT_MAX_SILENCE_SECONDS）：這個逾時作用在「已開口後串流卡住」——
+# bot_silence 已被開口解除、沒有別的計時在等；從 20 秒縮到 10 秒，縮短那段死寂。
+# 逾時推非致命 ErrorFrame，safetynet 據此以 llm_error 轉真人（C4）。
 GEMINI_STREAM_IDLE_TIMEOUT_SECS = 10.0
+
+# Gemini LLM 等第一個 chunk 最多等多久（首 chunk 重送 retry_on_timeout 維持上游
+# 預設關閉）。首 chunk 的等待涵蓋整個往返＋模型思考。與上面的 chunk 間逾時分開
+# （la-only-go-live 5.1 審查 S2）：來電者不說話時，閒置逾時（LIVEKIT 為
+# run_pipeline.LIVEKIT_MAX_USER_IDLE_TIMEOUT_SECS 8 秒，BotStopped 另有 0.35 秒）
+# 觸發的那一輪在首 chunk 前卡住，由這個逾時先到（6 < bot_silence 8）：
+# 8＋0.35＋6＋起播逾時 3（livekit_failure_exits.py PLAYBACK_START_TIMEOUT_SECONDS）
+# ≈ 17.4 秒，在 design D9「TTS 不可用時連續靜音」暫定上限 20 秒內。閒置路徑各分支
+# 的加總由 api/tests/support/silence_budget.py 的使用者釘住。
+# 交付用的 gemini-3.8-flash（thinking low）的首 chunk 延遲是否穩定低於 6 秒未實測
+# （5.4 量測）；pro 或高思考量的模型在沒有 safetynet 的模式（文字對話等）可能還沒
+# 開口就逾時。
+GEMINI_LLM_FIRST_CHUNK_TIMEOUT_SECS = 6.0
+
+# Gemini TTS（Gemini API 金鑰路徑）串流每個 chunk（含第一個）最多等多久
+# （la-only-go-live 5.1 審查 S1）。google-genai 本身不設逾時，上游或代理在連線後
+# 卡住時，回話中途的 TTS 會無限期等下去，來電者聽到的是沒有上限的靜音——閒置
+# 計時只在 BotStopped 後啟動、bot_silence 已被開口解除，沒有別的計時在等。逾時推
+# 非致命 ErrorFrame，safetynet 據此以 tts_error 標 TTS 不可用、不播話術直接轉真人
+# （C4）。量的是 chunk 間隔而不是整句長度，健康的長句不會被切斷。
+# 3 秒＝起播逾時（PLAYBACK_START_TIMEOUT_SECONDS），兩者對 TTS 首音的假設一致。
+# 回話中途卡住：自最後一段音訊起 ≤ 3 秒即轉接。閒置那一輪 LLM 健康、TTS 在首
+# chunk 前卡住：8＋0.35＋6＋3 ≈ 17.4 秒；若 bot_silence（閒置那一輪自 5.1 修正審查
+# R2 起也武裝）先到，轉接話術再受起播逾時約束：8＋0.35＋8＋輪詢 0.5＋3 ≈ 19.85 秒
+# （5.1 修正複審 N1）。代價：健康的 TTS 首 chunk 若慢過 3 秒會被當成故障轉真人；
+# Gemini TTS 經代理的首音延遲未實測（5.4 量測）。
+# 只在 LIVEKIT 通話傳入（create_tts_service 的 livekit_call，5.1 修正審查 R4）：
+# 其他模式（編輯器試撥）沒有 safetynet 接手，on_pipeline_error 會因這個 ErrorFrame
+# 直接結束通話，健康但慢的 TTS 會把試撥切斷。LLM 的逾時不分模式（base 起就如此）。
+GEMINI_TTS_STREAM_IDLE_TIMEOUT_SECS = 3.0
 
 
 class DograhGoogleLLMService(GoogleLLMService):
@@ -469,13 +494,20 @@ def create_stt_service(
 
 
 def create_tts_service(
-    user_config, audio_config: "AudioConfig", correlation_id: str | None = None
+    user_config,
+    audio_config: "AudioConfig",
+    correlation_id: str | None = None,
+    *,
+    livekit_call: bool = False,
 ):
     """Create and return appropriate TTS service based on user configuration
 
     Args:
         user_config: User configuration containing TTS settings
         transport_type: Type of transport (e.g., 'twilio', 'webrtc')
+        livekit_call: The service is for a LIVEKIT call, whose safetynet turns
+            a TTS stream timeout into a transfer. Only then is the Gemini TTS
+            stream bounded (GEMINI_TTS_STREAM_IDLE_TIMEOUT_SECS).
     """
     logger.info(
         f"Creating TTS service: provider={user_config.tts.provider}, model={user_config.tts.model}"
@@ -562,6 +594,9 @@ def create_tts_service(
             text_filters=[xml_function_tag_filter],
             skip_aggregator_types=["recording_router", "recording"],
             silence_time_s=1.0,
+            stream_idle_timeout_secs=(
+                GEMINI_TTS_STREAM_IDLE_TIMEOUT_SECS if livekit_call else None
+            ),
         )
     elif user_config.tts.provider == ServiceProviders.ELEVENLABS.value:
         # Backward compatible with older configuration "Name - voice_id"
@@ -924,6 +959,7 @@ def create_llm_service_from_provider(
                 thinking=_google_thinking_for_model(model),
             ),
             stream_idle_timeout_secs=GEMINI_STREAM_IDLE_TIMEOUT_SECS,
+            first_chunk_timeout_secs=GEMINI_LLM_FIRST_CHUNK_TIMEOUT_SECS,
         )
     elif provider == ServiceProviders.GOOGLE_VERTEX.value:
         return DograhGoogleVertexLLMService(
@@ -936,6 +972,7 @@ def create_llm_service_from_provider(
                 thinking=_google_thinking_for_model(model),
             ),
             stream_idle_timeout_secs=GEMINI_STREAM_IDLE_TIMEOUT_SECS,
+            first_chunk_timeout_secs=GEMINI_LLM_FIRST_CHUNK_TIMEOUT_SECS,
         )
     elif provider == ServiceProviders.AZURE.value:
         if endpoint:
