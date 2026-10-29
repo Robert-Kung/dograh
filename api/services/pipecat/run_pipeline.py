@@ -999,20 +999,14 @@ async def _run_pipeline_impl(
     # caller DTMF '0', reusing the workflow's transfer_call tool config.
     press0_gate = await resolve_press0_gate(engine, workflow_run)
 
-    # la-only-go-live D9 (LiveKit, cascaded STT/LLM/TTS only): per-call
-    # failure-exit state shared by the safetynet watchdog and the LLM gates.
-    # Realtime pipelines have no STT to stop and no gate slot; their watchdog
-    # keeps a state of its own.
-    failure_state = None
-    if (
-        workflow_run
-        and workflow_run.mode == WorkflowRunMode.LIVEKIT.value
-        and not is_realtime
-    ):
-        from api.services.pipecat.livekit_failure_exits import CallFailureState
+    # la-only-go-live D9 (LiveKit): per-call failure exits. Their state is
+    # shared by the safetynet watchdog (installed below), the LLM gates and
+    # the STT stop; cascaded STT/LLM/TTS only — realtime pipelines have no STT
+    # to stop and no gate slot. The wiring is tested in
+    # test_livekit_failure_wiring (5.1 review R4).
+    from api.services.pipecat.livekit_safetynet import LiveKitFailureExits
 
-        failure_state = CallFailureState()
-        failure_state.attach_stt(stt)
+    failure_exits = LiveKitFailureExits(workflow_run, stt, is_realtime=is_realtime)
 
     # Build the pipeline
     if is_realtime:
@@ -1041,7 +1035,7 @@ async def _run_pipeline_impl(
             voicemail_detector=voicemail_detector,
             recording_router=recording_router,
             press0_gate=press0_gate,
-            failure_state=failure_state,
+            failure_state=failure_exits.state,
         )
 
     # Create pipeline task with audio configuration
@@ -1073,26 +1067,12 @@ async def _run_pipeline_impl(
         )
         task.add_observer(feedback_observer)
 
-        # S-L3-SAFETYNET watchdog (LiveKit only): fatal ErrorFrames and owed-reply
-        # silence trigger a one-shot fallback cold transfer (C4).
-        # Install decision lives in livekit_safetynet so its not-installed branch
-        # is testable and visible (ccp#7 D3) — never silent here again.
-        safetynet_watchdog = None
-        if workflow_run and workflow_run.mode == WorkflowRunMode.LIVEKIT.value:
-            from api.services.pipecat.livekit_safetynet import (
-                resolve_safetynet_watchdog,
-            )
-
-            safetynet_watchdog = await resolve_safetynet_watchdog(
-                engine, workflow_run, failure_state
-            )
-            if safetynet_watchdog is not None:
-                task.add_observer(safetynet_watchdog)
-                if stt is not None:
-
-                    @stt.event_handler("on_connected")
-                    async def _on_stt_connected(*_args):
-                        safetynet_watchdog.note_stt_connected()
+        # S-L3-SAFETYNET watchdog (LiveKit only): fatal ErrorFrames, the
+        # failure exits' non-fatal errors and owed-reply silence trigger a
+        # one-shot fallback cold transfer (C4). Install decision lives in
+        # livekit_safetynet so its not-installed branch is testable and
+        # visible (ccp#7 D3) — never silent here again.
+        await failure_exits.install_watchdog(engine, task)
 
         # S-L8-RECORD: recording notice before any conversation; recording is
         # gated on the notice outcome (LIVEKIT inbound only).
@@ -1152,7 +1132,7 @@ async def _run_pipeline_impl(
             user_provider_id=user_provider_id,
             integration_runtime_sessions=integration_runtime_sessions,
             consent_gate=consent_gate,
-            safetynet_watchdog=safetynet_watchdog,
+            safetynet_watchdog=failure_exits.watchdog,
         )
 
         register_audio_data_handler(
@@ -1177,7 +1157,7 @@ async def _run_pipeline_impl(
         # Close MCP sessions here, where the call's lifetime ends (each
         # session's transport runs in its own owner task).
         await engine.close_mcp_sessions()
-        if safetynet_watchdog is not None:
-            await safetynet_watchdog.stop()
+        if failure_exits.watchdog is not None:
+            await failure_exits.watchdog.stop()
         await feedback_observer.cleanup()
         logger.debug(f"Cleaned up context providers for workflow run {workflow_run_id}")
