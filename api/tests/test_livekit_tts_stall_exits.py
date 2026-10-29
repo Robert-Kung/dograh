@@ -13,7 +13,8 @@ service built by ``service_factory`` and the real safetynet watchdog: the
 error is a TTS error, TTS is marked unavailable, and the call is transferred
 without a prompt (design D9, TTS row).
 
-The factory sets the timeout to 5 s (``GEMINI_TTS_STREAM_IDLE_TIMEOUT_SECS``);
+The factory sets the timeout to 3 s (``GEMINI_TTS_STREAM_IDLE_TIMEOUT_SECS``),
+the same as the playback start timeout;
 the tests shorten it on the built service so they run quickly. Responses are
 test doubles; nothing reaches the network.
 """
@@ -27,7 +28,9 @@ from pipecat.frames.frames import ErrorFrame, TTSAudioRawFrame, TTSSpeakFrame
 from pipecat.services.google.tts import GeminiTTSStreamTimeoutError
 from pipecat.tests.utils import run_test
 
+from api.services.pipecat.livekit_failure_exits import PLAYBACK_START_TIMEOUT_SECONDS
 from api.services.pipecat.service_factory import (
+    GEMINI_LLM_FIRST_CHUNK_TIMEOUT_SECS,
     GEMINI_TTS_STREAM_IDLE_TIMEOUT_SECS,
     create_tts_service,
 )
@@ -45,6 +48,14 @@ pytestmark = pytest.mark.usefixtures(
 
 # Short enough to keep the tests quick, long enough to outlast scheduling jitter.
 TEST_IDLE_TIMEOUT = 0.2
+
+# run_pipeline's default max_user_idle_timeout, plus the 0.35 s pipecat's output
+# transport waits before BotStoppedSpeakingFrame starts the idle clock.
+DEFAULT_USER_IDLE_TIMEOUT = 10.0
+BOT_STOPPED_DELAY = 0.35
+
+# design D9: TTS-unavailable continuous silence, provisional cap (1.4).
+SILENCE_BUDGET = 20.0
 
 # A "stalled" stream goes quiet far beyond the timeout but not forever, so that
 # without the timeout the test fails on its assertions instead of hanging.
@@ -98,11 +109,27 @@ def _stalling_client(chunks_before_stall):
 
 
 def test_factory_bounds_the_gemini_tts_stream():
-    """5 s per chunk, the first included: inside the 20 s silence budget of
-    design D9 with room for the idle-timeout turn's other clocks."""
+    """3 s per chunk, the first included: the same first-audio allowance as
+    the playback start timeout."""
     tts = _gemini_tts()
 
-    assert tts._stream_idle_timeout_secs == GEMINI_TTS_STREAM_IDLE_TIMEOUT_SECS == 5.0
+    assert tts._stream_idle_timeout_secs == GEMINI_TTS_STREAM_IDLE_TIMEOUT_SECS == 3.0
+    assert GEMINI_TTS_STREAM_IDLE_TIMEOUT_SECS <= PLAYBACK_START_TIMEOUT_SECONDS
+
+
+def test_idle_turn_with_a_stalled_tts_fits_the_silence_budget():
+    """The idle-timeout turn arms no bot_silence. Its worst TTS case: the LLM
+    is healthy but answers just under its first-chunk bound, then the TTS
+    stalls before its first chunk; the TTS timeout marks TTS unavailable and
+    the REFER goes out with no prompt. 10 + 0.35 + 6 + 3 ≈ 19.4 s ≤ 20 s
+    (design D9; with a 5 s TTS timeout this was ≈ 21.4 s)."""
+    assert (
+        DEFAULT_USER_IDLE_TIMEOUT
+        + BOT_STOPPED_DELAY
+        + GEMINI_LLM_FIRST_CHUNK_TIMEOUT_SECS
+        + GEMINI_TTS_STREAM_IDLE_TIMEOUT_SECS
+        <= SILENCE_BUDGET
+    )
 
 
 @pytest.mark.parametrize(
@@ -153,7 +180,7 @@ def test_tts_timeout_is_classified_as_a_tts_error():
     )
 
     tts = _gemini_tts()
-    exc = GeminiTTSStreamTimeoutError(5.0, text_length=9, chunks_received=0)
+    exc = GeminiTTSStreamTimeoutError(3.0, text_length=9, chunks_received=0)
     frame = ErrorFrame(error=str(exc), exception=exc, processor=tts)
 
     assert classify_error_source(frame) is ErrorSource.TTS

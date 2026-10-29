@@ -159,9 +159,13 @@ GEMINI_LLM_FIRST_CHUNK_TIMEOUT_SECS = 6.0
 # 卡住時，回話中途的 TTS 會無限期等下去，來電者聽到的是沒有上限的靜音——閒置
 # 計時只在 BotStopped 後啟動、bot_silence 已被開口解除，沒有別的計時在等。逾時推
 # 非致命 ErrorFrame，safetynet 據此以 tts_error 標 TTS 不可用、不播話術直接轉真人
-# （C4）。量的是 chunk 間隔而不是整句長度，健康的長句不會被切斷；首 chunk 的
-# 等待涵蓋整個往返，Gemini TTS 經代理的首音延遲未實測（5.4 量測）。
-GEMINI_TTS_STREAM_IDLE_TIMEOUT_SECS = 5.0
+# （C4）。量的是 chunk 間隔而不是整句長度，健康的長句不會被切斷。
+# 3 秒＝起播逾時（PLAYBACK_START_TIMEOUT_SECONDS），兩者對 TTS 首音的假設一致；
+# 閒置那一輪 LLM 健康但首 chunk 接近 6 秒、TTS 又在首 chunk 前卡住的角落組合為
+# 10＋0.35＋6＋3 ≈ 19.4 秒，落在 D9 上限 20 秒內（5 秒時約 21.4 秒）。代價：健康
+# 的 TTS 首 chunk 若慢過 3 秒會被當成故障轉真人；Gemini TTS 經代理的首音延遲未
+# 實測（5.4 量測）。
+GEMINI_TTS_STREAM_IDLE_TIMEOUT_SECS = 3.0
 
 
 class DograhGoogleLLMService(GoogleLLMService):
