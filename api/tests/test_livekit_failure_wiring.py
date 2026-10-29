@@ -202,14 +202,91 @@ def test_watchdog_is_installed_before_the_event_handlers_get_it():
     assert install.lineno < register.lineno
 
 
-def test_tts_timeout_is_requested_only_for_livekit_runs():
-    """5.1 fix review R4: the TTS stream timeout is for calls the safetynet
-    watches; elsewhere ``on_pipeline_error`` would end the call on it."""
-    [create] = _impl_calls()["create_tts_service"]
+def _livekit_call_flag(tree):
+    """The name ``_run_pipeline_impl`` binds to "this run is LIVEKIT"."""
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Assign)
+            and isinstance(node.value, ast.Compare)
+            and "WorkflowRunMode.LIVEKIT" in ast.unparse(node.value)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+        ):
+            yield node.targets[0].id
 
-    assert _kwarg(create, "livekit_call") == (
-        "workflow_run.mode == WorkflowRunMode.LIVEKIT.value"
+
+def test_livekit_only_settings_follow_the_run_mode():
+    """The TTS stream timeout (5.1 fix review R4) and the shorter idle timeout
+    (recheck N1) are both keyed on the run's LIVEKIT mode — the calls whose
+    safetynet turns a timeout into a transfer and whose idle path has the
+    20 s silence budget. Elsewhere ``on_pipeline_error`` would end the call on
+    a TTS timeout. The defaults per mode are tested on
+    ``resolve_max_user_idle_timeout`` itself; this pins that both settings get
+    the same mode flag."""
+    tree = _impl_tree()
+    flags = set(_livekit_call_flag(tree))
+    calls = _impl_calls(tree)
+    [create_tts] = calls["create_tts_service"]
+    [resolve_idle] = calls["resolve_max_user_idle_timeout"]
+
+    assert _kwarg(create_tts, "livekit_call") in flags
+    assert _kwarg(resolve_idle, "livekit_call") == _kwarg(create_tts, "livekit_call")
+
+
+@pytest.mark.parametrize(
+    "run_configs, livekit_call, expected",
+    [
+        ({}, True, 8.0),
+        ({}, False, 10.0),
+        (None, True, 8.0),
+        ({"max_user_idle_timeout": 15}, True, 15),
+        ({"max_user_idle_timeout": 15}, False, 15),
+    ],
+    ids=[
+        "livekit-default",
+        "other-modes-default",
+        "livekit-no-configs",
+        "livekit-workflow-setting",
+        "other-modes-workflow-setting",
+    ],
+)
+def test_idle_timeout_defaults_by_mode_and_honors_the_workflow(
+    run_configs, livekit_call, expected
+):
+    """recheck N1: LIVEKIT calls wait 8 s, not 10, before the idle prompt so
+    the idle turn's bot_silence exit fits the 20 s budget; a workflow's own
+    ``max_user_idle_timeout`` is still honored."""
+    assert (
+        run_pipeline.resolve_max_user_idle_timeout(
+            run_configs, livekit_call=livekit_call
+        )
+        == expected
     )
+    assert run_pipeline.LIVEKIT_MAX_USER_IDLE_TIMEOUT_SECS == 8.0
+    assert run_pipeline.DEFAULT_MAX_USER_IDLE_TIMEOUT_SECS == 10.0
+
+
+def test_the_resolved_idle_timeout_reaches_the_user_aggregator():
+    """``_run_pipeline_impl`` hands the resolved value to the user turn
+    settings, where pipecat's idle controller reads it."""
+    tree = _impl_tree()
+    idle_names = {
+        node.targets[0].id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Assign)
+        and isinstance(node.value, ast.Call)
+        and ast.unparse(node.value.func) == "resolve_max_user_idle_timeout"
+    }
+    passed = [
+        ast.unparse(kw.value)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        for kw in node.keywords
+        if kw.arg == "user_idle_timeout"
+    ]
+
+    assert len(idle_names) == 1
+    assert passed and set(passed) <= idle_names
 
 
 def test_failure_exits_are_built_once_and_installed():

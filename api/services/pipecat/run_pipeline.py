@@ -104,11 +104,26 @@ ensure_tracing()
 DEFAULT_USER_TURN_STOP_TIMEOUT = 5.0
 EXTERNAL_TURN_USER_STOP_TIMEOUT = 30.0
 # Caller silence before the idle prompt; a workflow's run_configs
-# ("max_user_idle_timeout") can override it. On LIVEKIT calls it is the first
-# term of the idle path's silence budget (design D9; the sums are pinned in
-# test_livekit_llm_stall_exits / test_livekit_tts_stall_exits), so raising it
-# lengthens that path one for one.
+# ("max_user_idle_timeout") can override it.
 DEFAULT_MAX_USER_IDLE_TIMEOUT_SECS = 10.0
+# The same on LIVEKIT calls, where it is the first term of the idle path's
+# silence budget (design D9). 8 s, not 10, so that the idle turn's worst exit —
+# bot_silence (8 s, polled every 0.5 s) and then a transfer prompt bounded by
+# the 3 s playback start timeout — fits the 20 s cap: 8 + 0.35 + 8 + 0.5 + 3
+# ≈ 19.85 s (5.1 fix recheck N1). The sums are pinned in
+# api/tests/support/silence_budget.py's users. A run_configs override is still
+# honored, and lengthens that path one for one.
+LIVEKIT_MAX_USER_IDLE_TIMEOUT_SECS = 8.0
+
+
+def resolve_max_user_idle_timeout(run_configs: dict, *, livekit_call: bool) -> float:
+    """Caller silence before the idle prompt: the workflow's setting, else the
+    default for the call's mode."""
+    if run_configs and "max_user_idle_timeout" in run_configs:
+        return run_configs["max_user_idle_timeout"]
+    if livekit_call:
+        return LIVEKIT_MAX_USER_IDLE_TIMEOUT_SECS
+    return DEFAULT_MAX_USER_IDLE_TIMEOUT_SECS
 
 
 def _resolve_user_turn_stop_timeout(
@@ -584,7 +599,10 @@ async def _run_pipeline_impl(
 
     # Extract configurations from the version's workflow_configurations
     max_call_duration_seconds = 300  # Default 5 minutes
-    max_user_idle_timeout = DEFAULT_MAX_USER_IDLE_TIMEOUT_SECS
+    livekit_call = workflow_run.mode == WorkflowRunMode.LIVEKIT.value
+    max_user_idle_timeout = resolve_max_user_idle_timeout(
+        run_configs, livekit_call=livekit_call
+    )
     smart_turn_stop_secs = 2.0  # Default 2 seconds for incomplete turn timeout
     turn_stop_strategy = "transcription"  # Default to transcription-based detection
     keyterms = None  # Dictionary words for STT boosting
@@ -592,9 +610,6 @@ async def _run_pipeline_impl(
     if run_configs:
         if "max_call_duration" in run_configs:
             max_call_duration_seconds = run_configs["max_call_duration"]
-
-        if "max_user_idle_timeout" in run_configs:
-            max_user_idle_timeout = run_configs["max_user_idle_timeout"]
 
         if "smart_turn_stop_secs" in run_configs:
             smart_turn_stop_secs = run_configs["smart_turn_stop_secs"]
@@ -663,7 +678,7 @@ async def _run_pipeline_impl(
             user_config,
             audio_config,
             correlation_id=mps_correlation_id,
-            livekit_call=workflow_run.mode == WorkflowRunMode.LIVEKIT.value,
+            livekit_call=livekit_call,
         )
         llm = create_llm_service(user_config, correlation_id=mps_correlation_id)
         inference_llm = None

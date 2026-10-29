@@ -144,12 +144,12 @@ GEMINI_STREAM_IDLE_TIMEOUT_SECS = 10.0
 
 # Gemini LLM 等第一個 chunk 最多等多久（首 chunk 重送 retry_on_timeout 維持上游
 # 預設關閉）。首 chunk 的等待涵蓋整個往返＋模型思考。與上面的 chunk 間逾時分開
-# （la-only-go-live 5.1 審查 S2）：來電者不說話時，閒置逾時（run_pipeline
-# DEFAULT_MAX_USER_IDLE_TIMEOUT_SECS 10 秒，BotStopped 另有 0.35 秒）觸發的那一輪
-# 在首 chunk 前卡住，由這個逾時先到（6 < bot_silence 8；該輪自 5.1 修正審查 R2 起
-# 也武裝 bot_silence）：10＋0.35＋6＋起播逾時 3（livekit_failure_exits.py
-# PLAYBACK_START_TIMEOUT_SECONDS）≈ 19.4 秒，落在 design D9「TTS 不可用時連續
-# 靜音」暫定上限 20 秒內（原本首 chunk 也是 10 秒，合計約 23.4 秒）。
+# （la-only-go-live 5.1 審查 S2）：來電者不說話時，閒置逾時（LIVEKIT 為
+# run_pipeline.LIVEKIT_MAX_USER_IDLE_TIMEOUT_SECS 8 秒，BotStopped 另有 0.35 秒）
+# 觸發的那一輪在首 chunk 前卡住，由這個逾時先到（6 < bot_silence 8）：
+# 8＋0.35＋6＋起播逾時 3（livekit_failure_exits.py PLAYBACK_START_TIMEOUT_SECONDS）
+# ≈ 17.4 秒，在 design D9「TTS 不可用時連續靜音」暫定上限 20 秒內。閒置路徑各分支
+# 的加總由 api/tests/support/silence_budget.py 的使用者釘住。
 # 交付用的 gemini-3.8-flash（thinking low）的首 chunk 延遲是否穩定低於 6 秒未實測
 # （5.4 量測）；pro 或高思考量的模型在沒有 safetynet 的模式（文字對話等）可能還沒
 # 開口就逾時。
@@ -162,8 +162,11 @@ GEMINI_LLM_FIRST_CHUNK_TIMEOUT_SECS = 6.0
 # 非致命 ErrorFrame，safetynet 據此以 tts_error 標 TTS 不可用、不播話術直接轉真人
 # （C4）。量的是 chunk 間隔而不是整句長度，健康的長句不會被切斷。
 # 3 秒＝起播逾時（PLAYBACK_START_TIMEOUT_SECONDS），兩者對 TTS 首音的假設一致。
-# 閒置那一輪各路徑的加總見 design D9。代價：健康的 TTS 首 chunk 若慢過 3 秒會被
-# 當成故障轉真人；Gemini TTS 經代理的首音延遲未實測（5.4 量測）。
+# 回話中途卡住：自最後一段音訊起 ≤ 3 秒即轉接。閒置那一輪 LLM 健康、TTS 在首
+# chunk 前卡住：8＋0.35＋6＋3 ≈ 17.4 秒；若 bot_silence（閒置那一輪自 5.1 修正審查
+# R2 起也武裝）先到，轉接話術再受起播逾時約束：8＋0.35＋8＋輪詢 0.5＋3 ≈ 19.85 秒
+# （5.1 修正複審 N1）。代價：健康的 TTS 首 chunk 若慢過 3 秒會被當成故障轉真人；
+# Gemini TTS 經代理的首音延遲未實測（5.4 量測）。
 # 只在 LIVEKIT 通話傳入（create_tts_service 的 livekit_call，5.1 修正審查 R4）：
 # 其他模式（編輯器試撥）沒有 safetynet 接手，on_pipeline_error 會因這個 ErrorFrame
 # 直接結束通話，健康但慢的 TTS 會把試撥切斷。LLM 的逾時不分模式（base 起就如此）。

@@ -53,7 +53,6 @@ from pipecat.pipeline.pipeline import Pipeline
 from pipecat.processors.aggregators.llm_context import LLMContext
 from pipecat.processors.frame_processor import FrameDirection
 from pipecat.tests.utils import run_test
-from pipecat.transports.base_output import BOT_VAD_STOP_SECS
 
 from api.services.configuration.registry import ServiceProviders
 from api.services.pipecat import livekit_safetynet as sn
@@ -62,7 +61,6 @@ from api.services.pipecat.empty_llm_turn_fallback import (
     EmptyLLMTurnFallbackProcessor,
 )
 from api.services.pipecat.livekit_failure_exits import PLAYBACK_START_TIMEOUT_SECONDS
-from api.services.pipecat.run_pipeline import DEFAULT_MAX_USER_IDLE_TIMEOUT_SECS
 from api.services.pipecat.service_factory import (
     GEMINI_LLM_FIRST_CHUNK_TIMEOUT_SECS,
     GEMINI_STREAM_IDLE_TIMEOUT_SECS,
@@ -75,6 +73,11 @@ from api.tests.support.livekit_failure_fakes import (
     ready_call,
     until,
 )
+from api.tests.support.silence_budget import (
+    SILENCE_BUDGET,
+    idle_path_silence,
+    watchdog_poll_seconds,
+)
 
 pytestmark = pytest.mark.usefixtures(
     "reset_safetynet_latch", "no_leaked_background_tasks"
@@ -83,12 +86,6 @@ pytestmark = pytest.mark.usefixtures(
 # Short enough to keep the tests quick, long enough to outlast scheduling jitter.
 TEST_IDLE_TIMEOUT = 0.2
 
-# design D9: TTS-unavailable continuous silence, provisional cap (1.4).
-# The other terms of the sums below are read from the code: run_pipeline's
-# default max_user_idle_timeout (a workflow's run_configs can raise it, and
-# the sums with it), and the delay pipecat's output transport waits before
-# BotStoppedSpeakingFrame starts the idle clock.
-SILENCE_BUDGET = 20.0
 
 # Scaled-down bot_silence threshold for the timing tests.
 TEST_BOT_SILENCE = 0.3
@@ -137,37 +134,42 @@ def test_factory_bounds_the_gemini_stream_beyond_the_owed_reply_threshold():
 def test_factory_bounds_the_first_chunk_apart_from_the_gaps():
     """First chunk: 6 s, thinking included (5.1 review S2).
 
-    The turn the idle timeout starts (caller silent) arms no bot_silence, so
-    the first-chunk bound is all that stands between a stalled LLM and the
-    exit: idle timeout + BotStopped delay + first chunk + playback start
-    timeout must fit the 20 s budget (10 + 0.35 + 6 + 3 ≈ 19.4 s). With 10 s
-    for the first chunk too, the path was ≈ 23.4 s. A pro or thinking-heavy
-    model in a mode without the safetynet (text chat, other transports) can
-    time out before saying anything."""
+    On the idle turn (caller silent) a stream that stalls before its first
+    chunk is ended by this bound, ahead of bot_silence: llm_error, then the
+    transfer prompt bounded by the playback start timeout. 8 + 0.35 + 6 + 3
+    ≈ 17.4 s on LIVEKIT (with the earlier 10 s idle timeout and 10 s first
+    chunk it was ≈ 23.4 s). A pro or thinking-heavy model in a mode without
+    the safetynet (text chat, other transports) can time out before saying
+    anything."""
     llm = _gemini_llm()
 
     assert llm._first_chunk_timeout_secs == GEMINI_LLM_FIRST_CHUNK_TIMEOUT_SECS == 6.0
+    assert GEMINI_LLM_FIRST_CHUNK_TIMEOUT_SECS < sn.max_silence_seconds()
     assert (
-        DEFAULT_MAX_USER_IDLE_TIMEOUT_SECS
-        + BOT_VAD_STOP_SECS
-        + GEMINI_LLM_FIRST_CHUNK_TIMEOUT_SECS
-        + PLAYBACK_START_TIMEOUT_SECONDS
+        idle_path_silence(
+            GEMINI_LLM_FIRST_CHUNK_TIMEOUT_SECS, PLAYBACK_START_TIMEOUT_SECONDS
+        )
         <= SILENCE_BUDGET
     )
 
 
-def test_idle_turn_stalled_after_its_first_chunk_fits_the_budget():
-    """5.1 fix review R2: the idle-timeout turn is armed like any owed reply,
-    so a stream that stalls after a first chunk TTS cannot speak yet (a half
-    sentence, or a whole one still waiting for the turn's end) is bounded by
-    bot_silence, not by the 10 s gap timeout: 10 + 0.35 + 8 ≈ 18.4 s."""
+def test_idle_turn_ended_by_bot_silence_fits_the_budget():
+    """5.1 fix review R2 / recheck N1: the idle-timeout turn is armed like any
+    owed reply, so a turn that has not started speaking (the LLM stalled after
+    a chunk TTS cannot speak yet, or a healthy but slow first sentence while
+    the TTS stalls) is ended by bot_silence, not by the 10 s gap timeout.
+    bot_silence fires up to one monitor poll late, and the transfer prompt it
+    plays is bounded by the playback start timeout (TTS is not yet marked
+    unavailable): 8 + 0.35 + 8 + 0.5 + 3 ≈ 19.85 s on LIVEKIT."""
     assert (
-        DEFAULT_MAX_USER_IDLE_TIMEOUT_SECS
-        + BOT_VAD_STOP_SECS
-        + sn._DEFAULT_MAX_SILENCE_SECONDS
+        idle_path_silence(
+            sn.max_silence_seconds(),
+            watchdog_poll_seconds(),
+            PLAYBACK_START_TIMEOUT_SECONDS,
+        )
         <= SILENCE_BUDGET
     )
-    assert sn._DEFAULT_MAX_SILENCE_SECONDS < GEMINI_STREAM_IDLE_TIMEOUT_SECS
+    assert sn.max_silence_seconds() < GEMINI_STREAM_IDLE_TIMEOUT_SECS
 
 
 async def test_idle_turn_stalled_after_half_a_sentence_transfers_on_bot_silence(

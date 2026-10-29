@@ -27,10 +27,8 @@ import pytest
 from pipecat.frames.frames import ErrorFrame, TTSAudioRawFrame, TTSSpeakFrame
 from pipecat.services.google.tts import GeminiTTSStreamTimeoutError
 from pipecat.tests.utils import run_test
-from pipecat.transports.base_output import BOT_VAD_STOP_SECS
 
 from api.services.pipecat.livekit_failure_exits import PLAYBACK_START_TIMEOUT_SECONDS
-from api.services.pipecat.run_pipeline import DEFAULT_MAX_USER_IDLE_TIMEOUT_SECS
 from api.services.pipecat.service_factory import (
     GEMINI_LLM_FIRST_CHUNK_TIMEOUT_SECS,
     GEMINI_TTS_STREAM_IDLE_TIMEOUT_SECS,
@@ -43,6 +41,7 @@ from api.tests.support.livekit_failure_fakes import (
     ready_call,
     until,
 )
+from api.tests.support.silence_budget import SILENCE_BUDGET, idle_path_silence
 
 pytestmark = pytest.mark.usefixtures(
     "reset_safetynet_latch", "no_leaked_background_tasks"
@@ -50,9 +49,6 @@ pytestmark = pytest.mark.usefixtures(
 
 # Short enough to keep the tests quick, long enough to outlast scheduling jitter.
 TEST_IDLE_TIMEOUT = 0.2
-
-# design D9: TTS-unavailable continuous silence, provisional cap (1.4).
-SILENCE_BUDGET = 20.0
 
 # A "stalled" stream goes quiet far beyond the timeout but not forever, so that
 # without the timeout the test fails on its assertions instead of hanging.
@@ -89,6 +85,22 @@ def _audio_chunk():
     )
 
 
+def _gapped_client(gap):
+    """A healthy stream with one long gap between two chunks of audio."""
+
+    async def generate_content_stream(*args, **kwargs):
+        async def stream():
+            yield _audio_chunk()
+            await asyncio.sleep(gap)
+            yield _audio_chunk()
+
+        return stream()
+
+    client = MagicMock()
+    client.aio.models.generate_content_stream = generate_content_stream
+    return client
+
+
 def _stalling_client(chunks_before_stall):
     """A client whose stream the API accepted and that then stops producing."""
 
@@ -114,26 +126,45 @@ def test_factory_bounds_the_gemini_tts_stream():
     assert GEMINI_TTS_STREAM_IDLE_TIMEOUT_SECS <= PLAYBACK_START_TIMEOUT_SECONDS
 
 
-def test_tts_stream_is_bounded_only_on_livekit_calls():
+@pytest.mark.parametrize("livekit_call", [True, False], ids=["livekit", "other-modes"])
+async def test_tts_stream_is_bounded_only_on_livekit_calls(livekit_call):
     """5.1 fix review R4: off LIVEKIT there is no safetynet to turn the
     timeout into a transfer, and ``on_pipeline_error`` would end the call on
-    it (an editor test call cut short by a slow but healthy TTS)."""
-    tts = _gemini_tts(livekit_call=False)
+    it (an editor test call cut short by a slow but healthy TTS). A gap a
+    little longer than the factory timeout ends the utterance on a LIVEKIT
+    call and is waited out elsewhere."""
+    tts = _gemini_tts(livekit_call=livekit_call)
 
-    assert tts._stream_idle_timeout_secs is None
+    with patch.object(
+        tts, "_client", _gapped_client(GEMINI_TTS_STREAM_IDLE_TIMEOUT_SECS + 0.5)
+    ):
+        down, up = await asyncio.wait_for(
+            run_test(tts, frames_to_send=[TTSSpeakFrame(text="好的，我幫您查詢。")]),
+            timeout=15,
+        )
+
+    errors = [f for f in up if isinstance(f, ErrorFrame)]
+    audio = b"".join(f.audio for f in down if isinstance(f, TTSAudioRawFrame))
+    if livekit_call:
+        assert [type(e.exception) for e in errors] == [GeminiTTSStreamTimeoutError]
+        assert len(audio) == len(ONE_SECOND)
+    else:
+        assert errors == []
+        assert len(audio) == 2 * len(ONE_SECOND)
 
 
 def test_idle_turn_with_a_stalled_tts_fits_the_silence_budget():
-    """The idle-timeout turn arms no bot_silence. Its worst TTS case: the LLM
-    is healthy but answers just under its first-chunk bound, then the TTS
-    stalls before its first chunk; the TTS timeout marks TTS unavailable and
-    the REFER goes out with no prompt. 10 + 0.35 + 6 + 3 ≈ 19.4 s ≤ 20 s
-    (design D9; with a 5 s TTS timeout this was ≈ 21.4 s)."""
+    """On the idle turn, the LLM is healthy but its first sentence comes in
+    just under the first-chunk bound, then the TTS stalls before its first
+    chunk: the TTS timeout marks TTS unavailable and the REFER goes out with
+    no prompt, 8 + 0.35 + 6 + 3 ≈ 17.4 s on LIVEKIT. (The idle turn also arms
+    bot_silence since 5.1 fix review R2; whichever of the two fires first,
+    the longer bound is the bot_silence branch pinned in
+    test_livekit_llm_stall_exits, ≈ 19.85 s.)"""
     assert (
-        DEFAULT_MAX_USER_IDLE_TIMEOUT_SECS
-        + BOT_VAD_STOP_SECS
-        + GEMINI_LLM_FIRST_CHUNK_TIMEOUT_SECS
-        + GEMINI_TTS_STREAM_IDLE_TIMEOUT_SECS
+        idle_path_silence(
+            GEMINI_LLM_FIRST_CHUNK_TIMEOUT_SECS, GEMINI_TTS_STREAM_IDLE_TIMEOUT_SECS
+        )
         <= SILENCE_BUDGET
     )
 
