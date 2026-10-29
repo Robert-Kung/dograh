@@ -592,3 +592,91 @@ def _platform_enabled_set(monkeypatch):
     monkeypatch.setenv("PLATFORM_FEATURE_SCOPE", str(PERMISSIVE_SCOPE))
     yield
     platform_scope.reset_cache()
+
+
+# --- LIVEKIT call-exit fixtures ----------------------------------------------
+# Used by test_livekit_failure_exits and test_livekit_llm_stall_exits; the fakes
+# they build on are in api/tests/support/livekit_failure_fakes.py. Imports are
+# local so other tests don't load the Gemini services.
+
+
+@pytest.fixture
+def reset_safetynet_latch():
+    """Each test starts with no run marked as already transferred."""
+    from api.services.pipecat import livekit_safetynet as sn
+
+    sn._fired_runs.clear()
+    sn._fired_order.clear()
+    yield
+
+
+@pytest.fixture
+async def no_leaked_background_tasks():
+    """The test loop is session-scoped: an exit left running here (a REFER
+    still ringing, a forced-end deadline) would outlive the test and block
+    other suites that drain ``api.utils.background``."""
+    import asyncio
+
+    from api.utils import background
+
+    before = set(background._background_tasks)
+    yield
+    leaked = [
+        t for t in background._background_tasks if t not in before and not t.done()
+    ]
+    for t in leaked:
+        t.cancel()
+    await asyncio.gather(*leaked, return_exceptions=True)
+
+
+@pytest.fixture(scope="module")
+def services():
+    """Real Gemini STT/TTS and Google LLM objects (never started), so error
+    classification runs against the processor types the pipeline has."""
+    import types
+
+    from pipecat.services.google.gemini_live.stt import GeminiSTTService
+    from pipecat.services.google.llm import GoogleLLMService
+    from pipecat.services.google.tts import GeminiTTSService
+
+    from api.tests.support.livekit_failure_fakes import FAKE_KEY
+
+    return types.SimpleNamespace(
+        stt=GeminiSTTService(api_key=FAKE_KEY),
+        tts=GeminiTTSService(api_key=FAKE_KEY, use_genai=True),
+        llm=GoogleLLMService(api_key=FAKE_KEY),
+    )
+
+
+@pytest.fixture
+def refer(monkeypatch):
+    """Replace the SIP REFER with a scripted one; record its order and args."""
+    import asyncio
+    import types
+
+    from api.services.pipecat import livekit_call_events, livekit_cold_transfer
+    from api.services.pipecat import livekit_safetynet as sn
+    from api.tests.support.livekit_failure_fakes import FALLBACK
+
+    script = types.SimpleNamespace(
+        result={"status": "success"}, calls=[], hang=False, order=[]
+    )
+
+    async def fake_cold_transfer(room_name, destination, **kwargs):
+        script.calls.append({"room": room_name, "to": destination, **kwargs})
+        script.engine.log.append(("refer", kwargs.get("play_dialtone")))
+        script.order.append("refer")
+        if script.hang:
+            await asyncio.sleep(3600)
+        return script.result
+
+    async def fake_delete_room(room_name, workflow_run_id, lk=None):
+        script.engine.log.append(("bye", room_name))
+
+    monkeypatch.setattr(
+        livekit_cold_transfer, "cold_transfer_to_human", fake_cold_transfer
+    )
+    monkeypatch.setattr(livekit_call_events, "delete_room_at_run_end", fake_delete_room)
+    monkeypatch.setenv("SAFETYNET_FALLBACK_QUEUE", FALLBACK)
+    monkeypatch.setattr(sn, "log_event", lambda *a, **k: None)
+    return script
