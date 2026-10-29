@@ -65,6 +65,7 @@ from pipecat.frames.frames import (
     FunctionCallInProgressFrame,
     FunctionCallResultFrame,
     InterimTranscriptionFrame,
+    LLMMessagesAppendFrame,
     TranscriptionFrame,
     UserStoppedSpeakingFrame,
     VADUserStartedSpeakingFrame,
@@ -699,8 +700,9 @@ class SafetynetWatchdog(BaseObserver):
       STT error threshold is met, or any TTS, LLM or unclassified error —
       ``on_pipeline_error`` no longer cancels the call on these, so this is
       their only exit;
-    - the bot owes a reply (a user turn ended, or the call just connected and
-      the greeting is due) and produces no speech within the threshold.
+    - the bot owes a reply (a user turn ended, the call just connected and
+      the greeting is due, or the idle-timeout prompt asked the LLM to speak)
+      and produces no speech within the threshold.
 
     It is re-armed (:meth:`rearm_after_transfer`) only when the safetynet
     yielded to a voice/press-0 transfer that then left the call with the AI.
@@ -711,7 +713,8 @@ class SafetynetWatchdog(BaseObserver):
     playback, and transcriptions reset the STT error count.
 
     The silence clock only runs while a reply is owed: it arms on
-    ``UserStoppedSpeakingFrame`` / ``ClientConnectedFrame``, disarms on
+    ``UserStoppedSpeakingFrame`` / ``ClientConnectedFrame`` / an
+    ``LLMMessagesAppendFrame`` that runs the LLM (the idle prompt), disarms on
     ``BotStartedSpeakingFrame`` or when the user starts speaking again, and is
     suspended while a function call is in flight — an MCP ticket lookup may
     legitimately hold the floor longer than the threshold (healthy calls must
@@ -797,6 +800,11 @@ class SafetynetWatchdog(BaseObserver):
             self.state.stt_errors.reset()
 
         if isinstance(frame, (ClientConnectedFrame, UserStoppedSpeakingFrame)):
+            self._arm()
+        elif isinstance(frame, LLMMessagesAppendFrame) and frame.run_llm:
+            # The idle-timeout prompt (UserIdleHandler): the caller said
+            # nothing, so no UserStoppedSpeakingFrame arms this turn, yet the
+            # bot owes a reply all the same (5.1 fix review R2).
             self._arm()
         elif isinstance(frame, (BotStartedSpeakingFrame, VADUserStartedSpeakingFrame)):
             self._disarm()

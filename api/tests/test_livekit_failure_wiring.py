@@ -148,11 +148,15 @@ async def test_watchdog_not_installed_leaves_nothing_half_wired(quiet_install):
 # --- the hand-offs that stay in _run_pipeline_impl ---------------------------
 
 
-def _impl_calls():
-    """Calls made in ``_run_pipeline_impl``, keyed by the called name."""
+def _impl_tree():
     source = textwrap.dedent(inspect.getsource(run_pipeline._run_pipeline_impl))
+    return ast.parse(source)
+
+
+def _impl_calls(tree=None):
+    """Calls made in ``_run_pipeline_impl``, keyed by the called name."""
     calls = {}
-    for node in ast.walk(ast.parse(source)):
+    for node in ast.walk(tree or _impl_tree()):
         if isinstance(node, ast.Call):
             func = node.func
             name = (
@@ -182,6 +186,30 @@ def test_event_handlers_get_the_failure_exits_watchdog():
     [register] = _impl_calls()["register_event_handlers"]
 
     assert _kwarg(register, "safetynet_watchdog") == "failure_exits.watchdog"
+
+
+def test_watchdog_is_installed_before_the_event_handlers_get_it():
+    """5.1 fix review R5: ``failure_exits.watchdog`` is None until
+    ``install_watchdog`` has completed, so it must be awaited, and before
+    ``register_event_handlers`` reads it."""
+    tree = _impl_tree()
+    awaited = {id(node.value) for node in ast.walk(tree) if isinstance(node, ast.Await)}
+    calls = _impl_calls(tree)
+    [install] = calls["install_watchdog"]
+    [register] = calls["register_event_handlers"]
+
+    assert id(install) in awaited
+    assert install.lineno < register.lineno
+
+
+def test_tts_timeout_is_requested_only_for_livekit_runs():
+    """5.1 fix review R4: the TTS stream timeout is for calls the safetynet
+    watches; elsewhere ``on_pipeline_error`` would end the call on it."""
+    [create] = _impl_calls()["create_tts_service"]
+
+    assert _kwarg(create, "livekit_call") == (
+        "workflow_run.mode == WorkflowRunMode.LIVEKIT.value"
+    )
 
 
 def test_failure_exits_are_built_once_and_installed():

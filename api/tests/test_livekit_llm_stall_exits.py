@@ -35,6 +35,7 @@ through ``api/tests/support/livekit_failure_fakes.py`` and the fixtures in
 """
 
 import asyncio
+import time
 from unittest.mock import patch
 
 import pytest
@@ -44,6 +45,7 @@ from pipecat.frames.frames import (
     LLMContextFrame,
     LLMFullResponseEndFrame,
     LLMFullResponseStartFrame,
+    LLMMessagesAppendFrame,
     LLMTextFrame,
     TTSSpeakFrame,
 )
@@ -51,6 +53,7 @@ from pipecat.pipeline.pipeline import Pipeline
 from pipecat.processors.aggregators.llm_context import LLMContext
 from pipecat.processors.frame_processor import FrameDirection
 from pipecat.tests.utils import run_test
+from pipecat.transports.base_output import BOT_VAD_STOP_SECS
 
 from api.services.configuration.registry import ServiceProviders
 from api.services.pipecat import livekit_safetynet as sn
@@ -59,6 +62,7 @@ from api.services.pipecat.empty_llm_turn_fallback import (
     EmptyLLMTurnFallbackProcessor,
 )
 from api.services.pipecat.livekit_failure_exits import PLAYBACK_START_TIMEOUT_SECONDS
+from api.services.pipecat.run_pipeline import DEFAULT_MAX_USER_IDLE_TIMEOUT_SECS
 from api.services.pipecat.service_factory import (
     GEMINI_LLM_FIRST_CHUNK_TIMEOUT_SECS,
     GEMINI_STREAM_IDLE_TIMEOUT_SECS,
@@ -79,13 +83,15 @@ pytestmark = pytest.mark.usefixtures(
 # Short enough to keep the tests quick, long enough to outlast scheduling jitter.
 TEST_IDLE_TIMEOUT = 0.2
 
-# run_pipeline's default max_user_idle_timeout, plus the 0.35 s pipecat's output
-# transport waits before BotStoppedSpeakingFrame starts the idle clock.
-DEFAULT_USER_IDLE_TIMEOUT = 10.0
-BOT_STOPPED_DELAY = 0.35
-
 # design D9: TTS-unavailable continuous silence, provisional cap (1.4).
+# The other terms of the sums below are read from the code: run_pipeline's
+# default max_user_idle_timeout (a workflow's run_configs can raise it, and
+# the sums with it), and the delay pipecat's output transport waits before
+# BotStoppedSpeakingFrame starts the idle clock.
 SILENCE_BUDGET = 20.0
+
+# Scaled-down bot_silence threshold for the timing tests.
+TEST_BOT_SILENCE = 0.3
 
 
 def _gemini_llm():
@@ -142,12 +148,71 @@ def test_factory_bounds_the_first_chunk_apart_from_the_gaps():
 
     assert llm._first_chunk_timeout_secs == GEMINI_LLM_FIRST_CHUNK_TIMEOUT_SECS == 6.0
     assert (
-        DEFAULT_USER_IDLE_TIMEOUT
-        + BOT_STOPPED_DELAY
+        DEFAULT_MAX_USER_IDLE_TIMEOUT_SECS
+        + BOT_VAD_STOP_SECS
         + GEMINI_LLM_FIRST_CHUNK_TIMEOUT_SECS
         + PLAYBACK_START_TIMEOUT_SECONDS
         <= SILENCE_BUDGET
     )
+
+
+def test_idle_turn_stalled_after_its_first_chunk_fits_the_budget():
+    """5.1 fix review R2: the idle-timeout turn is armed like any owed reply,
+    so a stream that stalls after a first chunk TTS cannot speak yet (a half
+    sentence, or a whole one still waiting for the turn's end) is bounded by
+    bot_silence, not by the 10 s gap timeout: 10 + 0.35 + 8 ≈ 18.4 s."""
+    assert (
+        DEFAULT_MAX_USER_IDLE_TIMEOUT_SECS
+        + BOT_VAD_STOP_SECS
+        + sn._DEFAULT_MAX_SILENCE_SECONDS
+        <= SILENCE_BUDGET
+    )
+    assert sn._DEFAULT_MAX_SILENCE_SECONDS < GEMINI_STREAM_IDLE_TIMEOUT_SECS
+
+
+async def test_idle_turn_stalled_after_half_a_sentence_transfers_on_bot_silence(
+    monkeypatch, services, refer
+):
+    """The idle prompt's reply starts with "好的，" and then the stream stalls.
+
+    A Chinese comma ends no sentence, so TTS has nothing to speak and no
+    BotStartedSpeakingFrame comes. The idle turn arms no
+    UserStoppedSpeakingFrame either: it is an ``LLMMessagesAppendFrame`` with
+    ``run_llm``. Before 5.1 fix review R2 nothing was armed, and the caller
+    heard silence until the gap timeout (10 s) — about 26 s in all. Now the
+    append arms bot_silence, which transfers well before the gap timeout.
+    """
+    events = []
+    monkeypatch.setattr(
+        sn, "log_event", lambda event, **fields: events.append((event, fields))
+    )
+    call = await ready_call(make_call(services, refer))
+    call.wd._clock = time.monotonic
+    call.wd._threshold = TEST_BOT_SILENCE
+    llm = _gemini_llm()
+    # Far past bot_silence: if bot_silence is not armed, this ends the turn
+    # and the exit is an llm_error instead.
+    llm._stream_idle_timeout_secs = TEST_BOT_SILENCE * 6
+    idle_prompt = LLMMessagesAppendFrame(
+        [{"role": "user", "content": "The user has been quiet."}], run_llm=True
+    )
+
+    with patch.object(llm, "_stream_content", _stalling_stream("好的，")):
+        await asyncio.wait_for(
+            run_test(
+                Pipeline([llm, EmptyLLMTurnFallbackProcessor()]),
+                frames_to_send=[idle_prompt, LLMContextFrame(LLMContext())],
+                observers=[call.wd],
+            ),
+            timeout=5,
+        )
+
+    await until(lambda: call.engine.entries("end"))
+    [triggered] = [f for e, f in events if e == "safetynet.triggered"]
+    assert triggered["reason"] == "bot_silence"
+    assert [e[0] for e in call.engine.log] == ["tts", "refer", "end"]
+    assert call.engine.log[2] == ("end", TRANSFERRED, False)
+    await call.wd.stop()
 
 
 def test_vertex_llm_gets_the_same_bounds():

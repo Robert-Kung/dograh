@@ -144,9 +144,10 @@ GEMINI_STREAM_IDLE_TIMEOUT_SECS = 10.0
 
 # Gemini LLM 等第一個 chunk 最多等多久（首 chunk 重送 retry_on_timeout 維持上游
 # 預設關閉）。首 chunk 的等待涵蓋整個往返＋模型思考。與上面的 chunk 間逾時分開
-# （la-only-go-live 5.1 審查 S2）：來電者不說話時，閒置逾時（run_pipeline 預設
-# 10 秒，BotStopped 另有 0.35 秒）觸發的那一輪不會武裝 bot_silence，只剩這個
-# 逾時在等；10＋0.35＋6＋起播逾時 3（livekit_failure_exits.py
+# （la-only-go-live 5.1 審查 S2）：來電者不說話時，閒置逾時（run_pipeline
+# DEFAULT_MAX_USER_IDLE_TIMEOUT_SECS 10 秒，BotStopped 另有 0.35 秒）觸發的那一輪
+# 在首 chunk 前卡住，由這個逾時先到（6 < bot_silence 8；該輪自 5.1 修正審查 R2 起
+# 也武裝 bot_silence）：10＋0.35＋6＋起播逾時 3（livekit_failure_exits.py
 # PLAYBACK_START_TIMEOUT_SECONDS）≈ 19.4 秒，落在 design D9「TTS 不可用時連續
 # 靜音」暫定上限 20 秒內（原本首 chunk 也是 10 秒，合計約 23.4 秒）。
 # 交付用的 gemini-3.8-flash（thinking low）的首 chunk 延遲是否穩定低於 6 秒未實測
@@ -160,11 +161,12 @@ GEMINI_LLM_FIRST_CHUNK_TIMEOUT_SECS = 6.0
 # 計時只在 BotStopped 後啟動、bot_silence 已被開口解除，沒有別的計時在等。逾時推
 # 非致命 ErrorFrame，safetynet 據此以 tts_error 標 TTS 不可用、不播話術直接轉真人
 # （C4）。量的是 chunk 間隔而不是整句長度，健康的長句不會被切斷。
-# 3 秒＝起播逾時（PLAYBACK_START_TIMEOUT_SECONDS），兩者對 TTS 首音的假設一致；
-# 閒置那一輪 LLM 健康但首 chunk 接近 6 秒、TTS 又在首 chunk 前卡住的角落組合為
-# 10＋0.35＋6＋3 ≈ 19.4 秒，落在 D9 上限 20 秒內（5 秒時約 21.4 秒）。代價：健康
-# 的 TTS 首 chunk 若慢過 3 秒會被當成故障轉真人；Gemini TTS 經代理的首音延遲未
-# 實測（5.4 量測）。
+# 3 秒＝起播逾時（PLAYBACK_START_TIMEOUT_SECONDS），兩者對 TTS 首音的假設一致。
+# 閒置那一輪各路徑的加總見 design D9。代價：健康的 TTS 首 chunk 若慢過 3 秒會被
+# 當成故障轉真人；Gemini TTS 經代理的首音延遲未實測（5.4 量測）。
+# 只在 LIVEKIT 通話傳入（create_tts_service 的 livekit_call，5.1 修正審查 R4）：
+# 其他模式（編輯器試撥）沒有 safetynet 接手，on_pipeline_error 會因這個 ErrorFrame
+# 直接結束通話，健康但慢的 TTS 會把試撥切斷。LLM 的逾時不分模式（base 起就如此）。
 GEMINI_TTS_STREAM_IDLE_TIMEOUT_SECS = 3.0
 
 
@@ -489,13 +491,20 @@ def create_stt_service(
 
 
 def create_tts_service(
-    user_config, audio_config: "AudioConfig", correlation_id: str | None = None
+    user_config,
+    audio_config: "AudioConfig",
+    correlation_id: str | None = None,
+    *,
+    livekit_call: bool = False,
 ):
     """Create and return appropriate TTS service based on user configuration
 
     Args:
         user_config: User configuration containing TTS settings
         transport_type: Type of transport (e.g., 'twilio', 'webrtc')
+        livekit_call: The service is for a LIVEKIT call, whose safetynet turns
+            a TTS stream timeout into a transfer. Only then is the Gemini TTS
+            stream bounded (GEMINI_TTS_STREAM_IDLE_TIMEOUT_SECS).
     """
     logger.info(
         f"Creating TTS service: provider={user_config.tts.provider}, model={user_config.tts.model}"
@@ -582,7 +591,9 @@ def create_tts_service(
             text_filters=[xml_function_tag_filter],
             skip_aggregator_types=["recording_router", "recording"],
             silence_time_s=1.0,
-            stream_idle_timeout_secs=GEMINI_TTS_STREAM_IDLE_TIMEOUT_SECS,
+            stream_idle_timeout_secs=(
+                GEMINI_TTS_STREAM_IDLE_TIMEOUT_SECS if livekit_call else None
+            ),
         )
     elif user_config.tts.provider == ServiceProviders.ELEVENLABS.value:
         # Backward compatible with older configuration "Name - voice_id"

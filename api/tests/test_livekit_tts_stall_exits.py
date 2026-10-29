@@ -27,8 +27,10 @@ import pytest
 from pipecat.frames.frames import ErrorFrame, TTSAudioRawFrame, TTSSpeakFrame
 from pipecat.services.google.tts import GeminiTTSStreamTimeoutError
 from pipecat.tests.utils import run_test
+from pipecat.transports.base_output import BOT_VAD_STOP_SECS
 
 from api.services.pipecat.livekit_failure_exits import PLAYBACK_START_TIMEOUT_SECONDS
+from api.services.pipecat.run_pipeline import DEFAULT_MAX_USER_IDLE_TIMEOUT_SECS
 from api.services.pipecat.service_factory import (
     GEMINI_LLM_FIRST_CHUNK_TIMEOUT_SECS,
     GEMINI_TTS_STREAM_IDLE_TIMEOUT_SECS,
@@ -49,11 +51,6 @@ pytestmark = pytest.mark.usefixtures(
 # Short enough to keep the tests quick, long enough to outlast scheduling jitter.
 TEST_IDLE_TIMEOUT = 0.2
 
-# run_pipeline's default max_user_idle_timeout, plus the 0.35 s pipecat's output
-# transport waits before BotStoppedSpeakingFrame starts the idle clock.
-DEFAULT_USER_IDLE_TIMEOUT = 10.0
-BOT_STOPPED_DELAY = 0.35
-
 # design D9: TTS-unavailable continuous silence, provisional cap (1.4).
 SILENCE_BUDGET = 20.0
 
@@ -69,7 +66,7 @@ AUDIO_CONFIG = SimpleNamespace(
 ONE_SECOND = b"\x00\x01" * 24000
 
 
-def _gemini_tts():
+def _gemini_tts(livekit_call=True):
     user_config = SimpleNamespace(
         tts=SimpleNamespace(
             provider="google_gemini",
@@ -79,7 +76,7 @@ def _gemini_tts():
             language="cmn-TW",
         )
     )
-    return create_tts_service(user_config, AUDIO_CONFIG)
+    return create_tts_service(user_config, AUDIO_CONFIG, livekit_call=livekit_call)
 
 
 def _audio_chunk():
@@ -117,6 +114,15 @@ def test_factory_bounds_the_gemini_tts_stream():
     assert GEMINI_TTS_STREAM_IDLE_TIMEOUT_SECS <= PLAYBACK_START_TIMEOUT_SECONDS
 
 
+def test_tts_stream_is_bounded_only_on_livekit_calls():
+    """5.1 fix review R4: off LIVEKIT there is no safetynet to turn the
+    timeout into a transfer, and ``on_pipeline_error`` would end the call on
+    it (an editor test call cut short by a slow but healthy TTS)."""
+    tts = _gemini_tts(livekit_call=False)
+
+    assert tts._stream_idle_timeout_secs is None
+
+
 def test_idle_turn_with_a_stalled_tts_fits_the_silence_budget():
     """The idle-timeout turn arms no bot_silence. Its worst TTS case: the LLM
     is healthy but answers just under its first-chunk bound, then the TTS
@@ -124,8 +130,8 @@ def test_idle_turn_with_a_stalled_tts_fits_the_silence_budget():
     the REFER goes out with no prompt. 10 + 0.35 + 6 + 3 ≈ 19.4 s ≤ 20 s
     (design D9; with a 5 s TTS timeout this was ≈ 21.4 s)."""
     assert (
-        DEFAULT_USER_IDLE_TIMEOUT
-        + BOT_STOPPED_DELAY
+        DEFAULT_MAX_USER_IDLE_TIMEOUT_SECS
+        + BOT_VAD_STOP_SECS
         + GEMINI_LLM_FIRST_CHUNK_TIMEOUT_SECS
         + GEMINI_TTS_STREAM_IDLE_TIMEOUT_SECS
         <= SILENCE_BUDGET
