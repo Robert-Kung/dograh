@@ -279,6 +279,7 @@ def _fake_lk(*, sip_caller=True, raise_on_transfer=False):
         if raise_on_transfer:
             raise RuntimeError("provider rejected")
         captured["transfer_to"] = req.transfer_to
+        captured["play_dialtone"] = req.play_dialtone
 
     async def aclose():
         pass
@@ -420,6 +421,39 @@ async def test_after_hours_alternate_queue_refers_to_alternate():
     )
     assert res["status"] == "success"
     assert cap["transfer_to"] == "sip:night@pbx.example"  # alternate, not primary
+
+
+@pytest.mark.skipif(not PIPECAT, reason="pipecat runtime not installed")
+@pytest.mark.parametrize(
+    "now, expected_target",
+    [(OPEN, "tel:+886900000000"), (CLOSED, "sip:night@pbx.example")],
+    ids=["business-hours", "after-hours-alternate"],
+)
+async def test_dial_tone_request_reaches_every_refer_branch(now, expected_target):
+    """``play_dialtone`` reaches the REFER on both dial branches (5.1 review R3).
+
+    The after-hours alternate branch used to call ``_do_refer`` without it, so
+    press 0 after hours left the caller in silence for the whole REFER wait
+    (up to 32 s) instead of hearing LiveKit's dial tone (design D9).
+    """
+    from api.services.pipecat.livekit_transfer_flow import execute_cold_transfer
+
+    eng = _fake_engine()
+    lk, cap = _fake_lk()
+    res = await execute_cold_transfer(
+        eng,
+        room_name="room1",
+        destination="tel:+886900000000",
+        schedule=SCHED,
+        after_hours_action="alternate_queue",
+        alternate_destination="sip:night@pbx.example",
+        now=now,
+        lk=lk,
+        play_dialtone=True,
+    )
+    assert res["status"] == "success"
+    assert cap["transfer_to"] == expected_target
+    assert cap["play_dialtone"] is True
 
 
 @pytest.mark.skipif(not PIPECAT, reason="pipecat runtime not installed")

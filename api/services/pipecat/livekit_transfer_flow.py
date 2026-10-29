@@ -397,12 +397,15 @@ async def execute_cold_transfer(
                 # A night queue is still a human pickup — same handoff. Strip
                 # like every other dial path: valid_destination() strips only to
                 # judge, so the raw value would otherwise reach transfer_to.
+                # The caller's REFER wait gets the same dial tone as the
+                # business-hours branch (5.1 review R3; design D9).
                 return await _do_refer(
                     engine,
                     room_name,
                     alternate_destination.strip(),
                     lk,
                     transfer_reason,
+                    play_dialtone,
                 )
             # Configured for alternate queue but no valid target — fall back to
             # keeping the caller with the AI rather than dropping them (C4).
