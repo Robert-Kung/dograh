@@ -15,10 +15,13 @@ and the real safetynet watchdog observing the pipeline:
 - the watchdog classifies the error as an LLM error and exits with
   ``llm_error``: transfer prompt, SIP REFER, the transferred call's end.
 
-The factory sets the timeout to 10 s (``GEMINI_STREAM_IDLE_TIMEOUT_SECS``);
-the tests shorten it on the built service so they run in well under a second.
-With first-chunk retry off, the same 10 s also bounds the wait for the first
-chunk, which spans the whole round trip including the model's thinking.
+The factory sets the gap between chunks to 10 s
+(``GEMINI_STREAM_IDLE_TIMEOUT_SECS``) and the wait for the first chunk, which
+spans the whole round trip including the model's thinking, to 6 s
+(``GEMINI_LLM_FIRST_CHUNK_TIMEOUT_SECS``; 5.1 review S2: the idle-timeout turn
+has no bot_silence behind it, so this bound sits inside the 20 s silence
+budget of design D9). The tests shorten them on the built service so they run
+in well under a second.
 
 When the stalled turn is empty, the fallback prompt ("please say that again")
 and the safetynet's transfer prompt can both be spoken, in either order: the
@@ -55,7 +58,9 @@ from api.services.pipecat.empty_llm_turn_fallback import (
     EMPTY_LLM_TURN_FALLBACK_TEXT,
     EmptyLLMTurnFallbackProcessor,
 )
+from api.services.pipecat.livekit_failure_exits import PLAYBACK_START_TIMEOUT_SECONDS
 from api.services.pipecat.service_factory import (
+    GEMINI_LLM_FIRST_CHUNK_TIMEOUT_SECS,
     GEMINI_STREAM_IDLE_TIMEOUT_SECS,
     create_llm_service_from_provider,
 )
@@ -73,6 +78,14 @@ pytestmark = pytest.mark.usefixtures(
 
 # Short enough to keep the tests quick, long enough to outlast scheduling jitter.
 TEST_IDLE_TIMEOUT = 0.2
+
+# run_pipeline's default max_user_idle_timeout, plus the 0.35 s pipecat's output
+# transport waits before BotStoppedSpeakingFrame starts the idle clock.
+DEFAULT_USER_IDLE_TIMEOUT = 10.0
+BOT_STOPPED_DELAY = 0.35
+
+# design D9: TTS-unavailable continuous silence, provisional cap (1.4).
+SILENCE_BUDGET = 20.0
 
 
 def _gemini_llm():
@@ -104,13 +117,10 @@ def _stalling_stream(first_text):
 
 
 def test_factory_bounds_the_gemini_stream_beyond_the_owed_reply_threshold():
-    """10 s, not pipecat's 20 s; and longer than bot_silence, which comes first
-    while a reply is owed — on a LIVEKIT call the timeout matters for a stream
-    that stalls after the bot has started speaking, when no other clock runs.
-
-    With first-chunk retry off, the 10 s also bounds the first chunk, thinking
-    included: a pro or thinking-heavy model in a mode without the safetynet
-    (text chat, other transports) can time out before saying anything."""
+    """Between chunks: 10 s, not pipecat's 20 s; and longer than bot_silence,
+    which comes first while a reply is owed — on a LIVEKIT call this timeout
+    matters for a stream that stalls after the bot has started speaking, when
+    no other clock runs."""
     llm = _gemini_llm()
 
     assert llm._stream_idle_timeout_secs == GEMINI_STREAM_IDLE_TIMEOUT_SECS == 10.0
@@ -118,10 +128,52 @@ def test_factory_bounds_the_gemini_stream_beyond_the_owed_reply_threshold():
     assert GEMINI_STREAM_IDLE_TIMEOUT_SECS > sn._DEFAULT_MAX_SILENCE_SECONDS
 
 
-async def test_first_chunk_later_than_the_timeout_ends_the_turn():
-    """The bound covers the wait for the first chunk too, not only the gaps."""
+def test_factory_bounds_the_first_chunk_apart_from_the_gaps():
+    """First chunk: 6 s, thinking included (5.1 review S2).
+
+    The turn the idle timeout starts (caller silent) arms no bot_silence, so
+    the first-chunk bound is all that stands between a stalled LLM and the
+    exit: idle timeout + BotStopped delay + first chunk + playback start
+    timeout must fit the 20 s budget (10 + 0.35 + 6 + 3 ≈ 19.4 s). With 10 s
+    for the first chunk too, the path was ≈ 23.4 s. A pro or thinking-heavy
+    model in a mode without the safetynet (text chat, other transports) can
+    time out before saying anything."""
     llm = _gemini_llm()
-    llm._stream_idle_timeout_secs = TEST_IDLE_TIMEOUT
+
+    assert llm._first_chunk_timeout_secs == GEMINI_LLM_FIRST_CHUNK_TIMEOUT_SECS == 6.0
+    assert (
+        DEFAULT_USER_IDLE_TIMEOUT
+        + BOT_STOPPED_DELAY
+        + GEMINI_LLM_FIRST_CHUNK_TIMEOUT_SECS
+        + PLAYBACK_START_TIMEOUT_SECONDS
+        <= SILENCE_BUDGET
+    )
+
+
+def test_vertex_llm_gets_the_same_bounds():
+    """The Vertex path shares the Gemini stream and the same exits."""
+    with patch(
+        "api.services.pipecat.service_factory.DograhGoogleVertexLLMService"
+    ) as mock_service:
+        create_llm_service_from_provider(
+            provider=ServiceProviders.GOOGLE_VERTEX.value,
+            model="gemini-2.5-flash",
+            api_key=None,
+            credentials='{"type":"service_account"}',
+            project_id="demo-project",
+            location="us-central1",
+        )
+
+    kwargs = mock_service.call_args.kwargs
+    assert kwargs["stream_idle_timeout_secs"] == GEMINI_STREAM_IDLE_TIMEOUT_SECS
+    assert kwargs["first_chunk_timeout_secs"] == GEMINI_LLM_FIRST_CHUNK_TIMEOUT_SECS
+
+
+async def test_first_chunk_later_than_the_timeout_ends_the_turn():
+    """The first-chunk bound fires on its own: the gap timeout is left at its
+    factory value (10 s), so only the first-chunk bound can end this turn."""
+    llm = _gemini_llm()
+    llm._first_chunk_timeout_secs = TEST_IDLE_TIMEOUT
     down, up = [], []
 
     async def capture(frame, direction=FrameDirection.DOWNSTREAM):
@@ -162,7 +214,14 @@ async def test_stalled_gemini_stream_transfers_to_a_human(
     )
     call = await ready_call(make_call(services, refer))
     llm = _gemini_llm()
-    llm._stream_idle_timeout_secs = TEST_IDLE_TIMEOUT
+    # Shorten only the bound that applies, leaving the other at its factory
+    # value: a stall before any chunk is ended by the first-chunk bound (the
+    # idle-timeout turn's only clock, 5.1 review S2), a stall after one by the
+    # gap bound.
+    if first_text:
+        llm._stream_idle_timeout_secs = TEST_IDLE_TIMEOUT
+    else:
+        llm._first_chunk_timeout_secs = TEST_IDLE_TIMEOUT
 
     with patch.object(llm, "_stream_content", _stalling_stream(first_text)):
         down, up = await asyncio.wait_for(
