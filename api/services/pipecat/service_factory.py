@@ -16,6 +16,7 @@ from api.services.pipecat.gemini_json_schema_adapter import (
     DograhGeminiJSONSchemaAdapter,
 )
 from api.services.pipecat.minimax_tts import MiniMaxOwnedSessionTTSService
+from api.utils.secret_redaction import register_secret
 from api.utils.url_security import validate_user_configured_service_url
 from pipecat.services.assemblyai.stt import AssemblyAISTTService, AssemblyAISTTSettings
 from pipecat.services.aws.llm import AWSBedrockLLMService, AWSBedrockLLMSettings
@@ -70,6 +71,7 @@ from pipecat.services.huggingface.stt import (
     HuggingFaceSTTSettings,
 )
 from pipecat.services.inworld.tts import InworldTTSService, InworldTTSSettings
+from pipecat.services.meta.stt import MuseSTTService, MuseSTTSettings
 from pipecat.services.minimax.llm import MiniMaxLLMService
 from pipecat.services.minimax.tts import MiniMaxTTSSettings
 from pipecat.services.openai._constants import OPENAI_SAMPLE_RATE
@@ -203,6 +205,7 @@ def create_stt_service(
         user_config: User configuration containing STT settings
         keyterms: Optional list of keyterms for speech recognition boosting (Deepgram only)
     """
+    register_secret(getattr(user_config.stt, "api_key", None))
     logger.info(
         f"Creating STT service: provider={user_config.stt.provider}, model={user_config.stt.model}"
     )
@@ -288,6 +291,20 @@ def create_stt_service(
                 model=user_config.stt.model,
                 languages=[language] if language else [],
             ),
+            sample_rate=audio_config.transport_in_sample_rate,
+        )
+    elif user_config.stt.provider == ServiceProviders.MUSE.value:
+        language_bias = [
+            part.strip()
+            for part in (getattr(user_config.stt, "language", None) or "").split(",")
+            if part.strip()
+        ]
+        settings_kwargs = {"model": user_config.stt.model}
+        if language_bias:
+            settings_kwargs["language_bias"] = language_bias
+        return MuseSTTService(
+            api_key=user_config.stt.api_key,
+            settings=MuseSTTSettings(**settings_kwargs),
             sample_rate=audio_config.transport_in_sample_rate,
         )
     elif user_config.stt.provider == ServiceProviders.CARTESIA.value:
@@ -509,6 +526,7 @@ def create_tts_service(
             a TTS stream timeout into a transfer. Only then is the Gemini TTS
             stream bounded (GEMINI_TTS_STREAM_IDLE_TIMEOUT_SECS).
     """
+    register_secret(getattr(user_config.tts, "api_key", None))
     logger.info(
         f"Creating TTS service: provider={user_config.tts.provider}, model={user_config.tts.model}"
     )
@@ -915,11 +933,26 @@ def create_llm_service_from_provider(
     Also used by create_llm_service which extracts these from user_config.
     """
     logger.info(f"Creating LLM service: provider={provider}, model={model}")
+    register_secret(api_key)
     if provider == ServiceProviders.OPENAI.value:
         kwargs = {}
         if base_url:
             _validate_runtime_service_url(base_url, "base_url")
             kwargs["base_url"] = base_url
+        if model.startswith("muse-"):
+            # Meta Muse（OpenAI 相容端點）：壓低推理強度；串流逾時與 Gemini LLM 同值
+            # （C4：openai SDK 預設 read 600 秒，開口後卡住會變成長時間死寂）。
+            return OpenAILLMService(
+                api_key=api_key,
+                settings=OpenAILLMSettings(
+                    model=model,
+                    temperature=0.1,
+                    extra={"reasoning_effort": "minimal"},
+                ),
+                first_chunk_timeout_secs=GEMINI_LLM_FIRST_CHUNK_TIMEOUT_SECS,
+                stream_idle_timeout_secs=GEMINI_STREAM_IDLE_TIMEOUT_SECS,
+                **kwargs,
+            )
         if "gpt-5" in model:
             return OpenAILLMService(
                 api_key=api_key,

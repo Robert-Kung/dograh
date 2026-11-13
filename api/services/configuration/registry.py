@@ -97,6 +97,8 @@ class ServiceProviders(str, Enum):
     GOOGLE_VERTEX_REALTIME = "google_vertex_realtime"
     # Gemini API（AI Studio 金鑰）的 STT／TTS；LLM 沿用 GOOGLE。
     GOOGLE_GEMINI = "google_gemini"
+    # Meta Muse realtime ASR（STT）；Muse LLM 走 OPENAI＋base_url。
+    MUSE = "muse"
     AZURE_REALTIME = "azure_realtime"
     SMALLEST = "smallest"
 
@@ -275,6 +277,13 @@ SARVAM_PROVIDER_MODEL_CONFIG = provider_model_config("Sarvam")
 CAMB_PROVIDER_MODEL_CONFIG = provider_model_config("Camb.ai")
 RIME_PROVIDER_MODEL_CONFIG = provider_model_config("Rime")
 GOOGLE_CLOUD_PROVIDER_MODEL_CONFIG = provider_model_config("Google Cloud")
+MUSE_PROVIDER_MODEL_CONFIG = provider_model_config(
+    "Meta Muse",
+    description=(
+        "Meta Muse realtime speech recognition. For the Muse LLM use the OpenAI "
+        "provider with base URL https://api.meta.ai/v1."
+    ),
+)
 GOOGLE_GEMINI_PROVIDER_MODEL_CONFIG = provider_model_config(
     "Google Gemini API",
     description=(
@@ -1524,6 +1533,25 @@ class GoogleGeminiSTTConfiguration(BaseSTTConfiguration):
     )
 
 
+MUSE_STT_MODELS = ["muse-voice-transcribe-1.0"]
+
+
+@register_stt
+class MuseSTTConfiguration(BaseSTTConfiguration):
+    model_config = MUSE_PROVIDER_MODEL_CONFIG
+    provider: Literal[ServiceProviders.MUSE] = ServiceProviders.MUSE
+    model: str = Field(
+        default="muse-voice-transcribe-1.0",
+        description="Muse realtime transcription model.",
+        json_schema_extra={"examples": MUSE_STT_MODELS, "allow_custom_input": True},
+    )
+    language: str = Field(
+        default="Mandarin Chinese,English",
+        description="Comma-separated Muse language names to bias recognition toward.",
+    )
+    api_key: str | list[str] = Field(description="Muse API key.")
+
+
 # Dograh STT Service
 DOGRAH_STT_MODELS = ["default"]
 DOGRAH_STT_LANGUAGES = DEEPGRAM_LANGUAGES
@@ -1785,6 +1813,7 @@ STTConfig = Annotated[
         OpenAISTTConfiguration,
         GoogleSTTConfiguration,
         GoogleGeminiSTTConfiguration,
+        MuseSTTConfiguration,
         DograhSTTService,
         SpeechmaticsSTTConfiguration,
         SarvamSTTConfiguration,
