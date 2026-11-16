@@ -157,6 +157,12 @@ GEMINI_STREAM_IDLE_TIMEOUT_SECS = 10.0
 # 開口就逾時。
 GEMINI_LLM_FIRST_CHUNK_TIMEOUT_SECS = 6.0
 
+# Meta Muse 拒收沒有 user／tool 訊息的請求（400 "`messages` must contain at least one message
+# with role `user` or `tool`"；官方文件未載，muse-voice-provider 5.2 實測）。開場招呼語那一輪
+# 只有 system，故由 pipecat 在這種請求末尾補這句固定觸發語（只改送出的請求、不進對話紀錄）。
+# 它是我們寫死的文字、不是來電者輸入（C6）；system 指示保留原角色與優先權。
+MUSE_FALLBACK_USER_MESSAGE = "（通話已接通，請依系統指示回應來電者）"
+
 # Gemini TTS（Gemini API 金鑰路徑）串流每個 chunk（含第一個）最多等多久
 # （la-only-go-live 5.1 審查 S1）。google-genai 本身不設逾時，上游或代理在連線後
 # 卡住時，回話中途的 TTS 會無限期等下去，來電者聽到的是沒有上限的靜音——閒置
@@ -951,6 +957,7 @@ def create_llm_service_from_provider(
                 ),
                 first_chunk_timeout_secs=GEMINI_LLM_FIRST_CHUNK_TIMEOUT_SECS,
                 stream_idle_timeout_secs=GEMINI_STREAM_IDLE_TIMEOUT_SECS,
+                fallback_user_message=MUSE_FALLBACK_USER_MESSAGE,
                 **kwargs,
             )
         if "gpt-5" in model:

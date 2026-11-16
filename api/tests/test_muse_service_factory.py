@@ -25,6 +25,7 @@ from api.services.configuration.registry import (
 from api.services.pipecat.service_factory import (
     GEMINI_LLM_FIRST_CHUNK_TIMEOUT_SECS,
     GEMINI_STREAM_IDLE_TIMEOUT_SECS,
+    MUSE_FALLBACK_USER_MESSAGE,
     create_llm_service_from_provider,
     create_stt_service,
 )
@@ -136,6 +137,8 @@ def test_muse_llm_gets_minimal_reasoning_and_stream_timeouts():
     assert "verbosity" not in kwargs["settings"].extra
     assert kwargs["first_chunk_timeout_secs"] == GEMINI_LLM_FIRST_CHUNK_TIMEOUT_SECS
     assert kwargs["stream_idle_timeout_secs"] == GEMINI_STREAM_IDLE_TIMEOUT_SECS
+    # Muse 拒收沒有 user／tool 的請求（開場只有 system）：factory 交一句固定的觸發語給 pipecat 補上
+    assert kwargs["fallback_user_message"] == MUSE_FALLBACK_USER_MESSAGE
 
 
 def test_other_openai_models_are_unchanged():
@@ -145,6 +148,7 @@ def test_other_openai_models_are_unchanged():
         )
     kwargs = mock_llm.call_args.kwargs
     assert "first_chunk_timeout_secs" not in kwargs
+    assert "fallback_user_message" not in kwargs
     assert (
         kwargs["settings"].extra in ({}, None)
         or "reasoning_effort" not in kwargs["settings"].extra
