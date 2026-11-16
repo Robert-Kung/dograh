@@ -162,3 +162,38 @@ def test_real_muse_stt_service_uses_only_the_given_key(monkeypatch):
     assert service._api_key == FAKE_KEY
     with pytest.raises(ValueError):
         create_stt_service(_muse_stt(api_key="  "), AUDIO_CONFIG)
+
+
+def test_every_key_of_a_multi_key_stt_config_is_registered_for_redaction():
+    # 多金鑰設定讀 api_key 每次都隨機抽一把；登記遮罩與建服務各抽一次會對不上（review S1）
+    from api.utils.secret_redaction import redact_secrets
+
+    keys = ["muse-multi-key-one-not-real-0001", "muse-multi-key-two-not-real-0002"]
+    stt = MuseSTTConfiguration(
+        provider="muse", api_key=keys, model="muse-voice-transcribe-1.0"
+    )
+    with patch("api.services.pipecat.service_factory.MuseSTTService"):
+        create_stt_service(SimpleNamespace(stt=stt), AUDIO_CONFIG)
+    assert redact_secrets(f"{keys[0]} {keys[1]}") == "[REDACTED] [REDACTED]"
+
+
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        None,  # SDK 預設＝api.openai.com
+        "https://api.openai.com/v1",
+        "https://relay/api.meta.ai/v1",
+        "https://api.meta.ai.example.com/v1",
+    ],
+)
+def test_muse_llm_refuses_any_endpoint_but_api_meta_ai(base_url):
+    # muse-* 帶的是 Muse 金鑰與 Muse 專用參數，只能送 api.meta.ai（review S4）
+    with patch("api.services.pipecat.service_factory.OpenAILLMService") as mock_llm:
+        with pytest.raises(ValueError, match="api.meta.ai"):
+            create_llm_service_from_provider(
+                ServiceProviders.OPENAI.value,
+                "muse-ember-1.0",
+                FAKE_KEY,
+                base_url=base_url,
+            )
+    mock_llm.assert_not_called()

@@ -157,6 +157,9 @@ GEMINI_STREAM_IDLE_TIMEOUT_SECS = 10.0
 # 開口就逾時。
 GEMINI_LLM_FIRST_CHUNK_TIMEOUT_SECS = 6.0
 
+# Meta Muse 的 OpenAI 相容端點主機；muse-* 模型只准送這裡。
+MUSE_API_HOST = "api.meta.ai"
+
 # Meta Muse 拒收沒有 user／tool 訊息的請求（400 "`messages` must contain at least one message
 # with role `user` or `tool`"；官方文件未載，muse-voice-provider 5.2 實測）。開場招呼語那一輪
 # 只有 system，故由 pipecat 在這種請求末尾補這句固定觸發語（只改送出的請求、不進對話紀錄）。
@@ -199,6 +202,12 @@ def _validate_runtime_service_url(url: str, field_name: str) -> None:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
 
+def _configured_api_keys(service_config) -> list | str | None:
+    """全部設定的金鑰（多金鑰設定讀 ``api_key`` 會隨機抽一把，登記遮罩要登記全部）。"""
+    get_all = getattr(service_config, "get_all_api_keys", None)
+    return get_all() if callable(get_all) else getattr(service_config, "api_key", None)
+
+
 def create_stt_service(
     user_config,
     audio_config: "AudioConfig",
@@ -211,7 +220,7 @@ def create_stt_service(
         user_config: User configuration containing STT settings
         keyterms: Optional list of keyterms for speech recognition boosting (Deepgram only)
     """
-    register_secret(getattr(user_config.stt, "api_key", None))
+    register_secret(_configured_api_keys(user_config.stt))
     logger.info(
         f"Creating STT service: provider={user_config.stt.provider}, model={user_config.stt.model}"
     )
@@ -532,7 +541,7 @@ def create_tts_service(
             a TTS stream timeout into a transfer. Only then is the Gemini TTS
             stream bounded (GEMINI_TTS_STREAM_IDLE_TIMEOUT_SECS).
     """
-    register_secret(getattr(user_config.tts, "api_key", None))
+    register_secret(_configured_api_keys(user_config.tts))
     logger.info(
         f"Creating TTS service: provider={user_config.tts.provider}, model={user_config.tts.model}"
     )
@@ -946,6 +955,12 @@ def create_llm_service_from_provider(
             _validate_runtime_service_url(base_url, "base_url")
             kwargs["base_url"] = base_url
         if model.startswith("muse-"):
+            # muse-* 帶 Muse 金鑰與 Muse 專用參數，只能送 api.meta.ai（UI 設定不經 preflight；
+            # 未填 base_url 時 SDK 預設是 api.openai.com）。
+            if urlparse(base_url or "").hostname != MUSE_API_HOST:
+                raise ValueError(
+                    f"muse-* models must use base_url https://{MUSE_API_HOST}/v1"
+                )
             # Meta Muse（OpenAI 相容端點）：壓低推理強度；串流逾時與 Gemini LLM 同值
             # （C4：openai SDK 預設 read 600 秒，開口後卡住會變成長時間死寂）。
             return OpenAILLMService(
