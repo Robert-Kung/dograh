@@ -16,6 +16,7 @@ from api.services.pipecat.gemini_json_schema_adapter import (
     DograhGeminiJSONSchemaAdapter,
 )
 from api.services.pipecat.minimax_tts import MiniMaxOwnedSessionTTSService
+from api.utils.secret_redaction import register_secret
 from api.utils.url_security import validate_user_configured_service_url
 from pipecat.services.assemblyai.stt import AssemblyAISTTService, AssemblyAISTTSettings
 from pipecat.services.aws.llm import AWSBedrockLLMService, AWSBedrockLLMSettings
@@ -70,6 +71,7 @@ from pipecat.services.huggingface.stt import (
     HuggingFaceSTTSettings,
 )
 from pipecat.services.inworld.tts import InworldTTSService, InworldTTSSettings
+from pipecat.services.meta.stt import MuseSTTService, MuseSTTSettings
 from pipecat.services.minimax.llm import MiniMaxLLMService
 from pipecat.services.minimax.tts import MiniMaxTTSSettings
 from pipecat.services.openai._constants import OPENAI_SAMPLE_RATE
@@ -155,6 +157,15 @@ GEMINI_STREAM_IDLE_TIMEOUT_SECS = 10.0
 # 開口就逾時。
 GEMINI_LLM_FIRST_CHUNK_TIMEOUT_SECS = 6.0
 
+# Meta Muse 的 OpenAI 相容端點主機；muse-* 模型只准送這裡。
+MUSE_API_HOST = "api.meta.ai"
+
+# Meta Muse 拒收沒有 user／tool 訊息的請求（400 "`messages` must contain at least one message
+# with role `user` or `tool`"；官方文件未載，muse-voice-provider 5.2 實測）。開場招呼語那一輪
+# 只有 system，故由 pipecat 在這種請求末尾補這句固定觸發語（只改送出的請求、不進對話紀錄）。
+# 它是我們寫死的文字、不是來電者輸入（C6）；system 指示保留原角色與優先權。
+MUSE_FALLBACK_USER_MESSAGE = "（通話已接通，請依系統指示回應來電者）"
+
 # Gemini TTS（Gemini API 金鑰路徑）串流每個 chunk（含第一個）最多等多久
 # （la-only-go-live 5.1 審查 S1）。google-genai 本身不設逾時，上游或代理在連線後
 # 卡住時，回話中途的 TTS 會無限期等下去，來電者聽到的是沒有上限的靜音——閒置
@@ -191,6 +202,12 @@ def _validate_runtime_service_url(url: str, field_name: str) -> None:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
 
+def _configured_api_keys(service_config) -> list | str | None:
+    """全部設定的金鑰（多金鑰設定讀 ``api_key`` 會隨機抽一把，登記遮罩要登記全部）。"""
+    get_all = getattr(service_config, "get_all_api_keys", None)
+    return get_all() if callable(get_all) else getattr(service_config, "api_key", None)
+
+
 def create_stt_service(
     user_config,
     audio_config: "AudioConfig",
@@ -203,6 +220,7 @@ def create_stt_service(
         user_config: User configuration containing STT settings
         keyterms: Optional list of keyterms for speech recognition boosting (Deepgram only)
     """
+    register_secret(_configured_api_keys(user_config.stt))
     logger.info(
         f"Creating STT service: provider={user_config.stt.provider}, model={user_config.stt.model}"
     )
@@ -288,6 +306,20 @@ def create_stt_service(
                 model=user_config.stt.model,
                 languages=[language] if language else [],
             ),
+            sample_rate=audio_config.transport_in_sample_rate,
+        )
+    elif user_config.stt.provider == ServiceProviders.MUSE.value:
+        language_bias = [
+            part.strip()
+            for part in (getattr(user_config.stt, "language", None) or "").split(",")
+            if part.strip()
+        ]
+        settings_kwargs = {"model": user_config.stt.model}
+        if language_bias:
+            settings_kwargs["language_bias"] = language_bias
+        return MuseSTTService(
+            api_key=user_config.stt.api_key,
+            settings=MuseSTTSettings(**settings_kwargs),
             sample_rate=audio_config.transport_in_sample_rate,
         )
     elif user_config.stt.provider == ServiceProviders.CARTESIA.value:
@@ -509,6 +541,7 @@ def create_tts_service(
             a TTS stream timeout into a transfer. Only then is the Gemini TTS
             stream bounded (GEMINI_TTS_STREAM_IDLE_TIMEOUT_SECS).
     """
+    register_secret(_configured_api_keys(user_config.tts))
     logger.info(
         f"Creating TTS service: provider={user_config.tts.provider}, model={user_config.tts.model}"
     )
@@ -915,11 +948,33 @@ def create_llm_service_from_provider(
     Also used by create_llm_service which extracts these from user_config.
     """
     logger.info(f"Creating LLM service: provider={provider}, model={model}")
+    register_secret(api_key)
     if provider == ServiceProviders.OPENAI.value:
         kwargs = {}
         if base_url:
             _validate_runtime_service_url(base_url, "base_url")
             kwargs["base_url"] = base_url
+        if model.startswith("muse-"):
+            # muse-* 帶 Muse 金鑰與 Muse 專用參數，只能送 api.meta.ai（UI 設定不經 preflight；
+            # 未填 base_url 時 SDK 預設是 api.openai.com）。
+            if urlparse(base_url or "").hostname != MUSE_API_HOST:
+                raise ValueError(
+                    f"muse-* models must use base_url https://{MUSE_API_HOST}/v1"
+                )
+            # Meta Muse（OpenAI 相容端點）：壓低推理強度；串流逾時與 Gemini LLM 同值
+            # （C4：openai SDK 預設 read 600 秒，開口後卡住會變成長時間死寂）。
+            return OpenAILLMService(
+                api_key=api_key,
+                settings=OpenAILLMSettings(
+                    model=model,
+                    temperature=0.1,
+                    extra={"reasoning_effort": "minimal"},
+                ),
+                first_chunk_timeout_secs=GEMINI_LLM_FIRST_CHUNK_TIMEOUT_SECS,
+                stream_idle_timeout_secs=GEMINI_STREAM_IDLE_TIMEOUT_SECS,
+                fallback_user_message=MUSE_FALLBACK_USER_MESSAGE,
+                **kwargs,
+            )
         if "gpt-5" in model:
             return OpenAILLMService(
                 api_key=api_key,

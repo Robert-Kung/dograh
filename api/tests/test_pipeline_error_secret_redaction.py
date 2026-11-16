@@ -222,3 +222,43 @@ def test_auth_key_pattern_covers_characters_google_does_not_rule_out(char):
     assert redact_secrets(text) == f"k={REDACTED};"
     # The same character inside the run (right after ``AQ.``) does not split it.
     assert redact_secrets(f"k=AQ.{char}{FAKE_AUTH_KEY[3:]};") == f"k={REDACTED};"
+
+
+# --- muse-voice-provider 3.3：依值遮罩與 Bearer／accessToken 形狀 ---------------
+
+MUSE_KEY = "mk-" + "Zq7" * 10  # not Google-shaped: only value/shape rules catch it
+
+
+def test_registered_key_is_redacted_by_value():
+    from api.utils.secret_redaction import register_secret
+
+    register_secret(MUSE_KEY)
+    text = f"Error code: 401 - {{'error': {{'message': 'Incorrect API key provided: {MUSE_KEY}'}}}}"
+    assert MUSE_KEY not in redact_secrets(text)
+    assert REDACTED in redact_secrets(text)
+
+
+def test_short_values_are_not_registered():
+    from api.utils.secret_redaction import register_secret
+
+    register_secret("abc")
+    assert redact_secrets("abc def") == "abc def"
+
+
+def test_bearer_and_access_token_shapes_are_redacted():
+    unknown = "unregistered-token-value-XYZ"
+    assert unknown not in redact_secrets(f"Authorization: Bearer {unknown}")
+    assert unknown not in redact_secrets(
+        json.dumps({"authorization": {"accessToken": unknown}})
+    )
+    assert unknown not in redact_secrets(str({"accessToken": f"Bearer {unknown}"}))
+
+
+@pytest.mark.asyncio
+async def test_registered_muse_key_redacted_before_truncation():
+    from api.utils.secret_redaction import register_secret
+
+    register_secret(MUSE_KEY)
+    assert (
+        MUSE_KEY not in redact_secrets(f"Muse ASR handshake failed ({MUSE_KEY})")[:200]
+    )

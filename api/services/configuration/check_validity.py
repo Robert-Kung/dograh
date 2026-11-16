@@ -43,6 +43,7 @@ class UserConfigurationValidator:
             ServiceProviders.ELEVENLABS.value: self._validate_elevenlabs_api_key,
             ServiceProviders.GOOGLE.value: self._check_google_api_key,
             ServiceProviders.GOOGLE_GEMINI.value: self._check_google_gemini_api_key,
+            ServiceProviders.MUSE.value: self._check_muse_api_key,
             ServiceProviders.AZURE.value: self._check_azure_api_key,
             ServiceProviders.AZURE_SPEECH.value: self._check_azure_speech_api_key,
             ServiceProviders.CARTESIA.value: self._check_cartesia_api_key,
@@ -321,6 +322,13 @@ class UserConfigurationValidator:
         # Offline check only: the Gemini STT/TTS services refuse an empty key at
         # call start, so reject it when the configuration is saved instead.
         return bool(api_key and api_key.strip())
+
+    def _check_muse_api_key(self, model: str, api_key: str) -> bool:
+        # Offline shape check only, so a deployment can be configured without
+        # outbound access and an invalid key is reported by the call itself.
+        return bool(api_key and api_key.strip()) and not any(
+            c.isspace() for c in api_key.strip()
+        )
 
     def _check_azure_api_key(self, model: str, api_key: str) -> bool:
         return True
