@@ -712,3 +712,88 @@ async def test_a_stalled_idle_prompt_does_not_hold_the_goodbye_back(
         assert len(recording.segments_before_end()) == 2
         assert [e["reason"] for e in exits.named(UNPLAYED)] == ["start_timeout"]
     assert exits.refers == []
+
+
+# --- review gate 5.1 (reviewer R4, R6, R9, R14) -------------------------------
+
+
+async def test_a_call_already_ending_at_the_second_idle_gets_no_goodbye(
+    services, refer
+):
+    """An end already under way (its extraction still running) owns the exit:
+    a goodbye on top of it would be a second one."""
+    call = await ready_call(make_call(services, refer))
+    call.engine.disposed = True
+
+    await farewell.end_idle_call(call.engine, _fake_exits(call), resume=lambda: None)
+
+    assert call.engine.log == []
+    assert not call.state.idle_end_in_progress
+    await call.wd.stop()
+
+
+async def test_a_cancelled_idle_hangup_gives_the_call_back_to_the_watchdog(
+    services, refer
+):
+    call = await ready_call(make_call(services, refer, tts="silent"))
+    flow = asyncio.create_task(
+        farewell.end_idle_call(call.engine, _fake_exits(call), resume=lambda: None)
+    )
+    await until(lambda: call.engine.entries("tts"))
+    assert call.state.idle_end_in_progress
+
+    flow.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await flow
+
+    assert not call.state.idle_end_in_progress
+    await call.wd.stop()
+
+
+async def test_a_dropped_trigger_is_logged_once_per_reason(services, refer):
+    from loguru import logger
+
+    call = await ready_call(make_call(services, refer))
+    call.state.idle_end_in_progress = True
+    lines = []
+    sink = logger.add(lambda message: lines.append(str(message)), level="INFO")
+    try:
+        for _ in range(3):
+            call.wd._fire("bot_silence")
+        call.wd._fire("llm_error")
+    finally:
+        logger.remove(sink)
+
+    dropped = [line for line in lines if "dropped during idle hangup" in line]
+    assert len(dropped) == 2
+    assert call.engine.entries("refer") == []
+    await call.wd.stop()
+
+
+async def test_the_forced_end_still_cancels_when_its_bookkeeping_fails(monkeypatch):
+    monkeypatch.setattr(farewell, "IDLE_END_DEADLINE_SECONDS", 0)
+    cancel, queue_frame = AsyncMock(), AsyncMock()
+
+    def record_call_disposition(reason):
+        raise RuntimeError("context gone")
+
+    engine = types.SimpleNamespace(
+        task=types.SimpleNamespace(
+            has_finished=lambda: False,
+            cancel=cancel,
+            _pipeline=types.SimpleNamespace(queue_frame=queue_frame),
+        ),
+        record_call_disposition=record_call_disposition,
+    )
+    end_task = asyncio.create_task(asyncio.sleep(60))
+
+    with patch(
+        "api.services.pipecat.livekit_call_events.delete_room_at_run_end",
+        AsyncMock(),
+    ):
+        await farewell._force_idle_end_after_deadline(engine, end_task, "room-x", 7)
+
+    await asyncio.wait({end_task})
+    assert end_task.cancelled()
+    cancel.assert_awaited_once()
+    queue_frame.assert_awaited_once()

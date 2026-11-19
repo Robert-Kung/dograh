@@ -760,6 +760,7 @@ class SafetynetWatchdog(BaseObserver):
 
         self._deadline: Optional[float] = None
         self._reply_owed = False  # survives tool-call suspension
+        self._dropped_logged: set[str] = set()
         self._tool_calls: set[str] = set()
         self._fired = False
         self._stopped = False
@@ -893,7 +894,10 @@ class SafetynetWatchdog(BaseObserver):
             # exit and bounds it itself. Dropped before ``_fired`` so the
             # watchdog is still armed if the caller speaks up and the call
             # goes on; nobody spoke, so there is no one to transfer.
-            logger.info(f"safetynet trigger dropped during idle hangup: {reason}")
+            # Once per reason: the silence monitor comes back every tick.
+            if reason not in self._dropped_logged:
+                self._dropped_logged.add(reason)
+                logger.info(f"safetynet trigger dropped during idle hangup: {reason}")
             return
         self._fired = True
         self._disarm()

@@ -126,8 +126,9 @@ async def end_idle_call(engine, exits, *, resume: Callable[[], None]) -> None:
         resume: Called when the caller spoke up before the goodbye started
             and the call goes on (resets the idle count).
     """
-    if _transfer_in_progress(engine):
-        # A press-0 / voice transfer owns the call's exit.
+    if _transfer_in_progress(engine) or engine.is_call_disposed():
+        # A press-0 / voice transfer, or an end already under way (its final
+        # extraction still running), owns the call's exit.
         return
     state: CallFailureState = exits.state
     room_name = exits.watchdog.room_name
@@ -142,12 +143,19 @@ async def end_idle_call(engine, exits, *, resume: Callable[[], None]) -> None:
         # flag would stay set on a call nothing is ending.
         logger.exception(f"idle farewell failed for {room_name}: {e}")
         outcome, unplayed = None, "flow_error"
+    except BaseException:
+        # Cancelled mid-wait: nothing ends this call here, so the watchdog
+        # gets it back.
+        state.idle_end_in_progress = False
+        raise
 
     if outcome is PlaybackOutcome.INTERRUPTED:
-        # VAD alone does not interrupt the pipeline: without this the queued
-        # goodbye would still announce the end of a call that goes on.
-        await _cut_current_turn(engine)
+        # Flag first, so no trigger is dropped while the interruption below
+        # is awaited. The interruption itself: where the turn strategies do
+        # not interrupt on VAD, the queued goodbye would still announce the
+        # end of a call that goes on.
         state.idle_end_in_progress = False
+        await _cut_current_turn(engine)
         resume()
         return
 
@@ -155,8 +163,9 @@ async def end_idle_call(engine, exits, *, resume: Callable[[], None]) -> None:
     # start of its deadline are one step.
     if _transfer_in_progress(engine) or engine.is_call_disposed():
         # The caller pressed 0 during the goodbye, or the call is already
-        # ending (the caller hung up): that path owns the exit, and the
-        # watchdog is what bounds it.
+        # ending (the caller hung up): that path owns the exit. The watchdog
+        # is armed again for it; a hangup's own extraction on a dead LLM is
+        # not bounded by anything (as before this change).
         state.idle_end_in_progress = False
         return
     if unplayed is not None:
@@ -193,18 +202,22 @@ async def _force_idle_end_after_deadline(
     if task is None or task.has_finished():
         return
     end_task.cancel()
-    # The cancel lands between "disposed" and "EndFrame queued":
-    # end_call_with_reason cannot be called again to finish the job.
-    engine.record_call_disposition(_IDLE_REASON)
-    sn.log_event(
-        sn.SAFETYNET_END_FORCED_EVENT,
-        room_name=room_name,
-        reason="idle_end_stalled",
-        workflow_run_id=workflow_run_id,
-    )
-    from api.services.pipecat.livekit_call_events import delete_room_at_run_end
+    try:
+        # The cancel lands between "disposed" and "EndFrame queued":
+        # end_call_with_reason cannot be called again to finish the job.
+        engine.record_call_disposition(_IDLE_REASON)
+        sn.log_event(
+            sn.SAFETYNET_END_FORCED_EVENT,
+            room_name=room_name,
+            reason="idle_end_stalled",
+            workflow_run_id=workflow_run_id,
+        )
+        from api.services.pipecat.livekit_call_events import delete_room_at_run_end
 
-    await delete_room_at_run_end(room_name, workflow_run_id)
+        await delete_room_at_run_end(room_name, workflow_run_id)
+    except Exception as e:
+        # The cancel below is what ends the run; it must not depend on these.
+        logger.exception(f"idle forced end bookkeeping failed for {room_name}: {e}")
     try:
         # Both ways in: the worker's push queue when no EndFrame was queued
         # yet (the stuck extraction), straight into the pipeline when one was
