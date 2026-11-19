@@ -31,8 +31,11 @@ if TYPE_CHECKING:
 class UserIdleHandler:
     """Helper class to manage user idle retry logic with state."""
 
-    def __init__(self, engine: "PipecatEngine"):
+    def __init__(self, engine: "PipecatEngine", livekit_exits=None):
         self._engine = engine
+        # ccp idle-hangup-farewell: the call's LiveKitFailureExits. Read when
+        # the second idle fires, not here — its watchdog is installed later.
+        self._livekit_exits = livekit_exits
         self._retry_count = 0
 
     def reset(self):
@@ -41,6 +44,16 @@ class UserIdleHandler:
 
     async def handle_idle(self, aggregator):
         """Handle user idle event with escalating prompts."""
+        if self._livekit_exits is not None:
+            from api.services.pipecat.livekit_idle_farewell import (
+                end_idle_call,
+                idle_farewell_applies,
+                idle_farewell_in_progress,
+            )
+
+            if idle_farewell_in_progress(self._livekit_exits):
+                return
+
         self._retry_count += 1
         logger.debug(f"Handling user_idle, attempt: {self._retry_count}")
 
@@ -50,6 +63,15 @@ class UserIdleHandler:
                 "content": "The user has been quiet. Politely and briefly ask if they're still there in the language that the user has been speaking so far.",
             }
             await aggregator.push_frame(LLMMessagesAppendFrame([message], run_llm=True))
+            return
+
+        if self._livekit_exits is not None and idle_farewell_applies(
+            self._livekit_exits
+        ):
+            # ccp idle-hangup-farewell: the upstream path below queues the
+            # EndFrame right behind a request for an LLM goodbye, and the
+            # EndFrame always wins — the caller is hung up on in silence (C4).
+            await end_idle_call(self._engine, self._livekit_exits, resume=self.reset)
             return
 
         message = {
@@ -62,9 +84,11 @@ class UserIdleHandler:
         )
 
 
-def create_user_idle_handler(engine: "PipecatEngine") -> UserIdleHandler:
+def create_user_idle_handler(
+    engine: "PipecatEngine", livekit_exits=None
+) -> UserIdleHandler:
     """Return a UserIdleHandler that manages user-idle timeouts with state."""
-    return UserIdleHandler(engine)
+    return UserIdleHandler(engine, livekit_exits)
 
 
 # ---------------------------------------------------------------------------

@@ -60,6 +60,12 @@ STT_STABLE_CONNECTION_SECONDS = 5.0
 PLAYBACK_START_TIMEOUT_SECONDS = 3.0
 PLAYBACK_GAP_TIMEOUT_SECONDS = 2.0
 
+# ccp idle-hangup-farewell: what a silent caller hears before the idle hangup.
+# Fixed text, never the LLM — see livekit_idle_farewell.
+IDLE_FAREWELL_TEXT = (
+    "因為沒有聽到您的聲音，這通電話先為您結束，如有需要歡迎再來電，謝謝。"
+)
+
 
 class ErrorSource(str, Enum):
     STT = "stt"
@@ -254,6 +260,9 @@ class CallFailureState:
         self.playback_gap_timeout = playback_gap_timeout
         self.tts_unavailable = False
         self.llm_gate_closed = False
+        # The idle hangup is saying goodbye or ending the call
+        # (livekit_idle_farewell): the watchdog drops its triggers meanwhile.
+        self.idle_end_in_progress = False
         self._stt: Optional[STTService] = None
 
     def attach_stt(self, stt: Optional[STTService]) -> None:

@@ -18,6 +18,11 @@ import inspect
 from pipecat.transports.base_output import BOT_VAD_STOP_SECS
 
 from api.services.pipecat import livekit_safetynet as sn
+from api.services.pipecat.livekit_failure_exits import (
+    PLAYBACK_GAP_TIMEOUT_SECONDS,
+    PLAYBACK_START_TIMEOUT_SECONDS,
+)
+from api.services.pipecat.livekit_idle_farewell import IDLE_END_DEADLINE_SECONDS
 from api.services.pipecat.run_pipeline import LIVEKIT_MAX_USER_IDLE_TIMEOUT_SECS
 
 # design D9: TTS-unavailable continuous silence, provisional cap (1.4).
@@ -43,3 +48,30 @@ def idle_path_silence(*after_idle_prompt: float) -> float:
     return (
         LIVEKIT_MAX_USER_IDLE_TIMEOUT_SECS + BOT_VAD_STOP_SECS + sum(after_idle_prompt)
     )
+
+
+def idle_hangup_silence() -> dict[str, float]:
+    """Worst continuous silence on each branch of the idle hangup
+    (idle-hangup-farewell design D5).
+
+    The second idle waits for the bot to fall silent (bounded by the playback
+    gap timeout, normally 0), queues the fixed goodbye and waits for it; once
+    the end is decided the idle end deadline bounds the rest.
+    """
+    return {
+        # up to the goodbye's first audio
+        "played": idle_path_silence(
+            PLAYBACK_GAP_TIMEOUT_SECONDS, PLAYBACK_START_TIMEOUT_SECONDS
+        ),
+        # from the goodbye's last audio to the end of the call
+        "played_then_end": IDLE_END_DEADLINE_SECONDS,
+        "start_timeout": idle_path_silence(
+            PLAYBACK_GAP_TIMEOUT_SECONDS,
+            PLAYBACK_START_TIMEOUT_SECONDS,
+            IDLE_END_DEADLINE_SECONDS,
+        ),
+        # from the last audio that did go out
+        "playback_stalled": PLAYBACK_GAP_TIMEOUT_SECONDS + IDLE_END_DEADLINE_SECONDS,
+        # nothing queued, nothing waited for
+        "tts_unavailable": idle_path_silence(IDLE_END_DEADLINE_SECONDS),
+    }

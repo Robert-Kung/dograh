@@ -952,8 +952,17 @@ class PipecatEngine:
             CancelFrame(reason=reason) if abort_immediately else EndFrame(reason=reason)
         )
 
-        # Record the call disposition: prefer one extracted from the conversation,
-        # otherwise fall back to the disconnect reason.
+        call_disposition = self.record_call_disposition(reason)
+
+        logger.debug(
+            f"Finishing run with reason: {reason}, disposition: {call_disposition} "
+            f"queueing frame {frame_to_push}"
+        )
+        await self.task.queue_frame(frame_to_push)
+
+    def record_call_disposition(self, reason: str) -> str:
+        """Record the call disposition: prefer one extracted from the
+        conversation, otherwise fall back to the disconnect reason."""
         call_disposition = self._gathered_context.get("call_disposition", "") or reason
         self._gathered_context["call_disposition"] = call_disposition
         self._gathered_context["mapped_call_disposition"] = call_disposition
@@ -963,12 +972,7 @@ class PipecatEngine:
             if call_disposition not in call_tags:
                 call_tags.append(call_disposition)
             self._gathered_context["call_tags"] = call_tags
-
-        logger.debug(
-            f"Finishing run with reason: {reason}, disposition: {call_disposition} "
-            f"queueing frame {frame_to_push}"
-        )
-        await self.task.queue_frame(frame_to_push)
+        return call_disposition
 
     async def should_mute_user(self, frame: "Frame") -> bool:
         """
@@ -1006,12 +1010,15 @@ class PipecatEngine:
 
         return False
 
-    def create_user_idle_handler(self):
+    def create_user_idle_handler(self, livekit_exits=None):
         """
         Returns a UserIdleHandler that manages user-idle timeouts with state.
         The handler tracks retry count and handles escalating prompts.
+
+        ``livekit_exits``: the call's ``LiveKitFailureExits``; with it, a
+        LIVEKIT call's idle hangup says a fixed goodbye first.
         """
-        return engine_callbacks.create_user_idle_handler(self)
+        return engine_callbacks.create_user_idle_handler(self, livekit_exits)
 
     def create_max_duration_callback(self):
         """

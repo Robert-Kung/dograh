@@ -937,8 +937,18 @@ async def _run_pipeline_impl(
     user_context_aggregator = context_aggregator.user()
     assistant_context_aggregator = context_aggregator.assistant()
 
-    # Register user idle event handlers
-    user_idle_handler = engine.create_user_idle_handler()
+    # la-only-go-live D9 (LiveKit): per-call failure exits. Their state is
+    # shared by the safetynet watchdog (installed below), the LLM gates, the
+    # STT stop and the idle hangup; cascaded STT/LLM/TTS only — realtime
+    # pipelines have no STT to stop and no gate slot. The wiring is tested in
+    # test_livekit_failure_wiring (5.1 review R4).
+    from api.services.pipecat.livekit_safetynet import LiveKitFailureExits
+
+    failure_exits = LiveKitFailureExits(workflow_run, stt, is_realtime=is_realtime)
+
+    # Register user idle event handlers. On a LIVEKIT call the second idle
+    # says a fixed goodbye before it ends the call (idle-hangup-farewell).
+    user_idle_handler = engine.create_user_idle_handler(failure_exits)
 
     @user_context_aggregator.event_handler("on_user_turn_idle")
     async def on_user_turn_idle(aggregator):
@@ -1020,15 +1030,6 @@ async def _run_pipeline_impl(
     # Press-0 DTMF safety net (LiveKit only): a gate that cold-transfers on
     # caller DTMF '0', reusing the workflow's transfer_call tool config.
     press0_gate = await resolve_press0_gate(engine, workflow_run)
-
-    # la-only-go-live D9 (LiveKit): per-call failure exits. Their state is
-    # shared by the safetynet watchdog (installed below), the LLM gates and
-    # the STT stop; cascaded STT/LLM/TTS only — realtime pipelines have no STT
-    # to stop and no gate slot. The wiring is tested in
-    # test_livekit_failure_wiring (5.1 review R4).
-    from api.services.pipecat.livekit_safetynet import LiveKitFailureExits
-
-    failure_exits = LiveKitFailureExits(workflow_run, stt, is_realtime=is_realtime)
 
     # Build the pipeline
     if is_realtime:

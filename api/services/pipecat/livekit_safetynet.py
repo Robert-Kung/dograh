@@ -704,6 +704,9 @@ class SafetynetWatchdog(BaseObserver):
       the greeting is due, or the idle-timeout prompt asked the LLM to speak)
       and produces no speech within the threshold.
 
+    None of them fires while the idle hangup is in progress
+    (``CallFailureState.idle_end_in_progress``, livekit_idle_farewell).
+
     It is re-armed (:meth:`rearm_after_transfer`) only when the safetynet
     yielded to a voice/press-0 transfer that then left the call with the AI.
 
@@ -874,8 +877,23 @@ class SafetynetWatchdog(BaseObserver):
             and now >= self._deadline
         )
 
+    @property
+    def room_name(self) -> Optional[str]:
+        return self._room_name
+
+    @property
+    def workflow_run_id(self) -> Optional[int]:
+        return self._workflow_run_id
+
     def _fire(self, reason: str) -> None:
         if self._fired:
+            return
+        if self.state.idle_end_in_progress:
+            # ccp idle-hangup-farewell D4: the idle hangup owns the call's
+            # exit and bounds it itself. Dropped before ``_fired`` so the
+            # watchdog is still armed if the caller speaks up and the call
+            # goes on; nobody spoke, so there is no one to transfer.
+            logger.info(f"safetynet trigger dropped during idle hangup: {reason}")
             return
         self._fired = True
         self._disarm()
