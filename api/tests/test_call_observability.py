@@ -99,6 +99,33 @@ async def test_immediate_event_sends_one_alert(monkeypatch, sent):
 
 
 @pytest.mark.asyncio
+async def test_unplayed_idle_farewell_alerts_at_once(monkeypatch, sent):
+    """idle-hangup-farewell D6: the watchdog stands down during the idle
+    hangup, so this event is the only signal of the silent hangup. Through the
+    safetynet's own emit path, as the idle hangup sends it."""
+    from api.services.pipecat import livekit_safetynet as sn
+    from api.services.pipecat.livekit_idle_farewell import (
+        IDLE_FAREWELL_UNPLAYED_EVENT,
+    )
+
+    monkeypatch.setenv("OBS_ALERT_WEBHOOK_URL", "https://hooks.example/x")
+    sn.log_event(
+        IDLE_FAREWELL_UNPLAYED_EVENT,
+        room_name="cs-+886912",
+        reason="start_timeout",
+        workflow_run_id=7,
+        elapsed_ms=3350,
+    )
+    await _drain()
+    assert len(sent) == 1
+    text = sent[0]["text"]
+    assert "[safetynet.idle_farewell_unplayed]" in text
+    assert "room_name=cs-+886912" in text
+    assert "reason=start_timeout" in text
+    assert "workflow_run_id=7" in text
+
+
+@pytest.mark.asyncio
 async def test_transfer_ok_not_alerted(monkeypatch, sent):
     monkeypatch.setenv("OBS_ALERT_WEBHOOK_URL", "https://hooks.example/x")
     alerts.notify("transfer.ok", {"room_name": "cs-+886912", "reason": "press0"})

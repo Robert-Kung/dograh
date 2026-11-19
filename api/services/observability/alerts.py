@@ -24,6 +24,10 @@ IMMEDIATE_EVENTS = {
     # The graceful end after a failed safetynet transfer was stuck past its
     # deadline (hung LLM); the room was deleted server-side.
     "safetynet.end_forced",
+    # The idle hangup's goodbye did not play: a silent hangup (C4). The
+    # watchdog stands down during the idle hangup, so no safetynet.triggered
+    # accompanies it — this is the only signal.
+    "safetynet.idle_farewell_unplayed",
     "transfer.failed",
     # The run ended but its room could not be deleted: the caller may be left
     # on a silent SIP leg until the trunk's max_call_duration (C4).

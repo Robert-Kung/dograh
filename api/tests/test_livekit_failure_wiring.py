@@ -298,3 +298,15 @@ def test_failure_exits_are_built_once_and_installed():
     # Nothing builds a second state or watchdog beside the shared one.
     assert "CallFailureState" not in calls
     assert "resolve_safetynet_watchdog" not in calls
+
+
+def test_the_idle_handler_gets_the_failure_exits():
+    """idle-hangup-farewell D3: the idle handler is handed the call's failure
+    exits (built before it), not a state of its own; it reads the watchdog
+    off them when the second idle fires, after ``install_watchdog``."""
+    calls = _impl_calls()
+    [build] = calls["LiveKitFailureExits"]
+    [create] = calls["create_user_idle_handler"]
+
+    assert [ast.unparse(arg) for arg in create.args] == ["failure_exits"]
+    assert build.lineno < create.lineno
