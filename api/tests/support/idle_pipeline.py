@@ -476,8 +476,17 @@ async def run_idle_call(call: IdleCall, *, script=None, timeout: float = 20.0):
     """
     from api.services.pipecat.worker_runner import run_pipeline_worker
 
+    # A frame queued before the StartFrame has run through the pipeline is
+    # dropped: the greeting never plays and the call hangs. A fixed head start
+    # lost that race on a loaded machine.
+    ready = asyncio.Event()
+
+    @call.task.event_handler("on_pipeline_started")
+    async def on_pipeline_started(_task, _frame):
+        ready.set()
+
     async def start():
-        await asyncio.sleep(0.01)
+        await ready.wait()
         await call.engine.initialize()
         await call.engine.set_node(call.engine.workflow.start_node_id)
         await call.engine.llm.queue_frame(LLMContextFrame(call.engine.context))
