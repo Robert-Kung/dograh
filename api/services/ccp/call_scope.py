@@ -105,10 +105,13 @@ def scope_clause(t: str = "") -> str:
     a killed worker never will. Smoke runs (``initial_context.ccp_smoke``, set
     by the dispatcher from the smoke dispatch rule's room name only and
     stripped from every other merge source) are never counted
-    (local-deploy-sip-smoke D2 r2). Binds ``:stale_before``.
+    (local-deploy-sip-smoke D2 r2). Always one organization's runs
+    (tenant-isolation): there is no clause without ``:organization_id``.
+    Binds ``:organization_id`` and ``:stale_before``.
     """
     return f"""(
-        {t}mode = 'livekit'
+        {t}organization_id = :organization_id
+        AND {t}mode = 'livekit'
         AND {t}call_type = 'inbound'
         AND COALESCE({t}initial_context->>'ccp_smoke', '') <> 'true'
         AND (
@@ -120,8 +123,13 @@ def scope_clause(t: str = "") -> str:
     )"""
 
 
-def scope_params(now: datetime | None = None) -> dict:
-    return {"stale_before": (now or datetime.now(UTC)) - STALE_AFTER}
+def scope_params(organization_id: int, now: datetime | None = None) -> dict:
+    if not isinstance(organization_id, int) or isinstance(organization_id, bool):
+        raise ValueError("scope_params requires an integer organization_id")
+    return {
+        "organization_id": organization_id,
+        "stale_before": (now or datetime.now(UTC)) - STALE_AFTER,
+    }
 
 
 def outcome_class_expr(outcome: str) -> str:

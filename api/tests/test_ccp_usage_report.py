@@ -18,6 +18,11 @@ TZ = "Asia/Taipei"
 CODES = ["general_inquiry", "billing_inquiry"]
 
 
+# Organization the module's rows belong to (mt-s1-foundation 5.2: every
+# CCP query is scoped to one organization). Set by the ``workflow`` fixture.
+SCOPE: dict = {}
+
+
 @pytest.fixture
 async def workflow(db_session, async_session):
     org = OrganizationModel(provider_id="test-org-usage-report")
@@ -28,6 +33,7 @@ async def workflow(db_session, async_session):
     )
     async_session.add(user)
     await async_session.flush()
+    SCOPE["org"] = org.id  # every service call below is scoped to this org
     return await db_session.create_workflow(
         name="Usage Report Workflow",
         workflow_definition={"nodes": [], "edges": []},
@@ -88,7 +94,9 @@ async def test_scope_excludes_test_calls_outbound_and_in_progress(add_run):
     await add_run(NOW - timedelta(minutes=10), outcome=None, completed=False)
 
     report = await ur.build_usage_report(
-        _query(date(2021, 11, 1), date(2021, 11, 20)), now=NOW
+        _query(date(2021, 11, 1), date(2021, 11, 20)),
+        organization_id=SCOPE["org"],
+        now=NOW,
     )
 
     assert report["calls"] == 3
@@ -107,7 +115,9 @@ async def test_safetynet_and_stale_runs_are_counted(add_run):
     )
 
     report = await ur.build_usage_report(
-        _query(date(2021, 11, 1), date(2021, 11, 20)), now=NOW
+        _query(date(2021, 11, 1), date(2021, 11, 20)),
+        organization_id=SCOPE["org"],
+        now=NOW,
     )
 
     assert report["calls"] == 3
@@ -129,7 +139,9 @@ async def test_outcome_classes_sum_to_calls(add_run):
     await add_run(_at(2021, 11, 5), outcome="something_new")
 
     report = await ur.build_usage_report(
-        _query(date(2021, 11, 5), date(2021, 11, 5)), now=NOW
+        _query(date(2021, 11, 5), date(2021, 11, 5)),
+        organization_id=SCOPE["org"],
+        now=NOW,
     )
 
     assert report["outcomes"] == {
@@ -152,10 +164,14 @@ async def test_day_boundary_follows_deployment_timezone(add_run):
     await add_run(datetime(2021, 10, 31, 15, 59, tzinfo=UTC))
 
     october = await ur.build_usage_report(
-        _query(date(2021, 10, 1), date(2021, 10, 31)), now=NOW
+        _query(date(2021, 10, 1), date(2021, 10, 31)),
+        organization_id=SCOPE["org"],
+        now=NOW,
     )
     november = await ur.build_usage_report(
-        _query(date(2021, 11, 1), date(2021, 11, 20)), now=NOW
+        _query(date(2021, 11, 1), date(2021, 11, 20)),
+        organization_id=SCOPE["org"],
+        now=NOW,
     )
 
     assert october["calls"] == 1
@@ -174,7 +190,9 @@ async def test_daily_series_has_no_gaps(add_run):
     await add_run(_at(2021, 10, 3))
 
     report = await ur.build_usage_report(
-        _query(date(2021, 10, 1), date(2021, 10, 7)), now=NOW
+        _query(date(2021, 10, 1), date(2021, 10, 7)),
+        organization_id=SCOPE["org"],
+        now=NOW,
     )
 
     assert [d["date"] for d in report["daily"]] == [
@@ -192,7 +210,9 @@ async def test_seconds_tolerate_dirty_values(add_run):
     await add_run(_at(2021, 11, 6), seconds=True)
 
     report = await ur.build_usage_report(
-        _query(date(2021, 11, 6), date(2021, 11, 6)), now=NOW
+        _query(date(2021, 11, 6), date(2021, 11, 6)),
+        organization_id=SCOPE["org"],
+        now=NOW,
     )
 
     assert report["calls"] == 5
@@ -211,7 +231,9 @@ async def test_categories_whitelist_folds_in_sql(add_run):
     await add_run(_at(2021, 11, 7))
 
     report = await ur.build_usage_report(
-        _query(date(2021, 11, 7), date(2021, 11, 7)), now=NOW
+        _query(date(2021, 11, 7), date(2021, 11, 7)),
+        organization_id=SCOPE["org"],
+        now=NOW,
     )
 
     assert report["categories"] == {
@@ -228,7 +250,9 @@ async def test_no_codes_puts_everything_in_unclassified(add_run):
     await add_run(_at(2021, 11, 8), disposition="billing_inquiry")
 
     report = await ur.build_usage_report(
-        _query(date(2021, 11, 8), date(2021, 11, 8), codes=[]), now=NOW
+        _query(date(2021, 11, 8), date(2021, 11, 8), codes=[]),
+        organization_id=SCOPE["org"],
+        now=NOW,
     )
 
     assert report["categories"] == {}
@@ -257,7 +281,9 @@ async def test_timeout_raises_usage_report_timeout(db_session, monkeypatch):
     )
     with pytest.raises(ur.UsageReportTimeout):
         await ur.build_usage_report(
-            _query(date(2021, 11, 1), date(2021, 11, 1)), now=NOW
+            _query(date(2021, 11, 1), date(2021, 11, 1)),
+            organization_id=SCOPE["org"],
+            now=NOW,
         )
 
 
@@ -339,7 +365,9 @@ async def test_disposition_tolerates_newlines_tabs_and_ideographic_space(add_run
         await add_run(_at(2021, 11, 9), disposition=value)
 
     report = await ur.build_usage_report(
-        _query(date(2021, 11, 9), date(2021, 11, 9)), now=NOW
+        _query(date(2021, 11, 9), date(2021, 11, 9)),
+        organization_id=SCOPE["org"],
+        now=NOW,
     )
 
     assert report["categories"]["billing_inquiry"]["calls"] == 3
@@ -352,7 +380,9 @@ async def test_one_dirty_duration_is_capped_not_fatal(add_run):
     await add_run(_at(2021, 11, 10), seconds=30)
 
     report = await ur.build_usage_report(
-        _query(date(2021, 11, 10), date(2021, 11, 10)), now=NOW
+        _query(date(2021, 11, 10), date(2021, 11, 10)),
+        organization_id=SCOPE["org"],
+        now=NOW,
     )
 
     assert report["ai_seconds"] == ur.MAX_CALL_SECONDS + 30
@@ -392,7 +422,9 @@ async def test_smoke_runs_are_not_counted(add_run):
     await add_run(_at(2021, 11, 3), initial_context={"ccp_smoke": "1", "smoke": True})
 
     report = await ur.build_usage_report(
-        _query(date(2021, 11, 1), date(2021, 11, 20)), now=NOW
+        _query(date(2021, 11, 1), date(2021, 11, 20)),
+        organization_id=SCOPE["org"],
+        now=NOW,
     )
 
     assert report["calls"] == 3

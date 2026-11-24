@@ -17,6 +17,7 @@ from starlette.background import BackgroundTask
 
 from api.services.ccp import call_records as cr
 from api.services.ccp import call_scope as cs
+from api.services.ccp import tenant_header as th
 
 router = APIRouter(prefix="/internal/call-records", tags=["internal"])
 
@@ -48,6 +49,20 @@ def _require_secret(
         provided.encode("utf-8"), configured.encode("utf-8")
     ):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
+
+
+async def _tenant_organization(
+    _: Annotated[None, Depends(_require_secret)],
+    raw: Annotated[str | None, Header(alias=th.ORGANIZATION_HEADER)] = None,
+) -> int:
+    # After the secret (its 503/403 keep their meaning), before any query.
+    try:
+        return await th.resolve_tenant_organization(raw)
+    except th.TenantHeaderError as exc:
+        raise HTTPException(status_code=exc.status, detail=exc.code) from None
+
+
+TenantOrganization = Annotated[int, Depends(_tenant_organization)]
 
 
 def _invalid(code: str) -> HTTPException:
@@ -160,7 +175,9 @@ class CallDetailResponse(BaseModel):
         }
     },
 )
-async def query_calls(request: Request) -> CallListResponse:
+async def query_calls(
+    request: Request, organization_id: TenantOrganization
+) -> CallListResponse:
     # Parsed by hand so a malformed body is a fixed code, not pydantic's echo.
     try:
         body = CallQueryBody.model_validate(await request.json())
@@ -183,7 +200,9 @@ async def query_calls(request: Request) -> CallListResponse:
     except cr.CallRecordsInvalid as exc:
         raise _invalid(str(exc)) from None
     try:
-        result = await cr.query_calls(query, timezone=body.timezone)
+        result = await cr.query_calls(
+            query, organization_id=organization_id, timezone=body.timezone
+        )
     except Exception as exc:
         raise _unavailable(exc, "query") from None
     return CallListResponse.model_validate(result)
@@ -195,7 +214,9 @@ async def query_calls(request: Request) -> CallListResponse:
     dependencies=[Depends(_require_secret)],
 )
 async def get_call(
-    run_id: str, codes: Annotated[list[str], Query()] = []
+    run_id: str,
+    organization_id: TenantOrganization,
+    codes: Annotated[list[str], Query()] = [],
 ) -> CallDetailResponse:
     rid = _run_id(run_id)
     try:
@@ -203,7 +224,7 @@ async def get_call(
     except cs.ScopeInvalid:
         raise _invalid("query_invalid") from None
     try:
-        result = await cr.get_call(rid, codes_t)
+        result = await cr.get_call(rid, codes_t, organization_id=organization_id)
     except Exception as exc:
         raise _unavailable(exc, "detail") from None
     if result is None:
@@ -213,11 +234,13 @@ async def get_call(
 
 @router.get("/{run_id}/audio", dependencies=[Depends(_require_secret)])
 async def get_audio(
-    run_id: str, range_header: Annotated[str | None, Header(alias="Range")] = None
+    run_id: str,
+    organization_id: TenantOrganization,
+    range_header: Annotated[str | None, Header(alias="Range")] = None,
 ) -> StreamingResponse:
     rid = _run_id(run_id)
     try:
-        stream = await cr.open_audio(rid, range_header)
+        stream = await cr.open_audio(rid, range_header, organization_id=organization_id)
     except cr.RangeNotSatisfiable as exc:
         headers = {} if exc.size is None else {"Content-Range": f"bytes */{exc.size}"}
         raise HTTPException(

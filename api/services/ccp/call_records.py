@@ -284,7 +284,11 @@ def _seconds(value) -> float:
 
 
 async def query_calls(
-    query: CallQuery, *, timezone: str, now: datetime | None = None
+    query: CallQuery,
+    *,
+    organization_id: int,
+    timezone: str,
+    now: datetime | None = None,
 ) -> dict:
     params = {
         "start": query.start,
@@ -294,7 +298,7 @@ async def query_calls(
         "uncategorized": query.uncategorized,
         "caller_hmac": query.caller_hmac,
         "caller_last4": query.caller_last4,
-        **cs.scope_params(now),
+        **cs.scope_params(organization_id, now),
         **cs.category_params(query.codes),
         **cs.seconds_params(),
     }
@@ -493,11 +497,15 @@ def build_extracted(raw) -> tuple[list, bool]:
 
 
 async def get_call(
-    run_id: int, codes: tuple[str, ...], *, now: datetime | None = None
+    run_id: int,
+    codes: tuple[str, ...],
+    *,
+    organization_id: int,
+    now: datetime | None = None,
 ) -> dict | None:
     params = {
         "run_id": run_id,
-        **cs.scope_params(now),
+        **cs.scope_params(organization_id, now),
         **cs.category_params(codes),
         **cs.seconds_params(),
     }
@@ -627,7 +635,11 @@ class AudioStream:
 
 
 async def open_audio(
-    run_id: int, range_header: str | None, *, now: datetime | None = None
+    run_id: int,
+    range_header: str | None,
+    *,
+    organization_id: int,
+    now: datetime | None = None,
 ) -> AudioStream | None:
     """The recording's bytes, or None when the call or its recording is absent.
 
@@ -639,7 +651,8 @@ async def open_audio(
     async def run(session):
         return (
             await session.execute(
-                _AUDIO_SQL, {"run_id": run_id, **cs.scope_params(now)}
+                _AUDIO_SQL,
+                {"run_id": run_id, **cs.scope_params(organization_id, now)},
             )
         ).one_or_none()
 
