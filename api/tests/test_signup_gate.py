@@ -31,7 +31,11 @@ def no_mps(monkeypatch):
 
 
 def _body(tag: str) -> dict:
-    return {"email": f"{tag}@signup-gate.example.com", "password": "pw-123456789", "name": tag}
+    return {
+        "email": f"{tag}@signup-gate.example.com",
+        "password": "pw-123456789",
+        "name": tag,
+    }
 
 
 async def _count(async_session, model) -> int:
@@ -120,3 +124,53 @@ async def test_rerun_is_409_then_login(client, async_session):
         json={"email": "rerun@signup-gate.example.com", "password": "pw-123456789"},
     )
     assert login.status_code == 200
+
+
+async def test_empty_db_first_tenant_can_take_calls_and_read_reports(
+    test_client_factory, db_session, async_session, monkeypatch
+):
+    """6.4 空 DB 首啟：signup 建出的第一號租戶可收電話、服務間報表不回 403."""
+    from unittest.mock import AsyncMock, patch
+
+    await _empty_tenants(async_session)
+    probe, _ = await db_session.get_or_create_user_by_provider_id("signup_probe2")
+    async with test_client_factory(probe) as anon:
+        r = await anon.post(
+            URL, json=_body("boot"), headers={"X-Dograh-Devops-Secret": SECRET}
+        )
+    assert r.status_code == 200
+    org_id, user_id = r.json()["user"]["organization_id"], r.json()["user"]["id"]
+    user = await db_session.get_user_by_id(user_id)
+    wf = await db_session.create_workflow(
+        name="boot reception",
+        workflow_definition={"nodes": [], "edges": []},
+        user_id=user.id,
+        organization_id=org_id,
+    )
+    with patch(
+        "api.routes.organization._sync_inbound_for_phone_number", new_callable=AsyncMock
+    ):
+        async with test_client_factory(user) as client:
+            mapped = await client.post(
+                "/api/v1/livekit/did-mappings",
+                json={"address": "+886255550199", "workflow_id": wf.id},
+            )
+    assert mapped.status_code == 201
+    resolved = await db_session.find_inbound_workflow_for_did("+886255550199")
+    assert (resolved.mapped, resolved.organization_id) == (True, org_id)
+
+    monkeypatch.setattr("api.constants.DOGRAH_DEVOPS_SECRET", SECRET)
+    async with test_client_factory(user) as client:
+        report = await client.get(
+            "/api/v1/internal/usage-report",
+            params={
+                "from": "2021-03-01",
+                "to": "2021-03-02",
+                "timezone": "Asia/Taipei",
+            },
+            headers={
+                "X-Dograh-Devops-Secret": SECRET,
+                "X-CCP-Organization-Id": str(org_id),
+            },
+        )
+    assert report.status_code == 200
