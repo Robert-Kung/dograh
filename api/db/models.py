@@ -1458,3 +1458,60 @@ class CcpSettingsModel(Base):
     key_fingerprint = Column(String(8), nullable=True)
 
     __table_args__ = (CheckConstraint("id = 1", name="ccp_settings_single_row"),)
+
+
+class CcpTenantModel(Base):
+    """CCP tenant lifecycle row (mt-s1-foundation, tenant-isolation).
+
+    A dograh organization *is* a CCP tenant iff it has a row here. Settings
+    values never live here (they go to OrganizationConfigurationModel with a
+    ``CCP_`` key prefix). Writes only through ``api/services/ccp/tenants.py``.
+    """
+
+    __tablename__ = "ccp_tenants"
+
+    organization_id = Column(
+        Integer,
+        ForeignKey("organizations.id", ondelete="RESTRICT"),
+        primary_key=True,
+    )
+    display_name = Column(String(64), nullable=False)
+    # NFKC + strip + casefold of display_name; computed by the service layer.
+    display_name_key = Column(String(64), nullable=True)
+    # DB default is the fail-closed value: a write that forgets the status
+    # cannot take calls. Backfill and provisioning always write it explicitly.
+    status = Column(String(16), nullable=False, server_default=text("'suspended'"))
+    status_changed_at = Column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    signed_off_by = Column(String(128), nullable=True)
+    signed_off_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('active', 'suspended')", name="ccp_tenants_status_valid"
+        ),
+        CheckConstraint(
+            "(signed_off_by IS NULL) = (signed_off_at IS NULL)",
+            name="ccp_tenants_signoff_both_or_neither",
+        ),
+        CheckConstraint(
+            "char_length(display_name) BETWEEN 1 AND 64",
+            name="ccp_tenants_display_name_length",
+        ),
+        Index(
+            "uq_ccp_tenants_display_name_key",
+            "display_name_key",
+            unique=True,
+            postgresql_where=text("display_name_key IS NOT NULL"),
+        ),
+    )
