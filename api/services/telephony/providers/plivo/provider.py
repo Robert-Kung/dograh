@@ -330,7 +330,8 @@ class PlivoProvider(TelephonyProvider):
             await websocket.close(code=4400, reason="Missing streamId")
             return
 
-        workflow_run = await db_client.get_workflow_run(workflow_run_id)
+        # Provider websocket: only the run id is known — explicit unscoped lookup.
+        workflow_run = await db_client.get_workflow_run_by_id(workflow_run_id)
         call_id = None
         if workflow_run and workflow_run.gathered_context:
             call_id = workflow_run.gathered_context.get("call_id")

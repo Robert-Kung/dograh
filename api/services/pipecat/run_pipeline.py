@@ -240,7 +240,13 @@ async def _run_pipeline_telephony_impl(
     logger.debug(f"Running {provider_name} pipeline for workflow_run {workflow_run_id}")
     set_current_run_id(workflow_run_id)
 
-    workflow = await db_client.get_workflow(workflow_id, user_id)
+    # Scope by the run's organization (tenant-isolation), never the creator.
+    organization_id = await db_client.get_organization_id_by_workflow_run_id(
+        workflow_run_id
+    )
+    workflow = await db_client.get_workflow(
+        workflow_id, organization_id=organization_id
+    )
     if workflow:
         set_current_org_id(workflow.organization_id)
 
@@ -254,7 +260,9 @@ async def _run_pipeline_telephony_impl(
     # (test call, campaign dispatch, inbound). Transports use it to load creds
     # from the right config row. Falls back to None for legacy runs (transports
     # then resolve the org's default config).
-    workflow_run = await db_client.get_workflow_run(workflow_run_id)
+    workflow_run = await db_client.get_workflow_run(
+        workflow_run_id, organization_id=organization_id
+    )
     telephony_configuration_id = None
     if workflow_run and workflow_run.initial_context:
         telephony_configuration_id = workflow_run.initial_context.get(
@@ -349,8 +357,14 @@ async def _run_pipeline_smallwebrtc_impl(
     )
     set_current_run_id(workflow_run_id)
 
-    # Get workflow to extract all pipeline configurations
-    workflow = await db_client.get_workflow(workflow_id, user_id)
+    # Get workflow to extract all pipeline configurations, scoped by the run's
+    # organization (tenant-isolation), never the creator.
+    organization_id = await db_client.get_organization_id_by_workflow_run_id(
+        workflow_run_id
+    )
+    workflow = await db_client.get_workflow(
+        workflow_id, organization_id=organization_id
+    )
 
     # Set org context early so tasks created by the transport inherit it
     if workflow:
@@ -373,7 +387,9 @@ async def _run_pipeline_smallwebrtc_impl(
         get_effective_ai_model_configuration_for_workflow,
     )
 
-    workflow_run = await db_client.get_workflow_run(workflow_run_id, user_id)
+    workflow_run = await db_client.get_workflow_run(
+        workflow_run_id, organization_id=organization_id
+    )
     run_configs = (
         (workflow_run.definition.workflow_configurations or {}) if workflow_run else {}
     )
@@ -497,7 +513,9 @@ async def _run_pipeline_livekit_impl(
         get_effective_ai_model_configuration_for_workflow,
     )
 
-    workflow_run = await db_client.get_workflow_run(workflow_run_id, user_id)
+    workflow_run = await db_client.get_workflow_run(
+        workflow_run_id, organization_id=organization_id
+    )
     run_configs = (
         (workflow_run.definition.workflow_configurations or {}) if workflow_run else {}
     )
@@ -582,7 +600,20 @@ async def _run_pipeline_impl(
             applied. Fetched and resolved here if None.
     """
     if workflow_run is None:
-        workflow_run = await db_client.get_workflow_run(workflow_run_id, user_id)
+        # Only the run id is known here; the run's own organization scopes
+        # everything below (tenant-isolation).
+        organization_id = await db_client.get_organization_id_by_workflow_run_id(
+            workflow_run_id
+        )
+        workflow_run = (
+            await db_client.get_workflow_run(
+                workflow_run_id, organization_id=organization_id
+            )
+            if organization_id is not None
+            else None
+        )
+        if workflow_run is None:
+            raise HTTPException(status_code=404, detail="Workflow run not found")
 
     # If the workflow run is already completed, we don't need to run it again
     if workflow_run.is_completed:
@@ -595,7 +626,9 @@ async def _run_pipeline_impl(
         merged_call_context_vars = {**merged_call_context_vars, **call_context_vars}
 
     # Get workflow for metadata (name, organization_id, call_disposition_codes)
-    workflow = await db_client.get_workflow(workflow_id, user_id)
+    workflow = await db_client.get_workflow(
+        workflow_id, organization_id=workflow_run.organization_id
+    )
     if not workflow:
         raise HTTPException(status_code=404, detail="Workflow not found")
 

@@ -351,7 +351,9 @@ async def create_campaign(
 ) -> CampaignResponse:
     """Create a new campaign"""
     # Verify workflow exists and belongs to organization
-    workflow_name = await db_client.get_workflow_name(request.workflow_id, user.id)
+    workflow_name = await db_client.get_workflow_name(
+        request.workflow_id, organization_id=user.selected_organization_id
+    )
     if not workflow_name:
         raise HTTPException(status_code=404, detail="Workflow not found")
 
@@ -512,7 +514,9 @@ async def get_campaign(
     if not campaign:
         raise HTTPException(status_code=404, detail="Campaign not found")
 
-    workflow_name = await db_client.get_workflow_name(campaign.workflow_id, user.id)
+    workflow_name = await db_client.get_workflow_name(
+        campaign.workflow_id, organization_id=user.selected_organization_id
+    )
 
     executed, total = await _get_campaign_stats(campaign.id)
     cfg_name = await _get_telephony_configuration_name(
@@ -565,7 +569,9 @@ async def start_campaign(
 
     # Get updated campaign
     campaign = await db_client.get_campaign(campaign_id, user.selected_organization_id)
-    workflow_name = await db_client.get_workflow_name(campaign.workflow_id, user.id)
+    workflow_name = await db_client.get_workflow_name(
+        campaign.workflow_id, organization_id=user.selected_organization_id
+    )
 
     executed, total = await _get_campaign_stats(campaign.id)
     cfg_name = await _get_telephony_configuration_name(
@@ -599,7 +605,9 @@ async def pause_campaign(
 
     # Get updated campaign
     campaign = await db_client.get_campaign(campaign_id, user.selected_organization_id)
-    workflow_name = await db_client.get_workflow_name(campaign.workflow_id, user.id)
+    workflow_name = await db_client.get_workflow_name(
+        campaign.workflow_id, organization_id=user.selected_organization_id
+    )
 
     executed, total = await _get_campaign_stats(campaign.id)
     cfg_name = await _get_telephony_configuration_name(
@@ -669,7 +677,9 @@ async def update_campaign(
 
     # Re-fetch to return updated data
     campaign = await db_client.get_campaign(campaign_id, user.selected_organization_id)
-    workflow_name = await db_client.get_workflow_name(campaign.workflow_id, user.id)
+    workflow_name = await db_client.get_workflow_name(
+        campaign.workflow_id, organization_id=user.selected_organization_id
+    )
 
     executed, total = await _get_campaign_stats(campaign.id)
     cfg_name = await _get_telephony_configuration_name(
@@ -838,7 +848,9 @@ async def redial_campaign(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    workflow_name = await db_client.get_workflow_name(child.workflow_id, user.id)
+    workflow_name = await db_client.get_workflow_name(
+        child.workflow_id, organization_id=user.selected_organization_id
+    )
     executed, total = await _get_campaign_stats(child.id)
     cfg_name = await _get_telephony_configuration_name(
         child.telephony_configuration_id, user.selected_organization_id
@@ -890,7 +902,9 @@ async def resume_campaign(
 
     # Get updated campaign
     campaign = await db_client.get_campaign(campaign_id, user.selected_organization_id)
-    workflow_name = await db_client.get_workflow_name(campaign.workflow_id, user.id)
+    workflow_name = await db_client.get_workflow_name(
+        campaign.workflow_id, organization_id=user.selected_organization_id
+    )
 
     executed, total = await _get_campaign_stats(campaign.id)
     cfg_name = await _get_telephony_configuration_name(

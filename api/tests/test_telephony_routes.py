@@ -240,7 +240,7 @@ async def test_smallwebrtc_run_reaching_telephony_websocket_closes_without_runni
             new=provider_lookup,
         ),
     ):
-        mock_db.get_workflow_run = AsyncMock(return_value=workflow_run)
+        mock_db.get_workflow_run_by_id = AsyncMock(return_value=workflow_run)
         mock_db.get_workflow_by_id = AsyncMock(return_value=workflow)
         mock_db.update_workflow_run = AsyncMock()
 

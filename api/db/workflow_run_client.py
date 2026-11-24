@@ -5,7 +5,7 @@ from sqlalchemy import func
 from sqlalchemy.future import select
 from sqlalchemy.orm import joinedload, selectinload
 
-from api.db.base_client import BaseDBClient
+from api.db.base_client import BaseDBClient, require_organization_id
 from api.db.filters import apply_workflow_run_filters, get_workflow_run_order_clause
 from api.db.models import (
     OrganizationModel,
@@ -34,24 +34,22 @@ class WorkflowRunClient(BaseDBClient):
         campaign_id: int = None,
         queued_run_id: int = None,
         use_draft: bool = False,
-        organization_id: int | None = None,
+        *,
+        organization_id: int,
     ) -> WorkflowRunModel:
+        """``organization_id`` locates the workflow (tenant-isolation): a
+        provisioned workflow has no creator, so ``user_id`` is only recorded
+        context, never a lookup key."""
+        require_organization_id(organization_id, "create_workflow_run")
         async with self.async_session() as session:
-            if user_id is None and organization_id is None:
-                raise ValueError("create_workflow_run needs organization_id or user_id")
             workflow_query = (
                 select(WorkflowModel)
                 .options(joinedload(WorkflowModel.user))
-                .where(WorkflowModel.id == workflow_id)
-            )
-            # Located by organization when given: a provisioned workflow has no
-            # creator (user_id NULL), so the LiveKit path cannot key on user.
-            if organization_id is not None:
-                workflow_query = workflow_query.where(
-                    WorkflowModel.organization_id == organization_id
+                .where(
+                    WorkflowModel.id == workflow_id,
+                    WorkflowModel.organization_id == organization_id,
                 )
-            if user_id is not None:
-                workflow_query = workflow_query.where(WorkflowModel.user_id == user_id)
+            )
 
             workflow = await session.execute(workflow_query)
             workflow = workflow.scalars().first()
@@ -218,29 +216,20 @@ class WorkflowRunClient(BaseDBClient):
             return formatted_runs, total_count
 
     async def get_workflow_run(
-        self, run_id: int, user_id: int = None, organization_id: int = None
+        self, run_id: int, *, organization_id: int
     ) -> WorkflowRunModel | None:
+        """Run by id, scoped to its organization; unscoped system lookups use
+        ``get_workflow_run_by_id``."""
+        require_organization_id(organization_id, "get_workflow_run")
         async with self.async_session() as session:
             query = (
                 select(WorkflowRunModel)
                 .options(selectinload(WorkflowRunModel.definition))
-                .join(WorkflowRunModel.workflow)
+                .where(
+                    WorkflowRunModel.id == run_id,
+                    WorkflowRunModel.organization_id == organization_id,
+                )
             )
-
-            if organization_id:
-                # Filter by organization_id when provided
-                query = query.where(
-                    WorkflowRunModel.id == run_id,
-                    WorkflowModel.organization_id == organization_id,
-                )
-            elif user_id:
-                # Fallback to user_id for backwards compatibility
-                query = query.where(
-                    WorkflowRunModel.id == run_id,
-                    WorkflowModel.user_id == user_id,
-                )
-            else:
-                query = query.where(WorkflowRunModel.id == run_id)
 
             result = await session.execute(query)
             return result.scalars().first()
@@ -260,46 +249,34 @@ class WorkflowRunClient(BaseDBClient):
     async def get_organization_id_by_workflow_run_id(
         self, run_id: int | None
     ) -> int | None:
-        """Resolve organization_id from a workflow run via workflow.user."""
+        """The run's own organization (unscoped system lookup by run id)."""
         if not run_id:
             return None
         async with self.async_session() as session:
             result = await session.execute(
-                select(WorkflowModel.organization_id)
-                .join(
-                    WorkflowRunModel, WorkflowRunModel.workflow_id == WorkflowModel.id
+                select(WorkflowRunModel.organization_id).where(
+                    WorkflowRunModel.id == run_id
                 )
-                .where(WorkflowRunModel.id == run_id)
             )
             return result.scalar_one_or_none()
 
     async def get_workflow_runs_by_workflow_id(
         self,
         workflow_id: int,
-        user_id: int = None,
-        organization_id: int = None,
+        *,
+        organization_id: int,
         limit: int = 50,
         offset: int = 0,
         filters: Optional[List[Dict[str, Any]]] = None,
         sort_by: Optional[str] = None,
         sort_order: Optional[str] = "desc",
     ) -> tuple[list[WorkflowRunResponseSchema], int]:
+        require_organization_id(organization_id, "get_workflow_runs_by_workflow_id")
         async with self.async_session() as session:
-            # Build base query
-            base_query = (
-                select(WorkflowRunModel)
-                .join(WorkflowModel, WorkflowRunModel.workflow_id == WorkflowModel.id)
-                .where(WorkflowRunModel.workflow_id == workflow_id)
+            base_query = select(WorkflowRunModel).where(
+                WorkflowRunModel.workflow_id == workflow_id,
+                WorkflowRunModel.organization_id == organization_id,
             )
-
-            if organization_id:
-                # Filter by organization_id when provided
-                base_query = base_query.where(
-                    WorkflowModel.organization_id == organization_id
-                )
-            elif user_id:
-                # Fallback to user_id for backwards compatibility
-                base_query = base_query.where(WorkflowModel.user_id == user_id)
 
             # Apply filters
             base_query = apply_workflow_run_filters(base_query, filters)

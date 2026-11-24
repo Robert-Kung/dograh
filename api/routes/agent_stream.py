@@ -82,6 +82,7 @@ async def agent_stream_websocket(
         workflow.id,
         provider_name,
         user_id=workflow.user_id,
+        organization_id=workflow.organization_id,
         call_type=CallType.INBOUND,
         initial_context=initial_context,
         gathered_context={"call_id": call_id} if call_id else {},

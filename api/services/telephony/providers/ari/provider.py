@@ -252,8 +252,9 @@ class ARIProvider(TelephonyProvider):
         """
         from api.services.pipecat.run_pipeline import run_pipeline_telephony
 
-        # Get channel_id from workflow run context
-        workflow_run = await db_client.get_workflow_run(workflow_run_id, user_id)
+        # Get channel_id from workflow run context. Provider websocket: only the
+        # run id is known (no user session) — explicit unscoped lookup.
+        workflow_run = await db_client.get_workflow_run_by_id(workflow_run_id)
         channel_id = ""
         if workflow_run and workflow_run.gathered_context:
             channel_id = workflow_run.gathered_context.get("call_id", "")

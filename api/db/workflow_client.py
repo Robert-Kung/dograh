@@ -5,7 +5,7 @@ from sqlalchemy import func, update
 from sqlalchemy.future import select
 from sqlalchemy.orm import load_only, selectinload
 
-from api.db.base_client import BaseDBClient
+from api.db.base_client import BaseDBClient, require_organization_id
 from api.db.models import WorkflowDefinitionModel, WorkflowModel, WorkflowRunModel
 
 
@@ -331,19 +331,15 @@ class WorkflowClient(BaseDBClient):
             return result.scalars().all()
 
     async def get_all_workflows(
-        self, user_id: int = None, organization_id: int = None, status: str = None
+        self, *, organization_id: int, status: str = None
     ) -> list[WorkflowModel]:
+        require_organization_id(organization_id, "get_all_workflows")
         async with self.async_session() as session:
-            query = select(WorkflowModel).options(
-                selectinload(WorkflowModel.current_definition)
+            query = (
+                select(WorkflowModel)
+                .options(selectinload(WorkflowModel.current_definition))
+                .where(WorkflowModel.organization_id == organization_id)
             )
-
-            if organization_id:
-                # Filter by organization_id when provided
-                query = query.where(WorkflowModel.organization_id == organization_id)
-            elif user_id:
-                # Fallback to user_id for backwards compatibility
-                query = query.where(WorkflowModel.user_id == user_id)
 
             # Filter by status if provided
             if status:
@@ -353,7 +349,7 @@ class WorkflowClient(BaseDBClient):
             return result.scalars().all()
 
     async def get_all_workflows_for_listing(
-        self, organization_id: int = None, status: str = None
+        self, *, organization_id: int, status: str = None
     ) -> list[WorkflowModel]:
         """Get workflows with only the columns needed for listing.
 
@@ -367,6 +363,7 @@ class WorkflowClient(BaseDBClient):
         Returns:
             List of WorkflowModel with only id, name, status, created_at loaded
         """
+        require_organization_id(organization_id, "get_all_workflows_for_listing")
         async with self.async_session() as session:
             query = select(WorkflowModel).options(
                 load_only(
@@ -378,9 +375,7 @@ class WorkflowClient(BaseDBClient):
                     WorkflowModel.workflow_uuid,
                 )
             )
-
-            if organization_id:
-                query = query.where(WorkflowModel.organization_id == organization_id)
+            query = query.where(WorkflowModel.organization_id == organization_id)
 
             if status:
                 query = query.where(WorkflowModel.status == status)
@@ -388,7 +383,7 @@ class WorkflowClient(BaseDBClient):
             result = await session.execute(query)
             return result.scalars().all()
 
-    async def get_workflow_counts(self, organization_id: int = None) -> dict[str, int]:
+    async def get_workflow_counts(self, *, organization_id: int) -> dict[str, int]:
         """Get workflow counts by status.
 
         Args:
@@ -397,14 +392,12 @@ class WorkflowClient(BaseDBClient):
         Returns:
             Dict with 'total', 'active', 'archived' counts
         """
+        require_organization_id(organization_id, "get_workflow_counts")
         async with self.async_session() as session:
             query = select(
                 WorkflowModel.status,
                 func.count(WorkflowModel.id).label("count"),
-            )
-
-            if organization_id:
-                query = query.where(WorkflowModel.organization_id == organization_id)
+            ).where(WorkflowModel.organization_id == organization_id)
 
             query = query.group_by(WorkflowModel.status)
 
@@ -431,24 +424,17 @@ class WorkflowClient(BaseDBClient):
     async def get_workflow(
         self,
         workflow_id: int,
-        user_id: int | None = None,
-        organization_id: int | None = None,
+        *,
+        organization_id: int,
     ) -> WorkflowModel | None:
-        """Fetch a workflow by id, scoped to a tenant.
+        """Fetch a workflow by id, scoped to its organization.
 
-        Scoping is mandatory: pass ``organization_id`` (preferred) or
-        ``user_id``. A fully unscoped lookup would let a request-supplied id
-        reach another tenant's workflow. System/runtime paths that only have a
-        ``workflow_id`` and derive the org from the workflow itself (e.g.
-        inbound telephony routing) must call ``get_workflow_by_id`` instead —
-        the explicit unscoped variant.
+        ``organization_id`` is mandatory (tenant-isolation): there is no
+        fallback to the creator and no unscoped lookup. System/runtime paths
+        that only have a ``workflow_id`` must call ``get_workflow_by_id`` —
+        the explicit unscoped variant — and say why at the call site.
         """
-        if user_id is None and organization_id is None:
-            raise ValueError(
-                "get_workflow requires organization_id (preferred) or user_id "
-                "for tenant scoping; use get_workflow_by_id for unscoped "
-                "system lookups."
-            )
+        require_organization_id(organization_id, "get_workflow")
         async with self.async_session() as session:
             query = (
                 select(WorkflowModel)
@@ -456,15 +442,11 @@ class WorkflowClient(BaseDBClient):
                     selectinload(WorkflowModel.current_definition),
                     selectinload(WorkflowModel.released_definition),
                 )
-                .where(WorkflowModel.id == workflow_id)
+                .where(
+                    WorkflowModel.id == workflow_id,
+                    WorkflowModel.organization_id == organization_id,
+                )
             )
-
-            if organization_id:
-                # Filter by organization_id when provided
-                query = query.where(WorkflowModel.organization_id == organization_id)
-            elif user_id:
-                # Fallback to user_id for backwards compatibility
-                query = query.where(WorkflowModel.user_id == user_id)
 
             result = await session.execute(query)
             return result.scalars().first()
@@ -526,8 +508,8 @@ class WorkflowClient(BaseDBClient):
         workflow_definition: dict | None,
         template_context_variables: dict | None,
         workflow_configurations: dict | None,
-        user_id: int = None,
-        organization_id: int = None,
+        *,
+        organization_id: int,
     ) -> WorkflowModel:
         """
         Update an existing workflow in the database.
@@ -542,7 +524,6 @@ class WorkflowClient(BaseDBClient):
             workflow_definition: The new workflow definition
             template_context_variables: The template context variables
             workflow_configurations: The workflow configurations
-            user_id: The user ID (for backwards compatibility)
             organization_id: The organization ID
 
         Returns:
@@ -566,10 +547,7 @@ class WorkflowClient(BaseDBClient):
                 .where(WorkflowModel.id == workflow_id)
             )
 
-            if organization_id:
-                query = query.where(WorkflowModel.organization_id == organization_id)
-            elif user_id:
-                query = query.where(WorkflowModel.user_id == user_id)
+            query = query.where(WorkflowModel.organization_id == organization_id)
 
             result = await session.execute(query)
             workflow = result.scalars().first()
@@ -611,7 +589,7 @@ class WorkflowClient(BaseDBClient):
             )
             # Re-fetch with updated state
             workflow = await self.get_workflow(
-                workflow_id, user_id=user_id, organization_id=organization_id
+                workflow_id, organization_id=organization_id
             )
 
         return workflow
@@ -630,18 +608,15 @@ class WorkflowClient(BaseDBClient):
             return result.scalars().all()
 
     async def get_workflow_name(
-        self, workflow_id: int, user_id: int = None, organization_id: int = None
+        self, workflow_id: int, *, organization_id: int
     ) -> Optional[str]:
-        """Get just the workflow name by ID"""
+        """Get just the workflow name by ID, scoped to its organization."""
+        require_organization_id(organization_id, "get_workflow_name")
         async with self.async_session() as session:
-            query = select(WorkflowModel.name).where(WorkflowModel.id == workflow_id)
-
-            if organization_id:
-                # Filter by organization_id when provided
-                query = query.where(WorkflowModel.organization_id == organization_id)
-            elif user_id:
-                # Fallback to user_id for backwards compatibility
-                query = query.where(WorkflowModel.user_id == user_id)
+            query = select(WorkflowModel.name).where(
+                WorkflowModel.id == workflow_id,
+                WorkflowModel.organization_id == organization_id,
+            )
 
             result = await session.execute(query)
             return result.scalar_one_or_none()

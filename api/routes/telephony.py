@@ -425,6 +425,8 @@ async def _create_inbound_workflow_run(
     normalized_data,
     telephony_configuration_id: int,
     from_phone_number_id: Optional[int] = None,
+    *,
+    organization_id: int,
 ) -> int:
     """Create workflow run for inbound call and return run ID"""
     call_id = normalized_data.call_id
@@ -436,6 +438,7 @@ async def _create_inbound_workflow_run(
         workflow_id,
         provider,  # Use detected provider as mode
         user_id=user_id,
+        organization_id=organization_id,
         call_type=CallType.INBOUND,
         initial_context={
             "caller_number": normalized_data.from_number,
@@ -548,8 +551,9 @@ async def _handle_telephony_websocket(
         # Set the run context
         set_current_run_id(workflow_run_id)
 
-        # Get workflow run to determine provider type
-        workflow_run = await db_client.get_workflow_run(workflow_run_id)
+        # Get workflow run to determine provider type. Provider websocket: only
+        # the run id is known here (no user session) — explicit unscoped lookup.
+        workflow_run = await db_client.get_workflow_run_by_id(workflow_run_id)
         if not workflow_run:
             logger.error(f"Workflow run {workflow_run_id} not found")
             await websocket.close(code=4404, reason="Workflow run not found")
@@ -774,6 +778,7 @@ async def handle_inbound_run(request: Request):
             normalized_data,
             telephony_configuration_id=telephony_configuration_id,
             from_phone_number_id=phone_row.id,
+            organization_id=config.organization_id,
         )
         quota_result = await authorize_workflow_run_start(
             workflow_id=workflow_id,
@@ -909,6 +914,7 @@ async def handle_inbound_telephony(
             normalized_data,
             telephony_configuration_id=workflow_context["telephony_configuration_id"],
             from_phone_number_id=workflow_context.get("from_phone_number_id"),
+            organization_id=workflow_context["organization_id"],
         )
         quota_result = await authorize_workflow_run_start(
             workflow_id=workflow_id,

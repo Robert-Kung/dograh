@@ -630,7 +630,9 @@ async def signaling_websocket(
     user: UserModel = Depends(get_user_ws),
 ):
     """WebSocket endpoint for WebRTC signaling with ICE trickling."""
-    workflow_run = await db_client.get_workflow_run(workflow_run_id, user.id)
+    workflow_run = await db_client.get_workflow_run(
+        workflow_run_id, organization_id=user.selected_organization_id
+    )
     if not workflow_run:
         logger.warning(f"workflow run {workflow_run_id} not found for user {user.id}")
         raise HTTPException(status_code=400, detail="Bad workflow_run_id")

@@ -329,15 +329,18 @@ class VonageProvider(TelephonyProvider):
         from api.services.pipecat.run_pipeline import run_pipeline_telephony
 
         try:
-            # Get workflow run to extract call UUID
-            workflow_run = await db_client.get_workflow_run(workflow_run_id)
+            # Get workflow run to extract call UUID. Provider websocket: only the
+            # run id is known (no user session) — explicit unscoped lookup.
+            workflow_run = await db_client.get_workflow_run_by_id(workflow_run_id)
             if not workflow_run:
                 logger.error(f"Workflow run {workflow_run_id} not found")
                 await websocket.close(code=4404, reason="Workflow run not found")
                 return
 
             # Get workflow for organization info
-            workflow = await db_client.get_workflow(workflow_id, user_id)
+            workflow = await db_client.get_workflow(
+                workflow_id, organization_id=workflow_run.organization_id
+            )
             if not workflow:
                 logger.error(f"Workflow {workflow_id} not found")
                 await websocket.close(code=4404, reason="Workflow not found")

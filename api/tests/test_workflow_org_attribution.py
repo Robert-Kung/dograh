@@ -117,7 +117,7 @@ async def test_new_run_org_equals_workflow_org(db_session, mode, by_user):
         workflow_id=wf.id,
         mode=mode,
         user_id=user.id if by_user else None,
-        organization_id=None if by_user else org_a.id,
+        organization_id=org_a.id,
     )
 
     assert run.organization_id == wf.organization_id == org_a.id

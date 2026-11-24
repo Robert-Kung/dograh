@@ -370,7 +370,15 @@ async def test_create_logs_carry_no_display_name(db_session, async_session):
 # --- concurrency (real commits; cleans up after itself) ------------------------
 
 
-async def test_ensure_first_tenant_concurrent_creates_one_row(test_engine):
+async def test_ensure_first_tenant_concurrent_creates_one_row(test_engine, monkeypatch):
+    # Own session maker on the test engine: the two calls need real, separate
+    # connections, and must not inherit a session maker an earlier test left
+    # bound to a closed connection.
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from api.db import db_client
+
+    monkeypatch.setattr(db_client, "async_session", async_sessionmaker(test_engine))
     async with test_engine.begin() as conn:
         if (await conn.execute(text("SELECT count(*) FROM ccp_tenants"))).scalar():
             pytest.skip("test DB ccp_tenants not empty")

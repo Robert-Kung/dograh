@@ -177,6 +177,7 @@ async def create_workflow_run_rows(
     workflow_definition: dict,
     name_prefix: str,
     provider_id_suffix: str,
+    creatorless: bool = False,
 ):
     """Create org / user / user-configuration / workflow / workflow-run rows
     in the test database for a ``_run_pipeline`` integration test.
@@ -212,19 +213,39 @@ async def create_workflow_run_rows(
         user_id=user.id,
         configuration=EffectiveAIModelConfiguration.model_validate(USER_CONFIGURATION),
     )
+    if creatorless:
+        # No creator means no user configuration to fall back on; the
+        # organization-level model configuration is what a provisioned tenant
+        # runs on.
+        from api.enums import OrganizationConfigurationKey
+        from api.services.configuration.ai_model_configuration import (
+            convert_legacy_ai_model_configuration_to_v2,
+        )
 
+        v2 = convert_legacy_ai_model_configuration_to_v2(
+            EffectiveAIModelConfiguration.model_validate(USER_CONFIGURATION)
+        )
+        await db_session.upsert_configuration(
+            org.id,
+            OrganizationConfigurationKey.MODEL_CONFIGURATION_V2.value,
+            v2.model_dump(mode="json"),
+        )
+
+    # creatorless: a provisioned workflow (change 3) has no creator; the run
+    # and pipeline must work from the organization alone.
     workflow = await db_session.create_workflow(
         name=f"{name_prefix} Workflow",
         workflow_definition=workflow_definition,
-        user_id=user.id,
+        user_id=None if creatorless else user.id,
         organization_id=org.id,
     )
 
     workflow_run = await db_session.create_workflow_run(
         name=f"{name_prefix} Run",
         workflow_id=workflow.id,
+        organization_id=workflow.organization_id,
         mode=WorkflowRunMode.SMALLWEBRTC.value,
-        user_id=user.id,
+        user_id=None if creatorless else user.id,
     )
 
     return workflow_run, user, workflow
