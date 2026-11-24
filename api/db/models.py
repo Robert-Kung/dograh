@@ -307,11 +307,15 @@ class TelephonyPhoneNumberModel(Base):
     inbound_workflow = relationship("WorkflowModel")
 
     __table_args__ = (
-        UniqueConstraint(
-            "organization_id",
+        # A number belongs to one organization platform-wide, active or not
+        # (mt-s1-foundation D3): a second tenant cannot register it, so it can
+        # neither hijack nor DoS the owner's inbound calls.
+        Index(
+            "uq_phone_numbers_address_global",
             "address_normalized",
-            name="uq_phone_numbers_org_address",
+            unique=True,
         ),
+        Index("ix_phone_numbers_org_address", "organization_id", "address_normalized"),
         Index("ix_phone_numbers_config", "telephony_configuration_id"),
         Index(
             "ix_phone_numbers_workflow",

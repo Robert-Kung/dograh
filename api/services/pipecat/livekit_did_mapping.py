@@ -21,6 +21,7 @@ from loguru import logger
 from sqlalchemy.exc import IntegrityError
 
 from api.db import db_client
+from api.db.telephony_phone_number_client import DidTakenError
 from api.services.pipecat.livekit_dispatcher import (
     DID_COUNTRY_HINT,
     normalize_dialed_did,
@@ -107,6 +108,14 @@ async def ensure_livekit_did_mapping(
                 inbound_workflow_id=workflow_id,
                 is_active=True,
             )
+        except DidTakenError:
+            # Another organization holds the number (platform-wide unique).
+            # Logged without the holder: it is not known here and must not be.
+            logger.info(
+                f"livekit did-mapping refused (did_taken): org={organization_id} "
+                f"address=***{canonical[-4:]}"
+            )
+            raise
         except IntegrityError as e:
             raise ConcurrentDidMappingError(
                 f"address {canonical} was registered concurrently"

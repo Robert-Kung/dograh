@@ -279,7 +279,7 @@ def _workflow_graph(workflow):
     )
 
 
-async def _gate_allows(workflow_id: int, user_id: int, now: datetime) -> bool:
+async def _gate_allows(workflow_id: int, organization_id: int, now: datetime) -> bool:
     """營運中 ∧ 隊列健康 — the same composed verdict ``execute_cold_transfer``
     uses (``resolve_transfer_decision``, single truth, security F7).
 
@@ -318,9 +318,13 @@ async def _gate_allows(workflow_id: int, user_id: int, now: datetime) -> bool:
     # path that REFERs capacity-rejected callers, not "no transfer tool".
     unresolved: str | None = None
     try:
-        workflow = await db_client.get_workflow(workflow_id, user_id)
+        workflow = await db_client.get_workflow(
+            workflow_id, organization_id=organization_id
+        )
         if workflow is None:
-            unresolved = f"workflow {workflow_id} not found for user {user_id}"
+            unresolved = (
+                f"workflow {workflow_id} not found in organization {organization_id}"
+            )
         elif not workflow.organization_id:
             unresolved = f"workflow {workflow_id} has no organization"
         else:
@@ -378,7 +382,7 @@ async def capacity_overflow(
     active: int,
     limit: int,
     workflow_id: int,
-    user_id: int,
+    organization_id: int,
     lk=None,
     now: datetime | None = None,
 ) -> None:
@@ -425,7 +429,7 @@ async def capacity_overflow(
             if destination is None:
                 end_reason = "no_target"
             elif not await _gate_allows(
-                workflow_id, user_id, now or datetime.now(timezone.utc)
+                workflow_id, organization_id, now or datetime.now(timezone.utc)
             ):
                 destination, end_reason = None, "gate_closed"
             identity = await wait_for_sip_participant(room_name, lk=client)

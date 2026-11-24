@@ -27,7 +27,7 @@ class WorkflowRunClient(BaseDBClient):
         name: str,
         workflow_id: int,
         mode: str,
-        user_id: int,
+        user_id: int | None,
         call_type: CallType = CallType.OUTBOUND,
         initial_context: dict = None,
         gathered_context: dict = None,
@@ -38,17 +38,21 @@ class WorkflowRunClient(BaseDBClient):
         organization_id: int | None = None,
     ) -> WorkflowRunModel:
         async with self.async_session() as session:
+            if user_id is None and organization_id is None:
+                raise ValueError("create_workflow_run needs organization_id or user_id")
             workflow_query = (
                 select(WorkflowModel)
                 .options(joinedload(WorkflowModel.user))
-                .where(
-                    WorkflowModel.id == workflow_id, WorkflowModel.user_id == user_id
-                )
+                .where(WorkflowModel.id == workflow_id)
             )
+            # Located by organization when given: a provisioned workflow has no
+            # creator (user_id NULL), so the LiveKit path cannot key on user.
             if organization_id is not None:
                 workflow_query = workflow_query.where(
                     WorkflowModel.organization_id == organization_id
                 )
+            if user_id is not None:
+                workflow_query = workflow_query.where(WorkflowModel.user_id == user_id)
 
             workflow = await session.execute(workflow_query)
             workflow = workflow.scalars().first()

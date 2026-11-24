@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 
 import pytest
 
+from api.db.telephony_phone_number_client import ResolvedDid
 from api.services.pipecat import active_calls, capacity_gate
 from api.services.pipecat.capacity_gate import (
     capacity_overflow,
@@ -47,7 +48,7 @@ def events(monkeypatch):
 
 @pytest.fixture
 def gate_open(monkeypatch):
-    async def allow(workflow_id, user_id, now):
+    async def allow(workflow_id, organization_id, now):
         return True
 
     monkeypatch.setattr(capacity_gate, "_gate_allows", allow)
@@ -103,7 +104,7 @@ async def _drain():
 
 def _overflow(room, lk, *, active=6, limit=6):
     return capacity_overflow(
-        room, active=active, limit=limit, workflow_id=1, user_id=2, lk=lk
+        room, active=active, limit=limit, workflow_id=1, organization_id=2, lk=lk
     )
 
 
@@ -243,7 +244,7 @@ def _patch_transfer_config(monkeypatch, config):
     from api.services.pipecat import transfer_call_config
     from api.tests.support.workflow_rows import workflow_row
 
-    async def fake_get_workflow(workflow_id, user_id):
+    async def fake_get_workflow(workflow_id, *, organization_id):
         return workflow_row(organization_id=9)
 
     async def fake_find(workflow, organization_id):
@@ -257,7 +258,7 @@ def _patch_transfer_config(monkeypatch, config):
 async def test_gate_allows_when_unconfigured(monkeypatch):
     from api.db import db_client
 
-    async def fake_get_workflow(workflow_id, user_id):
+    async def fake_get_workflow(workflow_id, *, organization_id):
         return None
 
     monkeypatch.setattr(db_client, "get_workflow", fake_get_workflow)
@@ -317,7 +318,7 @@ async def test_overflow_transfers_caller_with_identity(monkeypatch, events, gate
 async def test_overflow_gate_closed_deletes_room(monkeypatch, events):
     monkeypatch.setenv("CAPACITY_OVERFLOW_TRANSFER_TO", "tel:+886900000000")
 
-    async def deny(workflow_id, user_id, now):
+    async def deny(workflow_id, organization_id, now):
         return False
 
     monkeypatch.setattr(capacity_gate, "_gate_allows", deny)
@@ -482,7 +483,9 @@ def _wire_dispatch(monkeypatch, created, piped):
 
 
 async def _resolver(did):
-    return (1, 2)
+    return ResolvedDid(
+        workflow_id=1, organization_id=2, tenant_status="active", mapped=True
+    )
 
 
 async def _fallback_fails(room, reason, workflow_run_id=None):
@@ -513,7 +516,7 @@ async def test_full_capacity_skips_run_and_spawns_overflow(monkeypatch):
     assert created == [] and piped == {}
     assert called["room"] == "cs-+886912345678"
     assert called["active"] == 6 and called["limit"] == 6
-    assert called["workflow_id"] == 1 and called["user_id"] == 2
+    assert called["workflow_id"] == 1 and called["organization_id"] == 2
 
 
 @pytest.mark.asyncio
@@ -686,7 +689,7 @@ async def test_gate_missing_workflow_is_unresolved_not_a_choice(monkeypatch, gat
     (behaviour unchanged) but must not be labelled a workflow choice."""
     from api.db import db_client
 
-    async def fake_get_workflow(workflow_id, user_id):
+    async def fake_get_workflow(workflow_id, *, organization_id):
         return None
 
     from api.services.pipecat import transfer_call_config
@@ -707,7 +710,7 @@ async def test_gate_missing_workflow_is_unresolved_not_a_choice(monkeypatch, gat
 async def test_gate_lookup_exception_is_logged_as_unresolved(monkeypatch, gate_log):
     from api.db import db_client
 
-    async def boom(workflow_id, user_id):
+    async def boom(workflow_id, *, organization_id):
         raise RuntimeError("db down")
 
     monkeypatch.setattr(db_client, "get_workflow", boom)

@@ -14,6 +14,8 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from api.db.models import CcpTenantModel
+from api.db.telephony_phone_number_client import ResolvedDid
 from api.services.pipecat.livekit_dispatcher import (
     SIP_DIALED_ATTRIBUTE,
     did_from_sip_attributes,
@@ -32,6 +34,11 @@ async def _user_with_org(db_session, tag: str):
         f"lk_did_org_{tag}", user.id
     )
     await db_session.update_user_selected_organization(user.id, org.id)
+    # Resolution only maps numbers of CCP tenants (mt-s1-foundation).
+    async with db_session.async_session() as session:
+        session.add(
+            CcpTenantModel(organization_id=org.id, display_name=tag, status="active")
+        )
     return await db_session.get_user_by_id(user.id), org
 
 
@@ -110,7 +117,9 @@ async def test_fresh_org_creates_container_and_number_routable_by_dispatcher(
 
     # The dialed number as the SIP trunk delivers it resolves to this workflow.
     dialed = did_from_sip_attributes({SIP_DIALED_ATTRIBUTE: "0212345678"})
-    assert await db_session.find_inbound_workflow_for_did(dialed) == (wf.id, user.id)
+    assert await db_session.find_inbound_workflow_for_did(dialed) == ResolvedDid(
+        workflow_id=wf.id, organization_id=org.id, tenant_status="active", mapped=True
+    )
 
 
 async def test_existing_livekit_config_is_reused(
@@ -272,7 +281,9 @@ async def test_bound_to_other_workflow_conflicts_then_overwrite_rebinds(
     after = await db_session.get_phone_number(row.id)
     assert after.inbound_workflow_id == new.id
     assert after.is_active is True
-    assert await db_session.find_inbound_workflow_for_did(DID) == (new.id, user.id)
+    assert await db_session.find_inbound_workflow_for_did(DID) == ResolvedDid(
+        workflow_id=new.id, organization_id=org.id, tenant_status="active", mapped=True
+    )
 
 
 async def test_inactive_row_conflicts_then_overwrite_activates(
@@ -506,14 +517,12 @@ async def test_orgs_are_isolated(test_client_factory, db_session, no_provider_sy
         test_client_factory, user_b, address=DID, workflow_id=wf_b.id
     )
 
-    # Org A's row is neither a conflict for B nor reused by B.
-    assert created_b.status_code == 201, created_b.text
-    body_a, body_b = created_a.json(), created_b.json()
-    assert body_b["config_id"] != body_a["config_id"]
-    assert body_b["phone_number_id"] != body_a["phone_number_id"]
-    [cfg_b] = await _livekit_configs(db_session, org_b)
-    assert cfg_b.id == body_b["config_id"]
-    row_a = await db_session.get_phone_number(body_a["phone_number_id"])
+    # The number is platform-wide unique (mt-s1-foundation, reversing the
+    # earlier per-org uniqueness): B is refused without learning who holds it,
+    # and org A's row is untouched.
+    assert created_b.status_code == 409, created_b.text
+    assert created_b.json() == {"detail": "did_taken"}
+    row_a = await db_session.get_phone_number(created_a.json()["phone_number_id"])
     assert row_a.inbound_workflow_id == wf_a.id
     assert row_a.organization_id == org_a.id
 

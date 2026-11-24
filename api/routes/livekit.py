@@ -25,6 +25,7 @@ from loguru import logger
 
 from api.db import db_client
 from api.db.models import UserModel
+from api.db.telephony_phone_number_client import DidTakenError, ResolvedDid
 from api.schemas.livekit_did_mapping import (
     LiveKitDidMappingRequest,
     LiveKitDidMappingResponse,
@@ -39,6 +40,7 @@ from api.services.pipecat.livekit_did_mapping import (
 )
 from api.services.pipecat.livekit_dispatcher import (
     handle_webhook_event,
+    normalize_dialed_did,
     record_webhook_rejected,
 )
 
@@ -47,8 +49,12 @@ router = APIRouter(prefix="/livekit")
 WEBHOOK_PATH_SECRET_ENV = "LIVEKIT_WEBHOOK_PATH_SECRET"
 
 
-async def _did_resolver(did: str) -> tuple[int, int] | None:
-    return await db_client.find_inbound_workflow_for_did(did)
+async def _did_resolver(did: str) -> ResolvedDid | None:
+    # Same normalization as every DID write path (mt-s1-foundation D3).
+    canonical = normalize_dialed_did(did)
+    if canonical is None:
+        return None
+    return await db_client.find_inbound_workflow_for_did(canonical)
 
 
 async def _fallback(room_name: str, reason: str, workflow_run_id: int | None = None):
@@ -105,8 +111,10 @@ _DID_MAPPING_STATUS_CODES = {"created": 201, "conflict": 409}
         201: {"model": LiveKitDidMappingResponse, "description": "Created"},
         409: {
             "model": LiveKitDidMappingResponse,
-            "description": "Number bound elsewhere (status=conflict; "
-            "current.provider tells whether overwrite can help)",
+            "description": "Number bound elsewhere in this organization "
+            "(status=conflict; current.provider tells whether overwrite can "
+            "help), or held by another organization (detail=did_taken, no "
+            "holder information)",
         },
         422: {
             "description": "Not a PSTN number, or the org's livekit "
@@ -139,6 +147,9 @@ async def ensure_did_mapping(
         raise HTTPException(status_code=404, detail="Workflow not found")
     except ContainerConfigAmbiguousError as e:
         raise HTTPException(status_code=422, detail=str(e))
+    except DidTakenError:
+        # Held by some organization; never say which (tenant-isolation).
+        raise HTTPException(status_code=409, detail="did_taken")
     except ConcurrentDidMappingError as e:
         raise HTTPException(status_code=503, detail=str(e))
 

@@ -5,6 +5,7 @@ owned by a telephony configuration. They power both outbound caller-ID
 selection and inbound call routing.
 """
 
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
 from sqlalchemy import update
@@ -13,11 +14,30 @@ from sqlalchemy.future import select
 
 from api.db.base_client import BaseDBClient
 from api.db.models import (
+    CcpTenantModel,
     TelephonyConfigurationModel,
     TelephonyPhoneNumberModel,
     WorkflowModel,
 )
 from api.utils.telephony_address import normalize_telephony_address
+
+UNIQUE_DID_INDEX = "uq_phone_numbers_address_global"
+
+
+class DidTakenError(Exception):
+    """The number is already registered (by any organization). Carries no
+    information about the holder."""
+
+
+@dataclass(frozen=True)
+class ResolvedDid:
+    """LiveKit DID resolution (tenant-isolation〈來電號碼解析租戶〉)."""
+
+    workflow_id: Optional[int]
+    organization_id: int
+    # ccp_tenants.status, or None when the number's organization is no tenant.
+    tenant_status: Optional[str]
+    mapped: bool
 
 
 class TelephonyPhoneNumberClient(BaseDBClient):
@@ -117,42 +137,57 @@ class TelephonyPhoneNumberClient(BaseDBClient):
             return (row[0], row[1]) if row else None
 
     async def find_inbound_workflow_for_did(
-        self,
-        address: str,
-        country_hint: Optional[str] = None,
-    ) -> Optional[Tuple[int, int]]:
-        """LiveKit inbound: map a dialed DID to (workflow_id, user_id) without a
-        telephony provider. Matches active numbers whose normalized address
-        equals the DID and which have an inbound workflow assigned. Returns None
-        on bad input or when the DID is ambiguous across tenants, so the caller
-        falls back rather than cross-routing. The provider-bound routing table
-        is a stop-gap; the canonical DID->workflow store is S-L6-ROUTING."""
-        try:
-            normalized = normalize_telephony_address(address, country_hint=country_hint)
-        except ValueError:
-            return None
+        self, canonical_did: str
+    ) -> Optional[ResolvedDid]:
+        """LiveKit inbound: resolve a canonical E.164 DID to its tenant.
 
+        ``canonical_did`` is ``normalize_dialed_did`` output — the same
+        normalization every DID write path uses. The organization comes from
+        the number row (never from the workflow creator). ``mapped`` iff the
+        row is active, has an inbound workflow in the same organization, and
+        that organization is a CCP tenant; otherwise the row's organization is
+        still returned (unmapped-but-owned). None only when no row holds the
+        number. Never depends on the workflow's ``user_id``.
+        """
         async with self.async_session() as session:
-            result = await session.execute(
-                select(
-                    TelephonyPhoneNumberModel.inbound_workflow_id,
-                    WorkflowModel.user_id,
+            row = (
+                await session.execute(
+                    select(
+                        TelephonyPhoneNumberModel.organization_id,
+                        TelephonyPhoneNumberModel.is_active,
+                        TelephonyPhoneNumberModel.inbound_workflow_id,
+                        WorkflowModel.organization_id.label("workflow_org"),
+                        CcpTenantModel.status,
+                    )
+                    .outerjoin(
+                        WorkflowModel,
+                        WorkflowModel.id
+                        == TelephonyPhoneNumberModel.inbound_workflow_id,
+                    )
+                    .outerjoin(
+                        CcpTenantModel,
+                        CcpTenantModel.organization_id
+                        == TelephonyPhoneNumberModel.organization_id,
+                    )
+                    .where(
+                        TelephonyPhoneNumberModel.address_normalized == canonical_did
+                    )
                 )
-                .join(
-                    WorkflowModel,
-                    WorkflowModel.id == TelephonyPhoneNumberModel.inbound_workflow_id,
-                )
-                .where(
-                    TelephonyPhoneNumberModel.address_normalized
-                    == normalized.canonical,
-                    TelephonyPhoneNumberModel.is_active.is_(True),
-                )
-                .limit(2)
-            )
-            rows = result.all()
-            if len(rows) != 1:
-                return None
-            return (rows[0][0], rows[0][1])
+            ).one_or_none()
+        if row is None:
+            return None
+        mapped = (
+            row.is_active
+            and row.inbound_workflow_id is not None
+            and row.workflow_org == row.organization_id
+            and row.status is not None
+        )
+        return ResolvedDid(
+            workflow_id=row.inbound_workflow_id if mapped else None,
+            organization_id=row.organization_id,
+            tenant_status=row.status,
+            mapped=bool(mapped),
+        )
 
     async def find_active_phone_number_for_inbound(
         self,
@@ -296,6 +331,19 @@ class TelephonyPhoneNumberClient(BaseDBClient):
         normalized = normalize_telephony_address(address, country_hint=country_code)
 
         async with self.async_session() as session:
+            # Platform-wide unique (mt-s1-foundation D3); the unique index is
+            # the backstop for a concurrent registration.
+            holder = (
+                await session.execute(
+                    select(TelephonyPhoneNumberModel.organization_id).where(
+                        TelephonyPhoneNumberModel.address_normalized
+                        == normalized.canonical
+                    )
+                )
+            ).scalar_one_or_none()
+            if holder is not None and holder != organization_id:
+                raise DidTakenError()
+
             if is_default_caller_id:
                 await self._clear_default_caller_id(session, telephony_configuration_id)
 
@@ -317,6 +365,9 @@ class TelephonyPhoneNumberClient(BaseDBClient):
                 await session.commit()
             except IntegrityError as e:
                 await session.rollback()
+                if UNIQUE_DID_INDEX in str(e.orig):
+                    # Lost a race with another organization's registration.
+                    raise DidTakenError() from None
                 raise e
             await session.refresh(row)
             return row

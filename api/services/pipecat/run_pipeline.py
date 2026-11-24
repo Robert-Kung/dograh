@@ -410,7 +410,7 @@ async def run_pipeline_livekit(
     room_name: str,
     workflow_id: int,
     workflow_run_id: int,
-    user_id: int,
+    organization_id: int,
     call_context_vars: dict = {},
     user_provider_id: str | None = None,
     reserved: bool = False,
@@ -429,7 +429,7 @@ async def run_pipeline_livekit(
             room_name,
             workflow_id,
             workflow_run_id,
-            user_id,
+            organization_id,
             call_context_vars=call_context_vars,
             user_provider_id=user_provider_id,
         )
@@ -463,19 +463,26 @@ async def _run_pipeline_livekit_impl(
     room_name: str,
     workflow_id: int,
     workflow_run_id: int,
-    user_id: int,
+    organization_id: int,
     call_context_vars: dict = {},
     user_provider_id: str | None = None,
 ) -> None:
-    """Run pipeline for a LiveKit room, mirroring the smallwebrtc path."""
+    """Run pipeline for a LiveKit room, mirroring the smallwebrtc path.
+
+    Located by the DID-resolved organization (mt-s1-foundation D4), never by a
+    creator: a provisioned workflow has no user, so ``user_id`` may be None.
+    """
     logger.debug(
         f"Running pipeline for LiveKit room {room_name} with workflow_id: {workflow_id} and workflow_run_id: {workflow_run_id}"
     )
     set_current_run_id(workflow_run_id)
 
-    workflow = await db_client.get_workflow(workflow_id, user_id)
+    workflow = await db_client.get_workflow(
+        workflow_id, organization_id=organization_id
+    )
     if workflow:
         set_current_org_id(workflow.organization_id)
+    user_id = workflow.user_id if workflow else None
 
     ambient_noise_config = None
     if workflow and workflow.workflow_configurations:

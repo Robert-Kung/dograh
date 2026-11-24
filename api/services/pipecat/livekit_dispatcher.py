@@ -24,6 +24,7 @@ from typing import Awaitable, Callable, Optional
 
 from loguru import logger
 
+from api.db.telephony_phone_number_client import ResolvedDid
 from api.services.ccp import smoke
 from api.utils.telephony_address import normalize_telephony_address
 
@@ -47,9 +48,10 @@ RESOLVER_RETRY_DELAYS_SECONDS = (0.5, 1.0)
 # Upper bound on one dispatch attempt; past it the call goes to the fallback.
 DISPATCH_TIMEOUT_SECONDS = 15.0
 
-# DID -> (workflow_id, user_id). Storage/owner is an open question
-# (relates to S-L6-ROUTING); injected so this layer makes no assumption.
-DidResolver = Callable[[str], Awaitable[Optional[tuple[int, int]]]]
+# DID -> ResolvedDid (tenant-isolation〈來電號碼解析租戶〉): the number row's
+# organization, mapped only when number, workflow and tenant agree. Injected
+# so this layer makes no storage assumption.
+DidResolver = Callable[[str], Awaitable[Optional[ResolvedDid]]]
 Fallback = Callable[[str, str, Optional[int]], Awaitable[None]]
 
 
@@ -66,6 +68,15 @@ def normalize_dialed_did(raw: str | None) -> str | None:
     ``/livekit/did-mappings`` endpoint, so the two always compare equal.
     """
     raw = (raw or "").strip()
+    # A SIP URI whose user part is a number names that number (C6: the host is
+    # never trusted for routing); any other SIP URI is not a DID.
+    sip = re.match(r"^sips?:([^@;?]+)@", raw, re.IGNORECASE)
+    if sip:
+        raw = sip.group(1).strip()
+    elif re.match(r"^sips?:", raw, re.IGNORECASE):
+        return None
+    if raw.lower().startswith("tel:"):
+        raw = raw[4:].split(";", 1)[0].strip()
     # No hint for an explicitly international number: the normalizer strips
     # "+" before comparing dial codes, so hinting "+1555…" or "001555…" would
     # prefix 886 to a foreign number (review D-02). Everything else — "02…",
@@ -252,7 +263,10 @@ async def _dispatch(
     resolved = await asyncio.wait_for(
         _resolve_with_retry(resolver, did), timeout=DISPATCH_TIMEOUT_SECONDS
     )
-    if not resolved:
+    if resolved is None or not resolved.mapped:
+        # Unmapped-but-owned (resolved.organization_id set) is not the first
+        # tenant's call; per-tenant fallback settings arrive with
+        # mt-s1-tenant-settings. Either way the caller is never left silent.
         await fallback(room_name, "unmapped_did", None)
         return True
 
@@ -271,7 +285,7 @@ async def _dispatch(
     from api.services.pipecat.livekit_safetynet import spawn
     from api.services.pipecat.run_pipeline import run_pipeline_livekit
 
-    workflow_id, user_id = resolved
+    workflow_id, organization_id = resolved.workflow_id, resolved.organization_id
 
     # S-L9-SCALE admission — before any run/token/pipeline resource exists.
     # The decision is synchronous (check-and-reserve, no await gap); the
@@ -285,7 +299,7 @@ async def _dispatch(
                 active=livekit_active_call_count() + reserved_slot_count(),
                 limit=limit,
                 workflow_id=workflow_id,
-                user_id=user_id,
+                organization_id=organization_id,
             )
         )
         return True
@@ -298,7 +312,8 @@ async def _dispatch(
                 name=f"livekit-{room_name}",
                 workflow_id=workflow_id,
                 mode=WorkflowRunMode.LIVEKIT.value,
-                user_id=user_id,
+                user_id=None,
+                organization_id=organization_id,
                 call_type=CallType.INBOUND,
                 initial_context={
                     "did": did,
@@ -334,7 +349,7 @@ async def _dispatch(
                 room_name=room_name,
                 workflow_id=workflow_id,
                 workflow_run_id=workflow_run_id,
-                user_id=user_id,
+                organization_id=organization_id,
                 reserved=gate_enabled,
             )
         )
