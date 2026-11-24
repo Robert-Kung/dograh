@@ -14,7 +14,6 @@ from api.db.models import (
     OrganizationModel,
     OrganizationUsageCycleModel,
     UserConfigurationModel,
-    UserModel,
     WorkflowModel,
     WorkflowRunModel,
 )
@@ -139,9 +138,8 @@ class OrganizationUsageClient(BaseDBClient):
             query = (
                 select(WorkflowRunModel)
                 .join(WorkflowModel, WorkflowRunModel.workflow_id == WorkflowModel.id)
-                .join(UserModel, WorkflowModel.user_id == UserModel.id)
                 .where(
-                    UserModel.selected_organization_id == organization_id,
+                    WorkflowRunModel.organization_id == organization_id,
                     WorkflowRunModel.usage_info.isnot(None),
                 )
                 .order_by(WorkflowRunModel.created_at.desc())
@@ -277,9 +275,8 @@ class OrganizationUsageClient(BaseDBClient):
                     WorkflowRunModel.public_access_token,
                 )
                 .join(WorkflowModel, WorkflowRunModel.workflow_id == WorkflowModel.id)
-                .join(UserModel, WorkflowModel.user_id == UserModel.id)
                 .where(
-                    UserModel.selected_organization_id == organization_id,
+                    WorkflowRunModel.organization_id == organization_id,
                     WorkflowRunModel.usage_info.isnot(None),
                 )
                 .order_by(WorkflowRunModel.created_at.desc())
@@ -382,9 +379,8 @@ class OrganizationUsageClient(BaseDBClient):
                     func.count(WorkflowRunModel.id).label("call_count"),
                 )
                 .join(WorkflowModel, WorkflowModel.id == WorkflowRunModel.workflow_id)
-                .join(UserModel, UserModel.id == WorkflowModel.user_id)
                 .where(
-                    UserModel.selected_organization_id == organization_id,
+                    WorkflowRunModel.organization_id == organization_id,
                     WorkflowRunModel.created_at >= start_date,
                     WorkflowRunModel.created_at <= end_date,
                     WorkflowRunModel.is_completed == True,

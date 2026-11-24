@@ -53,6 +53,7 @@ def add_run(workflow, async_session):
             name="usage-report-run",
             initial_context=initial_context or {},
             workflow_id=workflow.id,
+            organization_id=workflow.organization_id,
             mode=mode,
             call_type=call_type,
             is_completed=completed,

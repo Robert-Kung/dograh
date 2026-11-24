@@ -434,7 +434,7 @@ async def create_workflow(
         request.name,
         workflow_definition,
         user.id,
-        user.selected_organization_id,
+        organization_id=user.selected_organization_id,
     )
 
     capture_event(
@@ -1589,7 +1589,7 @@ async def duplicate_workflow_template(
         request.workflow_name,
         workflow_def,
         user.id,
-        user.selected_organization_id,
+        organization_id=user.selected_organization_id,
     )
 
     if trigger_paths:

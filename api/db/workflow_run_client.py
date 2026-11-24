@@ -9,7 +9,6 @@ from api.db.base_client import BaseDBClient
 from api.db.filters import apply_workflow_run_filters, get_workflow_run_order_clause
 from api.db.models import (
     OrganizationModel,
-    UserModel,
     WorkflowDefinitionModel,
     WorkflowModel,
     WorkflowRunModel,
@@ -108,6 +107,9 @@ class WorkflowRunClient(BaseDBClient):
             new_run = WorkflowRunModel(
                 name=name,
                 workflow=workflow,
+                # Always the workflow's organization (tenant-isolation); a
+                # caller-supplied organization only narrows the lookup above.
+                organization_id=workflow.organization_id,
                 mode=mode,
                 definition_id=target_def.id if target_def else None,
                 initial_context=merged_initial_context,
@@ -153,10 +155,9 @@ class WorkflowRunClient(BaseDBClient):
             base_query = (
                 select(WorkflowRunModel)
                 .join(WorkflowModel, WorkflowRunModel.workflow_id == WorkflowModel.id)
-                .join(UserModel, WorkflowModel.user_id == UserModel.id)
                 .outerjoin(
                     OrganizationModel,
-                    UserModel.selected_organization_id == OrganizationModel.id,
+                    WorkflowRunModel.organization_id == OrganizationModel.id,
                 )
             )
 
@@ -172,12 +173,8 @@ class WorkflowRunClient(BaseDBClient):
             order_clause = get_workflow_run_order_clause(sort_by, sort_order)
             result = await session.execute(
                 base_query.options(
-                    joinedload(WorkflowRunModel.workflow).joinedload(
-                        WorkflowModel.user
-                    ),
-                    joinedload(WorkflowRunModel.workflow)
-                    .joinedload(WorkflowModel.user)
-                    .joinedload(UserModel.selected_organization),
+                    joinedload(WorkflowRunModel.workflow),
+                    joinedload(WorkflowRunModel.organization),
                 )
                 .order_by(order_clause)
                 .limit(limit)
@@ -188,11 +185,7 @@ class WorkflowRunClient(BaseDBClient):
             # Format the response
             formatted_runs = []
             for run in workflow_runs:
-                organization = (
-                    run.workflow.user.selected_organization
-                    if run.workflow.user
-                    else None
-                )
+                organization = run.organization
                 formatted_runs.append(
                     {
                         "id": run.id,
@@ -445,11 +438,7 @@ class WorkflowRunClient(BaseDBClient):
             if not workflow_run:
                 return None, None
 
-            if not workflow_run.workflow or not workflow_run.workflow.user:
-                return workflow_run, None
-
-            organization_id = workflow_run.workflow.user.selected_organization_id
-            return workflow_run, organization_id
+            return workflow_run, workflow_run.organization_id
 
     async def ensure_public_access_token(self, workflow_run_id: int) -> Optional[str]:
         """Generate a public access token if not exists, return existing if present (idempotent).

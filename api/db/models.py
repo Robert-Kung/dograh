@@ -439,7 +439,9 @@ class WorkflowModel(Base):
     )
     user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     user = relationship("UserModel", back_populates="workflows")
-    organization_id = Column(Integer, ForeignKey("organizations.id"), nullable=True)
+    # NOT NULL since mt-s1-foundation: attribution is the row's organization,
+    # never the creator's selected organization (user_id may be NULL).
+    organization_id = Column(Integer, ForeignKey("organizations.id"), nullable=False)
     organization = relationship("OrganizationModel")
     # Optional folder for grouping in the agents list. NULL = "Uncategorized".
     # ON DELETE SET NULL: deleting a folder un-files its agents, never deletes them.
@@ -526,6 +528,9 @@ class WorkflowRunModel(Base):
     name = Column(String, nullable=False)
     workflow_id = Column(Integer, ForeignKey("workflows.id"), nullable=False)
     workflow = relationship("WorkflowModel", back_populates="runs")
+    # Always the workflow's organization at creation (mt-s1-foundation).
+    organization_id = Column(Integer, ForeignKey("organizations.id"), nullable=False)
+    organization = relationship("OrganizationModel")
     definition_id = Column(
         Integer, ForeignKey("workflow_definitions.id"), nullable=True
     )
@@ -593,6 +598,7 @@ class WorkflowRunModel(Base):
         ),
         Index("idx_workflow_runs_workflow_id", "workflow_id"),
         Index("idx_workflow_runs_campaign_id", "campaign_id"),
+        Index("idx_workflow_runs_org_created", "organization_id", "created_at"),
     )
 
 

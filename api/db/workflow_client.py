@@ -24,9 +24,12 @@ class WorkflowClient(BaseDBClient):
         self,
         name: str,
         workflow_definition: dict,
-        user_id: int,
-        organization_id: int = None,
+        user_id: int | None,
+        *,
+        organization_id: int,
     ) -> WorkflowModel:
+        if organization_id is None:
+            raise ValueError("create_workflow requires organization_id")
         async with self.async_session() as session:
             try:
                 new_workflow = WorkflowModel(
@@ -619,11 +622,9 @@ class WorkflowClient(BaseDBClient):
         """Get workflows by IDs for a specific organization"""
         async with self.async_session() as session:
             result = await session.execute(
-                select(WorkflowModel)
-                .join(WorkflowModel.user)
-                .where(
+                select(WorkflowModel).where(
                     WorkflowModel.id.in_(workflow_ids),
-                    WorkflowModel.user.has(selected_organization_id=organization_id),
+                    WorkflowModel.organization_id == organization_id,
                 )
             )
             return result.scalars().all()

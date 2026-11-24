@@ -156,7 +156,7 @@ async def create_workflow(code: str) -> dict[str, Any]:
         name,
         payload,
         user.id,
-        user.selected_organization_id,
+        organization_id=user.selected_organization_id,
     )
 
     capture_event(

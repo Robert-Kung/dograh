@@ -16,6 +16,7 @@ from pipecat.frames.frames import (
     VADUserStartedSpeakingFrame,
 )
 
+from api.db.telephony_phone_number_client import ResolvedDid
 from api.services.pipecat import livekit_safetynet as sn
 from api.services.pipecat.livekit_safetynet import (
     SafetynetWatchdog,
@@ -278,7 +279,9 @@ async def test_launch_failed_via_done_callback(monkeypatch):
     from api.services.pipecat import livekit_dispatcher, run_pipeline
 
     async def resolver(did):
-        return (1, 2)
+        return ResolvedDid(
+            workflow_id=1, organization_id=2, tenant_status="active", mapped=True
+        )
 
     async def fake_create_workflow_run(**kw):
         return types.SimpleNamespace(id=77)
@@ -320,7 +323,9 @@ async def test_prelaunch_failure_routes_to_fallback(monkeypatch):
     from api.services.pipecat import livekit_dispatcher
 
     async def resolver(did):
-        return (1, 2)
+        return ResolvedDid(
+            workflow_id=1, organization_id=2, tenant_status="active", mapped=True
+        )
 
     async def broken_create_workflow_run(**kw):
         raise RuntimeError("db blip")

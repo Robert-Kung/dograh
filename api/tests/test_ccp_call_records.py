@@ -79,6 +79,7 @@ def add_run(workflow, async_session):
         run = WorkflowRunModel(
             name="call-records-run",
             workflow_id=workflow.id,
+            organization_id=workflow.organization_id,
             mode=mode,
             call_type=call_type,
             is_completed=completed,
