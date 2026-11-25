@@ -199,6 +199,31 @@ async def test_same_org_duplicate_raises_integrity_error_not_did_taken(
         )
 
 
+async def test_legacy_save_reports_skipped_numbers(
+    test_client_factory, db_session, async_session
+):
+    """review gate R9: the legacy telephony-config save tells the caller which
+    numbers were not registered and why, without describing the holder."""
+    ua, orga, wfa = await _tenant(db_session, async_session, "la")
+    ub, orgb, _ = await _tenant(db_session, async_session, "lb")
+    assert (await _map(test_client_factory, ua, DID, wfa.id)).status_code == 201
+    body = {
+        "provider": "twilio",
+        "account_sid": "AC-legacy-b",
+        "auth_token": "tok-b",
+        "from_numbers": [DID, "+886221117777", "   "],
+    }
+    async with test_client_factory(ub) as client:
+        resp = await client.post("/api/v1/organizations/telephony-config", json=body)
+
+    assert resp.status_code == 200
+    assert resp.json()["skipped_numbers"] == [
+        {"index": 0, "address_masked": "***5678", "reason": "did_taken"},
+        {"index": 2, "address_masked": "***   ", "reason": "invalid"},
+    ]
+    assert DID not in resp.text and str(orga.id) not in resp.text
+
+
 def _phone_migration():
     import importlib.util
     from pathlib import Path
