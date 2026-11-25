@@ -48,6 +48,7 @@ from api.services.mps_service_key_client import mps_service_key_client
 from api.services.posthog_client import capture_event
 from api.services.reports import generate_workflow_report_csv
 from api.services.storage import storage_fs
+from api.services.workflow.ambient_noise import foreign_ambient_noise_key
 from api.services.workflow.dto import ReactFlowDTO, sanitize_workflow_definition
 from api.services.workflow.duplicate import duplicate_workflow
 from api.services.workflow.errors import ItemKind, WorkflowError
@@ -1045,6 +1046,13 @@ async def update_workflow(
         # Validate model overrides. v2 uses a complete workflow-level model
         # configuration; legacy v1 uses partial service overlays.
         workflow_configurations = request.workflow_configurations
+        if foreign_ambient_noise_key(
+            workflow_configurations, user.selected_organization_id
+        ):
+            raise HTTPException(
+                status_code=403,
+                detail="Access denied: ambient noise file does not belong to your organization",
+            )
 
         # Ticket-server bearer key round-trip: responses mask it, so a save
         # that echoes the mask must restore the stored real key.

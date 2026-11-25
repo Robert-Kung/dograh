@@ -63,6 +63,7 @@ from api.services.pipecat.transport_setup import (
 from api.services.pipecat.worker_runner import run_pipeline_worker
 from api.services.pipecat.ws_sender_registry import get_ws_sender
 from api.services.telephony import registry as telephony_registry
+from api.services.workflow.ambient_noise import scoped_ambient_noise_config
 from api.services.workflow.dto import ReactFlowDTO
 from api.services.workflow.pipecat_engine import PipecatEngine
 from api.services.workflow.workflow_graph import WorkflowGraph
@@ -250,11 +251,13 @@ async def _run_pipeline_telephony_impl(
     if workflow:
         set_current_org_id(workflow.organization_id)
 
-    ambient_noise_config = None
-    if workflow and workflow.workflow_configurations:
-        ambient_noise_config = workflow.workflow_configurations.get(
-            "ambient_noise_configuration"
+    ambient_noise_config = (
+        scoped_ambient_noise_config(
+            workflow.workflow_configurations, workflow.organization_id
         )
+        if workflow
+        else None
+    )
 
     # The telephony config id is stamped on the workflow run when it's created
     # (test call, campaign dispatch, inbound). Transports use it to load creds
@@ -370,12 +373,13 @@ async def _run_pipeline_smallwebrtc_impl(
     if workflow:
         set_current_org_id(workflow.organization_id)
 
-    ambient_noise_config = None
-    if workflow and workflow.workflow_configurations:
-        if "ambient_noise_configuration" in workflow.workflow_configurations:
-            ambient_noise_config = workflow.workflow_configurations[
-                "ambient_noise_configuration"
-            ]
+    ambient_noise_config = (
+        scoped_ambient_noise_config(
+            workflow.workflow_configurations, workflow.organization_id
+        )
+        if workflow
+        else None
+    )
 
     # Create audio configuration for WebRTC
     audio_config = create_audio_config(WorkflowRunMode.SMALLWEBRTC.value)
@@ -500,12 +504,13 @@ async def _run_pipeline_livekit_impl(
         set_current_org_id(workflow.organization_id)
     user_id = workflow.user_id if workflow else None
 
-    ambient_noise_config = None
-    if workflow and workflow.workflow_configurations:
-        if "ambient_noise_configuration" in workflow.workflow_configurations:
-            ambient_noise_config = workflow.workflow_configurations[
-                "ambient_noise_configuration"
-            ]
+    ambient_noise_config = (
+        scoped_ambient_noise_config(
+            workflow.workflow_configurations, workflow.organization_id
+        )
+        if workflow
+        else None
+    )
 
     audio_config = create_audio_config(WorkflowRunMode.LIVEKIT.value)
 

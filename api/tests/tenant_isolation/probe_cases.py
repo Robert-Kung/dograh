@@ -273,6 +273,20 @@ async def _(p: Probe):
     p.foreign(
         await p.client.put(f"{V1}/workflow/{wf(p.a)}", json={"name": "renamed by B"})
     )
+    # B's own workflow pointing its ambient noise at A's call recording:
+    # the pipeline would play A's caller audio under B's calls.
+    ambient = {
+        "ambient_noise_configuration": {
+            "enabled": True,
+            "storage_key": f"recordings/{p.a.run.id}.wav",
+            "storage_backend": "minio",
+            "volume": 1,
+        }
+    }
+    r = await p.client.put(
+        f"{V1}/workflow/{wf(p.b)}", json={"workflow_configurations": ambient}
+    )
+    assert r.status_code == 403, r.text
 
 
 @case("POST /api/v1/workflow/{workflow_id}/runs", kind=FOREIGN)
