@@ -6,8 +6,8 @@ Backfill for rows where ``organization_id`` is NULL, in order:
 2. the creator's organization, when the creator belongs to exactly one.
 
 No candidate, phone numbers in more than one organization, or a phone-number
-organization that differs from the creator's single organization aborts the
-upgrade and lists the workflow ids. Never uses the creator's
+organization the creator does not belong to (when the creator belongs to any
+organization) aborts the upgrade and lists the workflow ids. Never uses the creator's
 ``selected_organization_id``.
 
 Revision ID: d4a7c2e9b815
@@ -67,7 +67,7 @@ def backfill_workflow_organizations(conn) -> dict:
             unresolved.append(row.id)
         elif phone:
             org = next(iter(phone))
-            if creator_single is not None and creator_single != org:
+            if creator and org not in creator:
                 unresolved.append(row.id)
             else:
                 assign[row.id] = org

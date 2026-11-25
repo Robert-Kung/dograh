@@ -152,7 +152,10 @@ async def test_backfill_from_creator_single_org(
 
 
 @pytest.mark.scenario("tenant-isolation:無法判定歸屬的工作流")
-@pytest.mark.parametrize("shape", ["no_candidate", "contradiction", "two_phone_orgs"])
+@pytest.mark.parametrize(
+    "shape",
+    ["no_candidate", "contradiction", "phone_outside_creator_orgs", "two_phone_orgs"],
+)
 async def test_backfill_aborts_when_undeterminable(
     pre_migration, db_session, async_session, shape
 ):
@@ -167,6 +170,12 @@ async def test_backfill_aborts_when_undeterminable(
         uid = await _user(async_session, shape, [a])
         wf = await _null_org_workflow(db_session, async_session, uid, a)
         await _phone(async_session, b, wf, "+886299990002")
+    elif shape == "phone_outside_creator_orgs":
+        # Creator in two orgs, the number's org is neither (review gate S9).
+        c = await _org(async_session, f"x_c_{shape}")
+        uid = await _user(async_session, shape, [a, b])
+        wf = await _null_org_workflow(db_session, async_session, uid, a)
+        await _phone(async_session, c, wf, "+886299990005")
     else:
         uid = await _user(async_session, shape, [a])
         wf = await _null_org_workflow(db_session, async_session, uid, a)
