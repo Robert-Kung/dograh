@@ -58,3 +58,16 @@ def test_rejects_bad_id(bad):
     with pytest.raises(SystemExit) as exc:
         cli.main(["check", bad])
     assert exc.value.code != 0
+
+
+async def test_ensure_unknown_organization_is_readable_error(
+    db_session, async_session, run, capsys
+):
+    """review gate R11: a missing organization is a clear message and exit 1,
+    not a NoResultFound traceback; nothing is created."""
+    await _orgs(async_session, 0)
+    missing = 2147483000
+    assert await run(["ensure", str(missing)]) == 1
+    assert f"organization {missing}: not found" in capsys.readouterr().out
+    count = await async_session.execute(text("SELECT count(*) FROM ccp_tenants"))
+    assert count.scalar_one() == 0

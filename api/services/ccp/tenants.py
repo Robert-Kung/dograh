@@ -34,6 +34,10 @@ class DisplayNameTaken(Exception):
     """Another tenant already uses this display name (after normalisation)."""
 
 
+class OrganizationNotFound(Exception):
+    """The organization id does not exist."""
+
+
 @dataclass(frozen=True)
 class Tenant:
     organization_id: int
@@ -177,7 +181,8 @@ async def ensure_first_tenant(organization_id: int) -> bool:
     """Make ``organization_id`` the active first tenant iff ccp_tenants is empty.
 
     The emptiness check and the insert are serialised with a table lock, so two
-    concurrent callers create at most one row. Returns whether a row was made.
+    concurrent callers create at most one row. Returns whether a row was made;
+    raises ``OrganizationNotFound`` for an unknown id.
     """
     async with db_client.async_session() as session:
         await session.execute(
@@ -194,7 +199,9 @@ async def ensure_first_tenant(organization_id: int) -> bool:
                     OrganizationModel.id == organization_id
                 )
             )
-        ).scalar_one()
+        ).scalar_one_or_none()
+        if provider_id is None:
+            raise OrganizationNotFound(organization_id)
         name = provider_id[:64]
         session.add(
             CcpTenantModel(

@@ -31,7 +31,12 @@ async def _check(org_id: int) -> int:
 
 
 async def _ensure(org_id: int) -> int:
-    if await tenants.ensure_first_tenant(org_id):
+    try:
+        created = await tenants.ensure_first_tenant(org_id)
+    except tenants.OrganizationNotFound:
+        print(f"organization {org_id}: not found — nothing created")
+        return 1
+    if created:
         print(f"organization {org_id}: created as active first tenant")
         return 0
     print(
