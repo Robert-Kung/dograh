@@ -70,6 +70,7 @@ def no_provider_sync():
 # --- 3.1 red: second org grabbing a DID used to DoS the first -----------------
 
 
+@pytest.mark.scenario("tenant-isolation:第二租戶搶登已用號碼")
 async def test_second_tenant_cannot_take_registered_did(
     test_client_factory, db_session, async_session
 ):
@@ -92,6 +93,7 @@ async def test_second_tenant_cannot_take_registered_did(
 # --- 3.9 red: variant spellings must write and resolve to one string ----------
 
 
+@pytest.mark.scenario("tenant-isolation:號碼變體格式解析一致")
 @pytest.mark.parametrize(
     "dialed",
     [
@@ -113,6 +115,7 @@ async def test_variant_spellings_resolve_to_registered_row(
     assert resolved is not None and resolved.workflow_id == wf.id
 
 
+@pytest.mark.scenario("tenant-isolation:號碼變體格式解析一致")
 @pytest.mark.parametrize(
     "variant", ["886212345678", "tel:+886212345678", "sip:+886212345678@host"]
 )
@@ -132,6 +135,7 @@ async def test_variant_spelling_reregistration_is_did_taken(
 # --- 3.4 telephony number API and migration pre-check -------------------------
 
 
+@pytest.mark.scenario("tenant-isolation:第二租戶搶登已用號碼")
 async def test_telephony_number_api_refuses_number_held_elsewhere(
     test_client_factory, db_session, async_session
 ):
@@ -156,7 +160,7 @@ def _phone_migration():
     from pathlib import Path
 
     path = (
-        Path(__file__).resolve().parents[1]
+        Path(__file__).resolve().parents[2]
         / "alembic/versions/c5e2a8d4f1b6_phone_numbers_global_unique.py"
     )
     spec = importlib.util.spec_from_file_location("phone_mig", path)
@@ -165,6 +169,7 @@ def _phone_migration():
     return mod
 
 
+@pytest.mark.scenario("tenant-isolation:既有重複號碼使 migration 中止")
 async def test_migration_precheck_aborts_and_masks_duplicates(
     db_session, async_session
 ):
@@ -211,6 +216,8 @@ async def _number(db_session, org, wf_id, *, active=True):
     )
 
 
+@pytest.mark.scenario("tenant-isolation:號碼與工作流分屬不同組織")
+@pytest.mark.scenario("livekit-dispatch:組織不一致視同未設定")
 async def test_number_and_workflow_in_different_orgs_is_unmapped_but_owned(
     db_session, async_session
 ):
@@ -221,6 +228,8 @@ async def test_number_and_workflow_in_different_orgs_is_unmapped_but_owned(
     assert resolved == ResolvedDid(None, orga.id, "active", False)
 
 
+@pytest.mark.scenario("tenant-isolation:號碼與工作流分屬不同組織")
+@pytest.mark.scenario("livekit-dispatch:組織不一致視同未設定")
 async def test_unmapped_but_owned_falls_back_not_silent():
     fallback = AsyncMock()
 
@@ -234,6 +243,7 @@ async def test_unmapped_but_owned_falls_back_not_silent():
     fallback.assert_awaited_once_with("cs-room", "unmapped_did", None)
 
 
+@pytest.mark.scenario("tenant-isolation:停用號碼列仍歸屬其組織")
 async def test_inactive_number_still_owned(db_session, async_session):
     _, org, wf = await _tenant(db_session, async_session, "in")
     await _number(db_session, org, wf.id, active=False)
@@ -242,6 +252,8 @@ async def test_inactive_number_still_owned(db_session, async_session):
     )
 
 
+@pytest.mark.scenario("tenant-isolation:非租戶組織")
+@pytest.mark.scenario("livekit-dispatch:組織不一致視同未設定")
 async def test_non_tenant_organization_is_unmapped(db_session, async_session):
     user, _ = await db_session.get_or_create_user_by_provider_id("did_nt")
     org, _ = await db_session.get_or_create_organization_by_provider_id(
@@ -264,6 +276,7 @@ async def test_unknown_number_resolves_to_none(db_session):
     assert await livekit_route._did_resolver("not-a-number") is None
 
 
+@pytest.mark.scenario("tenant-isolation:解析回傳號碼列的組織")
 async def test_creator_switching_org_does_not_change_resolution(
     db_session, async_session
 ):
@@ -276,6 +289,7 @@ async def test_creator_switching_org_does_not_change_resolution(
     )
 
 
+@pytest.mark.scenario("tenant-isolation:停用租戶的號碼仍解析出組織")
 async def test_suspended_tenant_still_resolves_with_status(db_session, async_session):
     _, org, wf = await _tenant(db_session, async_session, "su", status="suspended")
     await _number(db_session, org, wf.id)

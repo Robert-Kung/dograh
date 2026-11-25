@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 from sqlalchemy import text
 
-_VERSIONS = Path(__file__).resolve().parents[1] / "alembic" / "versions"
+_VERSIONS = Path(__file__).resolve().parents[2] / "alembic" / "versions"
 
 
 def _load(name: str):
@@ -151,6 +151,7 @@ async def test_backfill_from_creator_single_org(
     assert await _wf_org(async_session, wf) == a
 
 
+@pytest.mark.scenario("tenant-isolation:無法判定歸屬的工作流")
 @pytest.mark.parametrize("shape", ["no_candidate", "contradiction", "two_phone_orgs"])
 async def test_backfill_aborts_when_undeterminable(
     pre_migration, db_session, async_session, shape
@@ -184,6 +185,7 @@ async def test_backfill_aborts_when_undeterminable(
     assert await _wf_org(async_session, wf) is None
 
 
+@pytest.mark.scenario("tenant-isolation:無法判定歸屬的工作流")
 async def test_backfill_never_uses_selected_organization(
     pre_migration, db_session, async_session
 ):

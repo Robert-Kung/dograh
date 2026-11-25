@@ -21,7 +21,7 @@ from pathlib import Path
 
 import pytest
 
-API_ROOT = Path(__file__).resolve().parents[1]
+API_ROOT = Path(__file__).resolve().parents[2]
 SCANNED = ("db", "routes")
 
 # (relative path, enclosing function) -> reason
@@ -156,6 +156,7 @@ def scan(root: Path = API_ROOT) -> list[str]:
     return out
 
 
+@pytest.mark.scenario("tenant-isolation:靜態檢查")
 def test_no_attribution_violations():
     assert scan() == []
 
@@ -167,6 +168,7 @@ def test_exemptions_point_at_real_functions():
         assert key in have, key
 
 
+@pytest.mark.scenario("tenant-isolation:靜態檢查")
 @pytest.mark.parametrize(
     "src, mark",
     [

@@ -44,6 +44,7 @@ def test_agent_token_claims(monkeypatch):
     assert captured["can_publish"] and captured["can_subscribe"]
 
 
+@pytest.mark.scenario("livekit-dispatch:未設定 DID")
 @pytest.mark.asyncio
 async def test_unmapped_did_routes_to_fallback():
     fb = {}
@@ -63,6 +64,7 @@ async def test_unmapped_did_routes_to_fallback():
     assert fb == {"room": "cs-_+886912345678_abc", "reason": "unmapped_did"}
 
 
+@pytest.mark.scenario("livekit-dispatch:未設定 DID")
 @pytest.mark.asyncio
 async def test_no_did_routes_to_fallback():
     fb = {}

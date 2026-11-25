@@ -51,6 +51,7 @@ async def client(test_client_factory, db_session):
         yield c
 
 
+@pytest.mark.scenario("tenant-isolation:匿名註冊被拒")
 @pytest.mark.parametrize(
     "headers",
     [
@@ -73,6 +74,7 @@ async def test_anonymous_signup_is_refused_without_writes(
     assert await _count(async_session, OrganizationModel) == orgs
 
 
+@pytest.mark.scenario("tenant-isolation:匿名註冊被拒")
 async def test_unconfigured_secret_refuses_signup(client, monkeypatch):
     monkeypatch.setattr("api.constants.DOGRAH_DEVOPS_SECRET", "")
     r = await client.post(
@@ -85,6 +87,7 @@ async def _empty_tenants(async_session):
     await async_session.execute(text("DELETE FROM ccp_tenants"))
 
 
+@pytest.mark.scenario("tenant-isolation:空 DB 首啟建立第一號租戶")
 async def test_secret_signup_on_empty_table_creates_active_first_tenant(
     client, async_session
 ):
@@ -99,6 +102,7 @@ async def test_secret_signup_on_empty_table_creates_active_first_tenant(
     assert await tenants.is_tenant(org_id)
 
 
+@pytest.mark.scenario("tenant-isolation:空 DB 首啟建立第一號租戶")
 async def test_secret_signup_on_non_empty_table_is_not_a_tenant(client, async_session):
     await _empty_tenants(async_session)
     first = await client.post(
@@ -113,6 +117,7 @@ async def test_secret_signup_on_non_empty_table_is_not_a_tenant(client, async_se
     assert await _count(async_session, CcpTenantModel) == 1
 
 
+@pytest.mark.scenario("tenant-isolation:bootstrap 重跑冪等")
 async def test_rerun_is_409_then_login(client, async_session):
     await _empty_tenants(async_session)
     h = {"X-Dograh-Devops-Secret": SECRET}
@@ -126,6 +131,7 @@ async def test_rerun_is_409_then_login(client, async_session):
     assert login.status_code == 200
 
 
+@pytest.mark.scenario("tenant-isolation:空 DB 首啟建立第一號租戶")
 async def test_empty_db_first_tenant_can_take_calls_and_read_reports(
     test_client_factory, db_session, async_session, monkeypatch
 ):

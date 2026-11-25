@@ -65,6 +65,7 @@ def _calls(d):
     }
 
 
+@pytest.mark.scenario("tenant-isolation:缺組織不退回 user_id")
 @pytest.mark.parametrize(
     "name",
     [

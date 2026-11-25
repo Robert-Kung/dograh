@@ -8,11 +8,9 @@ nothing else falls into the queried range.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
-
 import pytest
 
-from api.db.models import CcpTenantModel, WorkflowRunModel
+from api.db.models import CcpTenantModel
 
 CR = "/api/v1/internal/call-records"
 UR = "/api/v1/internal/usage-report"
@@ -29,45 +27,11 @@ def secrets(monkeypatch):
     monkeypatch.setattr("api.constants.DOGRAH_DEVOPS_SECRET", DEVOPS)
 
 
-async def _tenant(db_session, async_session, tag: str):
-    user, _ = await db_session.get_or_create_user_by_provider_id(f"scope_u_{tag}")
-    org, _ = await db_session.get_or_create_organization_by_provider_id(
-        f"scope_org_{tag}", user.id
-    )
-    async_session.add(
-        CcpTenantModel(
-            organization_id=org.id, display_name=f"scope {tag}", status="active"
-        )
-    )
-    wf = await db_session.create_workflow(
-        name=f"scope {tag}",
-        workflow_definition={"nodes": [], "edges": []},
-        user_id=None,
-        organization_id=org.id,
-    )
-    run = WorkflowRunModel(
-        name=f"scope run {tag}",
-        workflow_id=wf.id,
-        organization_id=org.id,
-        mode="livekit",
-        call_type="inbound",
-        is_completed=True,
-        created_at=datetime(2021, 3, 10, 2, tzinfo=UTC),
-        annotations={"call_outcome": "ai_completed"},
-        usage_info={"call_duration_seconds": 42},
-        initial_context={"did": "+886212345678"},
-        storage_backend="minio",
-    )
-    async_session.add(run)
-    await async_session.flush()
-    return user, org, run
-
-
 @pytest.fixture
-async def two_tenants(db_session, async_session):
-    ua, a, run_a = await _tenant(db_session, async_session, "a")
-    _, b, run_b = await _tenant(db_session, async_session, "b")
-    return ua, a, run_a, b, run_b
+def scope_pair(two_tenants):
+    """The shared two-tenant fixture (conftest) as (user A, org A, run A, org B, run B)."""
+    a, b = two_tenants.a, two_tenants.b
+    return a.user, a.org, a.run, b.org, b.run
 
 
 def _cr(org_id):
@@ -78,16 +42,18 @@ def _ur(org_id):
     return {"X-Dograh-Devops-Secret": DEVOPS, ORG_HEADER: str(org_id)}
 
 
-async def test_list_only_shows_own_organization(test_client_factory, two_tenants):
-    ua, a, run_a, b, run_b = two_tenants
+@pytest.mark.scenario("call-records:他組織的通話不入清單")
+async def test_list_only_shows_own_organization(test_client_factory, scope_pair):
+    ua, a, run_a, b, run_b = scope_pair
     async with test_client_factory(ua) as client:
         r = await client.post(f"{CR}/query", json=BODY, headers=_cr(a.id))
     assert r.status_code == 200
     assert [row["run_id"] for row in r.json()["rows"]] == [run_a.id]
 
 
-async def test_other_org_detail_is_not_found(test_client_factory, two_tenants):
-    ua, a, run_a, b, run_b = two_tenants
+@pytest.mark.scenario("call-records:他組織的 run id 回 404")
+async def test_other_org_detail_is_not_found(test_client_factory, scope_pair):
+    ua, a, run_a, b, run_b = scope_pair
     async with test_client_factory(ua) as client:
         other = await client.get(f"{CR}/{run_b.id}", headers=_cr(a.id))
         missing = await client.get(f"{CR}/2147483000", headers=_cr(a.id))
@@ -97,8 +63,9 @@ async def test_other_org_detail_is_not_found(test_client_factory, two_tenants):
     assert other.status_code == 404
 
 
-async def test_other_org_audio_is_not_found(test_client_factory, two_tenants):
-    ua, a, run_a, b, run_b = two_tenants
+@pytest.mark.scenario("call-records:他組織的 run id 回 404")
+async def test_other_org_audio_is_not_found(test_client_factory, scope_pair):
+    ua, a, run_a, b, run_b = scope_pair
     async with test_client_factory(ua) as client:
         other = await client.get(f"{CR}/{run_b.id}/audio", headers=_cr(a.id))
         missing = await client.get(f"{CR}/2147483000/audio", headers=_cr(a.id))
@@ -106,8 +73,9 @@ async def test_other_org_audio_is_not_found(test_client_factory, two_tenants):
     assert other.status_code == 404
 
 
-async def test_usage_report_counts_own_organization(test_client_factory, two_tenants):
-    ua, a, run_a, b, run_b = two_tenants
+@pytest.mark.scenario("usage-report:他組織的通話不計入")
+async def test_usage_report_counts_own_organization(test_client_factory, scope_pair):
+    ua, a, run_a, b, run_b = scope_pair
     async with test_client_factory(ua) as client:
         r = await client.get(UR, params=USAGE, headers=_ur(a.id))
     assert r.status_code == 200
@@ -117,13 +85,15 @@ async def test_usage_report_counts_own_organization(test_client_factory, two_ten
 # --- 5.5 header contract: secret first, then organization ------------------
 
 
+@pytest.mark.scenario("tenant-isolation:缺組織編號被拒")
+@pytest.mark.scenario("call-records:缺組織編號")
 @pytest.mark.parametrize(
     "raw", [None, "", "0", "-1", "01", "abc", "1 ", "2147483648", "1;2"]
 )
 async def test_malformed_or_missing_organization_is_400(
-    test_client_factory, two_tenants, raw
+    test_client_factory, scope_pair, raw
 ):
-    ua = two_tenants[0]
+    ua = scope_pair[0]
     cr_h = {"X-Dograh-Call-Records-Secret": CR_SECRET}
     ur_h = {"X-Dograh-Devops-Secret": DEVOPS}
     if raw is not None:
@@ -141,10 +111,13 @@ async def test_malformed_or_missing_organization_is_400(
     ] * 4
 
 
+@pytest.mark.scenario("tenant-isolation:非租戶組織被拒")
+@pytest.mark.scenario("usage-report:非租戶組織")
+@pytest.mark.scenario("tenant-isolation:非租戶組織")
 async def test_non_tenant_organization_is_403(
-    test_client_factory, db_session, two_tenants
+    test_client_factory, db_session, scope_pair
 ):
-    ua = two_tenants[0]
+    ua = scope_pair[0]
     org, _ = await db_session.get_or_create_organization_by_provider_id(
         "scope_org_not_tenant", ua.id
     )
@@ -161,9 +134,9 @@ async def test_non_tenant_organization_is_403(
 
 
 async def test_secret_is_checked_before_organization(
-    test_client_factory, two_tenants, monkeypatch
+    test_client_factory, scope_pair, monkeypatch
 ):
-    ua = two_tenants[0]
+    ua = scope_pair[0]
     called = []
 
     async def spy(organization_id):
@@ -188,13 +161,13 @@ async def test_secret_is_checked_before_organization(
 
 
 async def test_suspended_tenant_is_still_scoped_to_itself(
-    test_client_factory, async_session, two_tenants
+    test_client_factory, async_session, scope_pair
 ):
     """Suspension has no call-records effect in this change (tenant-isolation
     〈租戶狀態〉): the header still resolves and scopes to that tenant."""
     from sqlalchemy import update
 
-    ua, a, run_a, b, run_b = two_tenants
+    ua, a, run_a, b, run_b = scope_pair
     await async_session.execute(
         update(CcpTenantModel)
         .where(CcpTenantModel.organization_id == b.id)

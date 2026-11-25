@@ -21,7 +21,7 @@ from api.db.models import (
 from api.services.ccp import tenants as t
 
 _MIGRATION = (
-    Path(__file__).resolve().parents[1]
+    Path(__file__).resolve().parents[2]
     / "alembic"
     / "versions"
     / "b3d1f7a2c9e0_add_ccp_tenants.py"
@@ -83,6 +83,7 @@ async def test_backfill_zero_organizations(async_session):
     assert await _rows(async_session) == []
 
 
+@pytest.mark.scenario("tenant-isolation:既有部署升級即為第一號租戶")
 async def test_backfill_single_organization_is_active(async_session, capsys):
     (org,) = await _fresh_orgs(async_session, 1)
     _, out = await _backfill(async_session, None)
@@ -91,6 +92,7 @@ async def test_backfill_single_organization_is_active(async_session, capsys):
     assert "backfilled 1 rows" in capsys.readouterr().err
 
 
+@pytest.mark.scenario("tenant-isolation:多組織升級只有第一號租戶啟用")
 async def test_backfill_three_organizations_designated(async_session, capsys):
     a, b, c = await _fresh_orgs(async_session, 3)
     _, out = await _backfill(async_session, str(b))
@@ -104,6 +106,7 @@ async def test_backfill_three_organizations_designated(async_session, capsys):
     assert str(a) in err and str(c) in err
 
 
+@pytest.mark.scenario("tenant-isolation:多組織未指定第一號租戶")
 @pytest.mark.parametrize("env", [None, "", "abc", "999999"])
 async def test_backfill_multiple_unspecified_aborts(async_session, env):
     ids = await _fresh_orgs(async_session, 2)
@@ -129,6 +132,8 @@ async def test_status_defaults_to_suspended(async_session):
     assert await _rows(async_session) == [(org, "suspended")]
 
 
+@pytest.mark.scenario("tenant-isolation:簽收欄位半套被拒")
+@pytest.mark.scenario("tenant-isolation:非法狀態值")
 @pytest.mark.parametrize(
     "sql",
     [
@@ -292,6 +297,7 @@ async def test_ensure_first_tenant_empty_then_nonempty(db_session, async_session
     assert await t.count_tenants() == 1
 
 
+@pytest.mark.scenario("tenant-isolation:停用保留資料")
 async def test_suspend_keeps_data_and_updates_timestamp(db_session, async_session):
     await _fresh_orgs(async_session, 0)
     res = await t.create_tenant(
@@ -332,6 +338,7 @@ async def test_suspend_keeps_data_and_updates_timestamp(db_session, async_sessio
     assert "ccp_tenant.status_changed" in log and "'old_status': 'active'" in log
 
 
+@pytest.mark.scenario("tenant-isolation:非法狀態值")
 async def test_set_status_rejects_illegal_and_unknown(db_session, async_session):
     await _fresh_orgs(async_session, 0)
     with pytest.raises(ValueError):
@@ -348,6 +355,7 @@ async def test_record_signoff(db_session, async_session):
     assert tenant.signed_off_by == "implementer:7" and tenant.signed_off_at == at
 
 
+@pytest.mark.scenario("tenant-isolation:非租戶組織")
 async def test_non_tenant_organization(db_session, async_session):
     (org,) = await _fresh_orgs(async_session, 1)
     assert await t.get_tenant(org) is None

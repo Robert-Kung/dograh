@@ -63,6 +63,7 @@ async def _switched(db_session, async_session):
     return org_a, org_b, wf, run
 
 
+@pytest.mark.scenario("tenant-isolation:建立者切換組織後歸屬不變")
 async def test_workflows_by_ids_follow_workflow_org(db_session, async_session):
     org_a, org_b, wf, _ = await _switched(db_session, async_session)
     got_a = await db_session.get_workflows_by_ids([wf.id], org_a.id)
@@ -70,6 +71,7 @@ async def test_workflows_by_ids_follow_workflow_org(db_session, async_session):
     assert await db_session.get_workflows_by_ids([wf.id], org_b.id) == []
 
 
+@pytest.mark.scenario("tenant-isolation:建立者切換組織後歸屬不變")
 async def test_usage_history_and_export_follow_run_org(db_session, async_session):
     org_a, org_b, _, run = await _switched(db_session, async_session)
     runs_a, total_a, *_ = await db_session.get_usage_history(org_a.id)
@@ -81,6 +83,7 @@ async def test_usage_history_and_export_follow_run_org(db_session, async_session
     assert await db_session.get_usage_runs_for_report(org_b.id) == []
 
 
+@pytest.mark.scenario("tenant-isolation:建立者切換組織後歸屬不變")
 async def test_daily_usage_follows_run_org(db_session, async_session):
     org_a, org_b, _, _ = await _switched(db_session, async_session)
     now = datetime.now(UTC)
@@ -91,6 +94,7 @@ async def test_daily_usage_follows_run_org(db_session, async_session):
     assert sum(d["call_count"] for d in daily_b["breakdown"]) == 0
 
 
+@pytest.mark.scenario("tenant-isolation:建立者切換組織後歸屬不變")
 async def test_run_context_org_is_run_org(db_session, async_session):
     org_a, _, _, run = await _switched(db_session, async_session)
     _, ctx_org = await db_session.get_workflow_run_with_context(run.id)
@@ -100,6 +104,7 @@ async def test_run_context_org_is_run_org(db_session, async_session):
 # --- 4.7 every new run carries its workflow's organization -------------------
 
 
+@pytest.mark.scenario("tenant-isolation:新 run 帶組織")
 @pytest.mark.parametrize(
     "mode, by_user",
     [
@@ -141,6 +146,7 @@ async def test_provisioned_workflow_without_creator_gets_run(db_session):
     assert run.organization_id == org_a.id
 
 
+@pytest.mark.scenario("tenant-isolation:新 run 帶組織")
 async def test_livekit_org_mismatch_creates_no_run(db_session, async_session):
     _, _, org_b, wf, _ = await _creator_in_two_orgs(db_session)
     before = (
@@ -195,6 +201,7 @@ async def _provisioned_run(db_session, async_session):
     return org_b, wf, run
 
 
+@pytest.mark.scenario("tenant-isolation:無建立者的工作流仍計入用量")
 async def test_creatorless_workflow_counts_in_usage_and_batch(
     db_session, async_session
 ):
