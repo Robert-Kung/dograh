@@ -559,12 +559,22 @@ async def _handle_telephony_websocket(
             await websocket.close(code=4404, reason="Workflow run not found")
             return
 
-        # Get workflow for organization info. System lookup keyed only on the
-        # workflow_id (org is derived below) — use the explicit unscoped variant.
-        workflow = await db_client.get_workflow_by_id(workflow_id)
-        if not workflow:
-            logger.error(f"Workflow {workflow_id} not found")
-            await websocket.close(code=4404, reason="Workflow not found")
+        # The run is the only anchor (no user session): the pipeline runs the
+        # path's workflow as the path's user, so both must belong to the run
+        # — the run's own workflow and a member of the run's organization
+        # (tenant-isolation, review gate S5).
+        organization_id = workflow_run.organization_id
+        if workflow_run.workflow_id != workflow_id:
+            logger.warning(
+                f"Workflow run {workflow_run_id} does not belong to workflow {workflow_id}"
+            )
+            await websocket.close(code=4404, reason="Workflow run not found")
+            return
+        if not await db_client.is_user_in_organization(user_id, organization_id):
+            logger.warning(
+                f"User {user_id} is not a member of run {workflow_run_id}'s organization"
+            )
+            await websocket.close(code=4404, reason="Workflow run not found")
             return
 
         # Check workflow run state - only allow 'initialized' state
@@ -624,9 +634,7 @@ async def _handle_telephony_websocket(
             f"WebSocket connected for {provider_type} provider, workflow_run {workflow_run_id}"
         )
 
-        provider = await get_telephony_provider_for_run(
-            workflow_run, workflow.organization_id
-        )
+        provider = await get_telephony_provider_for_run(workflow_run, organization_id)
 
         # Verify the provider matches what was stored
         if provider.PROVIDER_NAME != provider_type:

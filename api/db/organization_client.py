@@ -91,6 +91,17 @@ class OrganizationClient(BaseDBClient):
                 return organization, was_created
             return organization, False
 
+    async def is_user_in_organization(self, user_id: int, organization_id: int) -> bool:
+        """Whether ``user_id`` is a member of ``organization_id``."""
+        async with self.async_session() as session:
+            result = await session.execute(
+                select(organization_users_association.c.user_id).where(
+                    organization_users_association.c.user_id == user_id,
+                    organization_users_association.c.organization_id == organization_id,
+                )
+            )
+            return result.first() is not None
+
     async def add_user_to_organization(
         self, user_id: int, organization_id: int
     ) -> None:

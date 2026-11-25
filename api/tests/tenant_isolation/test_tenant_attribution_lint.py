@@ -135,11 +135,6 @@ EXEMPT_UNSCOPED_CALL = {
     (
         "routes/telephony.py",
         "_handle_telephony_websocket",
-        "get_workflow_by_id",
-    ): _CARRIER,
-    (
-        "routes/telephony.py",
-        "_handle_telephony_websocket",
         "update_workflow_run",
     ): _CARRIER,
     (
