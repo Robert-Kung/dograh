@@ -921,6 +921,16 @@ async def _(p: Probe):
         }
 
     p.foreign(await p.client.post(url, json=body(p.a.recording.storage_key)))
+    # Call audio lives at recordings/{run_id}/user.wav; run ids overlap org
+    # ids, so a bare own-org prefix can name another org's call.
+    # The response carries none of A's identifiers, so foreign() alone would
+    # pass a 200; require the refusal.
+    for key in (
+        f"recordings/{p.b.org_id}/user.wav",
+        f"recordings/{p.b.org_id}/brec1/../x.wav",
+    ):
+        r = p.foreign(await p.client.post(url, json=body(key)))
+        assert r.status_code == 403, r.text
     own_key = f"recordings/{p.b.org_id}/brec1/{p.b.token}-2.wav"
     p.own(await p.client.post(url, json=body(own_key)), p.b.token)
 

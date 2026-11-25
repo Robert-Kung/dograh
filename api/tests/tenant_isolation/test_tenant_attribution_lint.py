@@ -162,19 +162,41 @@ EXEMPT_UNSCOPED_CALL = {
     ): (
         "superuser 分支（③ 已豁免同函式）；非 superuser 只經組織範圍 get_workflow_run，查無即 403"
     ),
+    ("routes/auth.py", "signup", "get_user_by_email"): (
+        "使用者帳號（email）全平台唯一、非組織範圍資源；signup 受部署層密鑰保護"
+    ),
+    ("routes/auth.py", "signup", "create_user_with_email"): (
+        "同上：建立使用者本身不屬任何組織，組織於其後以新使用者建立"
+    ),
+    ("routes/auth.py", "login", "get_user_by_email"): (
+        "登入以 email 查全平台唯一帳號，回應前驗密碼；非組織範圍資源"
+    ),
     ("routes/webrtc_signaling.py", "_handle_offer", "get_workflow_organization_id"): (
         "呼叫端 signaling_websocket 先以組織範圍取 run，並拒絕與 run 不符的 workflow_id"
     ),
 }
-# Parameters that are never request-sourced identifiers.
+# Parameters that are never request-sourced identifiers.  ``request`` is not
+# here: many routes name their Pydantic body ``request``; only a parameter
+# annotated as the Starlette ``Request``／``WebSocket`` object is skipped.
 _NOT_REQUEST_PARAMS = {
     "self",
     "cls",
     "user",
-    "request",
     "websocket",
     "ws",
     "background_tasks",
+}
+_FRAMEWORK_TYPES = {"Request", "WebSocket", "BackgroundTasks"}
+# Route helpers that raise unless the id belongs to the organization passed
+# alongside it.  A call to one, with the request id and an organization-scoped
+# value, guards later calls on that id.
+OWNERSHIP_HELPERS = {
+    ("routes/organization.py", "_ensure_config_belongs_to_org"): (
+        "以 organization_id 組織範圍查 telephony 設定，查無即 404"
+    ),
+    ("routes/organization.py", "_ensure_workflow_belongs_to_org"): (
+        "以 organization_id 組織範圍查工作流，查無即 404"
+    ),
 }
 
 
@@ -313,6 +335,7 @@ def _request_params(fn) -> set[str]:
         if p.arg not in _NOT_REQUEST_PARAMS
         and not (d is not None and _is_depends(d))
         and not (p.annotation is not None and _is_depends(p.annotation))
+        and not (p.annotation is not None and _names(p.annotation) & _FRAMEWORK_TYPES)
     }
 
 
@@ -336,16 +359,79 @@ def _scoped_names(fn) -> set[str]:
     return scoped
 
 
-def _dominating_guard(fn, call, scoped: set[str]) -> bool:
+def _org_aliases(fn) -> set[str]:
+    """Names bound to the bare ``selected_organization_id`` value (not to a
+    row fetched with it)."""
+    aliases: set[str] = set()
+    changed = True
+    while changed:
+        changed = False
+        for st in ast.walk(fn):
+            if not isinstance(st, ast.Assign):
+                continue
+            v = st.value
+            if (
+                isinstance(v, ast.Attribute) and v.attr == "selected_organization_id"
+            ) or (isinstance(v, ast.Name) and v.id in aliases):
+                for t in st.targets:
+                    if isinstance(t, ast.Name) and t.id not in aliases:
+                        aliases.add(t.id)
+                        changed = True
+    return aliases
+
+
+def _is_presence_check(test, aliases: set[str]) -> bool:
+    """``if not user.selected_organization_id:`` only proves an organization
+    is selected, not that the id belongs to it.  (``if workflow is None`` on a
+    row fetched with the organization is an ownership check.)"""
+    if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
+        test = test.operand
+    elif (
+        isinstance(test, ast.Compare)
+        and len(test.ops) == 1
+        and isinstance(test.ops[0], ast.Is)
+        and isinstance(test.comparators[0], ast.Constant)
+        and test.comparators[0].value is None
+    ):
+        test = test.left
+    else:
+        return False
+    if isinstance(test, ast.Attribute):
+        return test.attr == "selected_organization_id"
+    return isinstance(test, ast.Name) and test.id in aliases
+
+
+def _ownership_helper_call(st, org: set[str], ids: set[str]) -> bool:
+    helpers = {name for _, name in OWNERSHIP_HELPERS}
+    for n in ast.walk(st):
+        if not (
+            isinstance(n, ast.Call)
+            and (getattr(n.func, "id", None) or getattr(n.func, "attr", None))
+            in helpers
+        ):
+            continue
+        args = [*n.args, *(k.value for k in n.keywords)]
+        names = set().union(*(_names(a) for a in args)) if args else set()
+        if names & org and names & ids:
+            return True
+    return False
+
+
+def _dominating_guard(fn, call, scoped: set[str], ids: set[str]) -> bool:
     """An ownership check on every path to ``call`` (see ④ above)."""
     org = {"selected_organization_id"} | scoped
+    aliases = _org_aliases(fn)
 
     def visit(stmts) -> bool | None:
         # True: guarded; False: reached unguarded; None: not in this block.
         guarded = False
         for st in stmts:
             if call in set(ast.walk(st)):
-                if isinstance(st, ast.If) and org & _names(st.test):
+                if (
+                    isinstance(st, ast.If)
+                    and org & _names(st.test)
+                    and not _is_presence_check(st.test, aliases)
+                ):
                     in_body = any(call in set(ast.walk(b)) for b in st.body)
                     if in_body:
                         return True
@@ -363,8 +449,9 @@ def _dominating_guard(fn, call, scoped: set[str]) -> bool:
             if (
                 isinstance(st, ast.If)
                 and org & _names(st.test)
+                and not _is_presence_check(st.test, aliases)
                 and any(isinstance(n, ast.Raise) for b in st.body for n in ast.walk(b))
-            ):
+            ) or _ownership_helper_call(st, org, ids):
                 guarded = True
         return None
 
@@ -389,11 +476,12 @@ def _unscoped_calls(rel, tree, signatures):
             ):
                 continue
             args = [*call.args, *(k.value for k in call.keywords)]
-            if not any(params & _names(a) for a in args):
+            ids = params & set().union(*(_names(a) for a in args)) if args else set()
+            if not ids:
                 continue
             if (rel, fn.name, call.func.attr) in EXEMPT_UNSCOPED_CALL:
                 continue
-            if _dominating_guard(fn, call, scoped):
+            if _dominating_guard(fn, call, scoped, ids):
                 continue
             yield (
                 f"{rel}:{call.lineno} ④ {fn.name}: request id -> "
@@ -420,7 +508,7 @@ def test_no_attribution_violations():
 def test_exemptions_point_at_real_functions():
     """An exemption whose function was renamed or removed must not linger."""
     have = {(rel, fn.name) for rel, tree in _files(API_ROOT) for fn in _functions(tree)}
-    for key in (*EXEMPT_ORG_BRANCH, *EXEMPT_SUPERUSER):
+    for key in (*EXEMPT_ORG_BRANCH, *EXEMPT_SUPERUSER, *OWNERSHIP_HELPERS):
         assert key in have, key
     signatures = _db_signatures(API_ROOT)
     for rel, fn, db_fn in EXEMPT_UNSCOPED_CALL:
@@ -524,6 +612,29 @@ _OWN = "    t = await db_client.get_org_thing(thing_id, organization_id=user.sel
             "    return await db_client.get_org_thing(thing_id, organization_id=1)\n",
             False,
         ),
+        # only proves an organization is selected, not that thing_id is in it
+        (
+            "    if not user.selected_organization_id:\n        raise E(400)\n"
+            "    return await db_client.get_thing(thing_id)\n",
+            True,
+        ),
+        (
+            "    org = user.selected_organization_id\n"
+            "    if org is None:\n        raise E(400)\n"
+            "    return await db_client.get_thing(thing_id)\n",
+            True,
+        ),
+        (
+            "    await _ensure_config_belongs_to_org(thing_id, user.selected_organization_id)\n"
+            "    return await db_client.get_thing(thing_id)\n",
+            False,
+        ),
+        # the helper must be given the id being used
+        (
+            "    await _ensure_config_belongs_to_org(other_id, user.selected_organization_id)\n"
+            "    return await db_client.get_thing(thing_id)\n",
+            True,
+        ),
     ],
     ids=[
         "unguarded",
@@ -533,6 +644,10 @@ _OWN = "    t = await db_client.get_org_thing(thing_id, organization_id=user.sel
         "no-raise",
         "sibling-branch",
         "takes-org",
+        "presence-only",
+        "presence-alias",
+        "ownership-helper",
+        "helper-other-id",
     ],
 )
 def test_detects_unscoped_call_shape(tmp_path, body, flagged):
@@ -552,3 +667,22 @@ def test_dependency_params_are_not_request_ids(tmp_path):
         "async def h(user=Depends(get_user)):\n    return await db_client.get_thing(user.id)\n"
     )
     assert scan(tmp_path) == []
+
+
+@pytest.mark.parametrize(
+    "head, flagged",
+    [
+        # a Pydantic body named ``request`` carries request ids
+        ("async def h(request: Body, user=Depends(get_user)):\n", True),
+        ("async def h(request: Request, user=Depends(get_user)):\n", False),
+    ],
+    ids=["body-named-request", "starlette-request"],
+)
+def test_request_param_by_annotation(tmp_path, head, flagged):
+    for sub in SCANNED:
+        (tmp_path / sub).mkdir()
+    (tmp_path / "db" / "c.py").write_text(_DB_STUB)
+    (tmp_path / "routes" / "r.py").write_text(
+        head + "    return await db_client.get_thing(request.thing_id)\n"
+    )
+    assert bool([f for f in scan(tmp_path) if "④" in f]) == flagged

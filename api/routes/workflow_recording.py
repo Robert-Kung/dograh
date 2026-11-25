@@ -1,5 +1,6 @@
 """API routes for workflow recording operations."""
 
+import re
 from typing import Annotated, Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
@@ -36,6 +37,33 @@ async def _generate_unique_recording_id(organization_id: int) -> str:
             return rid
     raise HTTPException(
         status_code=500, detail="Failed to generate unique recording ID"
+    )
+
+
+def _safe_filename(name: str) -> str:
+    # Same character set as presigned-upload-url; keeps the key at exactly
+    # four segments so create_recordings accepts it.
+    cleaned = re.sub(r"[^a-zA-Z0-9._-]", "_", name)
+    return "_" if cleaned in ("", ".", "..") else cleaned
+
+
+def _is_own_upload_key(
+    storage_key: str, organization_id: int, recording_id: str
+) -> bool:
+    """True only for the exact shape upload-url issues:
+    recordings/{org_id}/{recording_id}/{filename}.
+
+    A prefix check is not enough: call recordings live at
+    recordings/{run_id}/user.wav, and run ids overlap org ids, so
+    "recordings/{own org}/user.wav" would name another org's call audio.
+    """
+    parts = storage_key.split("/")
+    return (
+        len(parts) == 4
+        and parts[0] == "recordings"
+        and parts[1] == str(organization_id)
+        and parts[2] == recording_id
+        and all(seg not in ("", ".", "..") and "\\" not in seg for seg in parts[2:])
     )
 
 
@@ -78,7 +106,7 @@ async def get_upload_urls(
             storage_key = (
                 f"recordings/{user.selected_organization_id}"
                 f"/{recording_id}"
-                f"/{fd.filename}"
+                f"/{_safe_filename(fd.filename)}"
             )
 
             upload_url = await storage_fs.aget_presigned_put_url(
@@ -128,10 +156,12 @@ async def create_recordings(
     user=Depends(get_user),
 ):
     """Create one or more recording records after audio files have been uploaded."""
-    # upload-url issues keys under recordings/{org_id}/; another org's key
-    # would let this org's agents play that org's audio.
-    own_prefix = f"recordings/{user.selected_organization_id}/"
-    if any(not r.storage_key.startswith(own_prefix) for r in request.recordings):
+    if any(
+        not _is_own_upload_key(
+            r.storage_key, user.selected_organization_id, r.recording_id
+        )
+        for r in request.recordings
+    ):
         raise HTTPException(
             status_code=403,
             detail="Access denied: file does not belong to your organization",
