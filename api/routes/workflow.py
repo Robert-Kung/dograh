@@ -1349,14 +1349,19 @@ async def create_workflow_run(
         request: The create workflow run request
         user: The user to create the workflow run for
     """
-    run = await db_client.create_workflow_run(
-        request.name,
-        workflow_id,
-        request.mode,
-        user.id,
-        use_draft=True,
-        organization_id=user.selected_organization_id,
-    )
+    try:
+        run = await db_client.create_workflow_run(
+            request.name,
+            workflow_id,
+            request.mode,
+            user.id,
+            use_draft=True,
+            organization_id=user.selected_organization_id,
+        )
+    except ValueError:
+        # The workflow is looked up within the organization; another org's
+        # (or a missing) workflow is not found, not a server error.
+        raise HTTPException(status_code=404, detail="Workflow not found")
     return {
         "id": run.id,
         "workflow_id": run.workflow_id,

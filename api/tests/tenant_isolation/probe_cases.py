@@ -295,10 +295,6 @@ async def _(p: Probe):
         await p.client.post(
             f"{V1}/workflow/{wf(p.a)}/runs", json={"mode": "textchat", "name": "by B"}
         ),
-        server_error_ok=(
-            "create_workflow_run raises ValueError for another org's workflow "
-            "before any insert; the route does not map it to 404"
-        ),
     )
 
 
