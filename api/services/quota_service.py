@@ -152,7 +152,7 @@ async def _store_run_correlation_id(
 
 async def _authorize_hosted_workflow_run_start(
     *,
-    workflow_owner: UserModel,
+    workflow_owner: UserModel | None,
     organization_id: int | None,
     workflow_id: int | None,
     workflow_run_id: int | None,
@@ -190,11 +190,13 @@ async def _authorize_hosted_workflow_run_start(
             minimum_credits=MINIMUM_DOGRAH_CREDITS_FOR_CALL,
             created_by=(
                 str(workflow_owner.provider_id)
-                if workflow_owner.provider_id is not None
+                if workflow_owner is not None and workflow_owner.provider_id is not None
                 else None
             ),
             metadata={
-                "dograh_user_id": str(workflow_owner.id),
+                "dograh_user_id": (
+                    str(workflow_owner.id) if workflow_owner is not None else None
+                ),
                 "workflow_id": workflow_id,
             },
         )
@@ -269,14 +271,16 @@ async def _authorize_legacy_dograh_keys(
     *,
     dograh_api_keys: set[str],
     organization_id: int | None,
-    workflow_owner: UserModel,
+    workflow_owner: UserModel | None,
 ) -> QuotaCheckResult:
     for api_key in dograh_api_keys:
         try:
             usage = await mps_service_key_client.check_service_key_usage(
                 api_key,
                 organization_id=organization_id,
-                created_by=workflow_owner.provider_id,
+                created_by=(
+                    workflow_owner.provider_id if workflow_owner is not None else None
+                ),
             )
             remaining = usage.get("remaining_credits", 0.0)
 
@@ -390,16 +394,20 @@ async def authorize_workflow_run_start(
                 error_message="Workflow not found",
             )
 
-        workflow_owner = await db_client.get_user_by_id(workflow.user_id)
-        if not workflow_owner:
-            return QuotaCheckResult(
-                has_quota=False,
-                error_code="user_not_found",
-                error_message="User not found",
-            )
+        # A provisioned workflow has no creator (mt-s1-foundation): it runs on
+        # the organization's configuration with no owner metadata.
+        workflow_owner = None
+        if workflow.user_id is not None:
+            workflow_owner = await db_client.get_user_by_id(workflow.user_id)
+            if not workflow_owner:
+                return QuotaCheckResult(
+                    has_quota=False,
+                    error_code="user_not_found",
+                    error_message="User not found",
+                )
 
         user_config = await get_effective_ai_model_configuration_for_workflow(
-            user_id=workflow_owner.id,
+            user_id=workflow_owner.id if workflow_owner is not None else None,
             organization_id=workflow.organization_id,
             workflow_configurations=workflow.workflow_configurations,
         )

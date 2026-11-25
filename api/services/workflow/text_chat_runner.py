@@ -437,7 +437,9 @@ async def execute_text_chat_pending_turn(
         raise ValueError("Workflow run not found for text chat execution")
     if workflow_run.definition is None:
         raise ValueError("Workflow run is missing a pinned definition")
-    if workflow_run.workflow is None or workflow_run.workflow.user is None:
+    # workflow.user may be None: a provisioned workflow has no creator and
+    # runs on the organization's configuration (mt-s1-foundation).
+    if workflow_run.workflow is None:
         raise ValueError("Workflow run is missing workflow context")
 
     workflow = await db_client.get_workflow(
@@ -459,7 +461,7 @@ async def execute_text_chat_pending_turn(
     )
 
     user_config = await get_effective_ai_model_configuration_for_workflow(
-        user_id=workflow_run.workflow.user.id,
+        user_id=workflow_run.workflow.user_id,
         organization_id=workflow.organization_id,
         workflow_configurations=run_configs,
     )

@@ -431,3 +431,96 @@ async def test_authorize_workflow_run_rejects_actor_from_another_org(monkeypatch
 
     assert result.has_quota is False
     assert result.error_code == "workflow_not_found"
+
+
+@pytest.mark.asyncio
+async def test_authorize_workflow_run_without_creator_uses_org_only(monkeypatch):
+    """review gate R26: a provisioned workflow has no creator; authorization
+    resolves the org's configuration instead of refusing with user_not_found."""
+    workflow = SimpleNamespace(
+        id=7,
+        user_id=None,
+        organization_id=42,
+        workflow_configurations={"model_overrides": {}},
+    )
+    get_config = AsyncMock(return_value=_dograh_config())
+    authorize = AsyncMock(
+        return_value={
+            "allowed": True,
+            "billing_mode": "v2",
+            "remaining_credits": "25.0000",
+        }
+    )
+    get_user = AsyncMock(return_value=None)
+
+    monkeypatch.setattr(quota_service, "DEPLOYMENT_MODE", "saas")
+    monkeypatch.setattr(
+        quota_service.db_client, "get_workflow_by_id", AsyncMock(return_value=workflow)
+    )
+    monkeypatch.setattr(quota_service.db_client, "get_user_by_id", get_user)
+    monkeypatch.setattr(
+        quota_service, "get_effective_ai_model_configuration_for_workflow", get_config
+    )
+    monkeypatch.setattr(
+        quota_service.mps_service_key_client, "authorize_workflow_run_start", authorize
+    )
+
+    result = await quota_service.authorize_workflow_run_start(workflow_id=7)
+
+    assert result.has_quota is True
+    get_user.assert_not_awaited()
+    get_config.assert_awaited_once_with(
+        user_id=None,
+        organization_id=42,
+        workflow_configurations={"model_overrides": {}},
+    )
+    authorize.assert_awaited_once_with(
+        organization_id=42,
+        workflow_run_id=None,
+        service_key=None,
+        require_correlation_id=False,
+        minimum_credits=quota_service.MINIMUM_DOGRAH_CREDITS_FOR_CALL,
+        created_by=None,
+        metadata={"dograh_user_id": None, "workflow_id": 7},
+    )
+
+
+@pytest.mark.asyncio
+async def test_legacy_key_check_without_creator(monkeypatch):
+    """review gate R26: legacy key usage check for a creator-less workflow."""
+    workflow = SimpleNamespace(
+        id=7,
+        user_id=None,
+        organization_id=42,
+        workflow_configurations={},
+    )
+    check_usage = AsyncMock(
+        return_value={"total_credits_used": 1.0, "remaining_credits": 499.0}
+    )
+    monkeypatch.setattr(quota_service, "DEPLOYMENT_MODE", "saas")
+    monkeypatch.setattr(
+        quota_service.db_client, "get_workflow_by_id", AsyncMock(return_value=workflow)
+    )
+    monkeypatch.setattr(
+        quota_service.db_client, "get_user_by_id", AsyncMock(return_value=None)
+    )
+    monkeypatch.setattr(
+        quota_service,
+        "get_effective_ai_model_configuration_for_workflow",
+        AsyncMock(return_value=_dograh_config("mps_sk_12345678")),
+    )
+    monkeypatch.setattr(
+        quota_service.mps_service_key_client,
+        "authorize_workflow_run_start",
+        AsyncMock(return_value={"allowed": True, "billing_mode": "v1"}),
+    )
+    monkeypatch.setattr(
+        quota_service.mps_service_key_client, "check_service_key_usage", check_usage
+    )
+
+    result = await quota_service.authorize_workflow_run_start(workflow_id=7)
+
+    assert result.has_quota is True
+    check_usage.assert_awaited_once_with(
+        "mps_sk_12345678", organization_id=42, created_by=None
+    )
