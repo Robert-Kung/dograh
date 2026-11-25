@@ -243,9 +243,14 @@ def _page_sql(sort: str, order: str):
     )
 
 
+# Caller-search coverage is the organization's own earliest searchable call
+# (tenant-isolation: another org's history must not leak through it).
 _META_SQL = text(
     """SELECT
-        (SELECT min(created_at) FROM ccp_call_meta WHERE caller_last4 IS NOT NULL),
+        (SELECT min(m.created_at)
+           FROM ccp_call_meta m JOIN workflow_runs wr ON wr.id = m.workflow_run_id
+          WHERE m.caller_last4 IS NOT NULL
+            AND wr.organization_id = :organization_id),
         (SELECT key_fingerprint FROM ccp_settings WHERE id = 1)"""
 )
 
@@ -314,7 +319,11 @@ async def query_calls(
                 {**params, "limit": PAGE_SIZE, "offset": (page - 1) * PAGE_SIZE},
             )
         ).all()
-        coverage, fingerprint = (await session.execute(_META_SQL)).one()
+        coverage, fingerprint = (
+            await session.execute(
+                _META_SQL, {"organization_id": params["organization_id"]}
+            )
+        ).one()
         return total, pages, page, rows, coverage, fingerprint
 
     total, pages, page, rows, coverage, fingerprint = await _read(run)

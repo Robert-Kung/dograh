@@ -8,7 +8,10 @@ nothing else falls into the queried range.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import pytest
+from sqlalchemy import text
 
 from api.db.models import CcpTenantModel
 
@@ -176,3 +179,25 @@ async def test_suspended_tenant_is_still_scoped_to_itself(
     async with test_client_factory(ua) as client:
         r = await client.post(f"{CR}/query", json=BODY, headers=_cr(b.id))
     assert [row["run_id"] for row in r.json()["rows"]] == [run_b.id]
+
+
+async def test_caller_coverage_counts_own_organization_only(
+    test_client_factory, scope_pair, async_session
+):
+    """caller_coverage_from is the own org's earliest searchable call (review gate R7)."""
+    ua, a, run_a, b, run_b = scope_pair
+    for run_id, at in (
+        (run_a.id, datetime(2021, 3, 10, 2, tzinfo=UTC)),
+        (run_b.id, datetime(2019, 6, 1, 2, tzinfo=UTC)),
+    ):
+        await async_session.execute(
+            text(
+                "UPDATE ccp_call_meta SET created_at = :at WHERE workflow_run_id = :r"
+            ),
+            {"at": at, "r": run_id},
+        )
+    await async_session.flush()
+    async with test_client_factory(ua) as client:
+        r = await client.post(f"{CR}/query", json=BODY, headers=_cr(a.id))
+    assert r.status_code == 200
+    assert r.json()["caller_coverage_from"] == "2021-03-10"
