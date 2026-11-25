@@ -532,6 +532,7 @@ class WorkflowClient(BaseDBClient):
         Raises:
             ValueError: If the workflow with the given ID is not found
         """
+        require_organization_id(organization_id, "update_workflow")
         async with self.async_session() as session:
             query = (
                 select(WorkflowModel)

@@ -84,6 +84,57 @@ async def test_missing_organization_raises(db_session, two_orgs, name):
         await _calls(two_orgs)[name](db_session)
 
 
+def _none_calls(d):
+    """Each db client call with organization_id passed explicitly as None."""
+    return {
+        "get_workflow": lambda db: db.get_workflow(d["wf_b"].id, organization_id=None),
+        "get_all_workflows": lambda db: db.get_all_workflows(organization_id=None),
+        "update_workflow": lambda db: db.update_workflow(
+            d["wf_b"].id,
+            name="renamed",
+            workflow_definition=None,
+            workflow_configurations=None,
+            template_context_variables=None,
+            organization_id=None,
+        ),
+        "get_workflow_name": lambda db: db.get_workflow_name(
+            d["wf_b"].id, organization_id=None
+        ),
+        "get_all_workflows_for_listing": lambda db: db.get_all_workflows_for_listing(
+            organization_id=None
+        ),
+        "get_workflow_counts": lambda db: db.get_workflow_counts(organization_id=None),
+        "get_workflow_run": lambda db: db.get_workflow_run(
+            d["run_b"].id, organization_id=None
+        ),
+        "get_workflow_runs_by_workflow_id": lambda db: (
+            db.get_workflow_runs_by_workflow_id(d["wf_b"].id, organization_id=None)
+        ),
+    }
+
+
+@pytest.mark.scenario("tenant-isolation:缺組織不退回 user_id")
+@pytest.mark.parametrize(
+    "name",
+    [
+        "get_workflow",
+        "get_all_workflows",
+        "update_workflow",
+        "get_workflow_name",
+        "get_all_workflows_for_listing",
+        "get_workflow_counts",
+        "get_workflow_run",
+        "get_workflow_runs_by_workflow_id",
+    ],
+)
+async def test_none_organization_is_rejected_by_the_guard(db_session, two_orgs, name):
+    """review gate R12: the old-kwarg cases above pass on TypeError alone; an
+    explicit None must hit require_organization_id (not an empty IS NULL
+    query that happens to find nothing)."""
+    with pytest.raises(ValueError, match=f"^{name} requires organization_id$"):
+        await _none_calls(two_orgs)[name](db_session)
+
+
 async def test_scoped_lookups_stay_in_org(db_session, two_orgs):
     d = two_orgs
     a, b = d["a"].id, d["b"].id
