@@ -365,9 +365,23 @@ class TelephonyPhoneNumberClient(BaseDBClient):
                 await session.commit()
             except IntegrityError as e:
                 await session.rollback()
-                if UNIQUE_DID_INDEX in str(e.orig):
-                    # Lost a race with another organization's registration.
-                    raise DidTakenError() from None
+                if UNIQUE_DID_INDEX in str(e.orig) and holder != organization_id:
+                    # The pre-check saw no holder: re-read who won the race.
+                    holder = (
+                        await session.execute(
+                            select(TelephonyPhoneNumberModel.organization_id).where(
+                                TelephonyPhoneNumberModel.address_normalized
+                                == normalized.canonical
+                            )
+                        )
+                    ).scalar_one_or_none()
+                    if holder != organization_id:
+                        # Lost a race with another organization's registration.
+                        raise DidTakenError() from None
+                # The own organization already holds it (another config, or a
+                # concurrent own registration): not did_taken, which says
+                # another tenant has the number; callers map this to their
+                # "already in the org" / retryable response.
                 raise e
             await session.refresh(row)
             return row

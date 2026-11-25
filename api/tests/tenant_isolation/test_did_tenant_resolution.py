@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 from sqlalchemy import func, select, text
+from sqlalchemy.exc import IntegrityError
 
 from api.db.models import CcpTenantModel, TelephonyPhoneNumberModel
 from api.db.telephony_phone_number_client import ResolvedDid
@@ -153,6 +154,49 @@ async def test_telephony_number_api_refuses_number_held_elsewhere(
     assert resp.status_code == 409 and resp.json() == {"detail": "did_taken"}
     assert str(orga.id) not in resp.text
     assert await _rows(async_session) == 1
+
+
+async def test_same_org_duplicate_is_not_reported_as_held_elsewhere(
+    test_client_factory, db_session, async_session
+):
+    """review gate R10: the org's own number on another config is not
+    did_taken (which says another tenant holds it)."""
+    ua, orga, wfa = await _tenant(db_session, async_session, "sa")
+    assert (await _map(test_client_factory, ua, DID, wfa.id)).status_code == 201
+    cfg = await db_session.create_telephony_configuration(
+        organization_id=orga.id, name="twilio-a", provider="twilio", credentials={}
+    )
+    async with test_client_factory(ua) as client:
+        resp = await client.post(
+            f"/api/v1/organizations/telephony-configs/{cfg.id}/phone-numbers",
+            json={"address": "+886 2-1234-5678", "country_code": "TW"},
+        )
+    # No row count here: the test session's savepoint rollback after the
+    # IntegrityError also drops the first row (harness artifact).
+    assert resp.status_code == 409
+    assert resp.json() != {"detail": "did_taken"}
+
+
+async def test_same_org_duplicate_raises_integrity_error_not_did_taken(
+    db_session, async_session
+):
+    """review gate R10: hitting the unique index on the own org's number
+    re-raises the IntegrityError (organization routes answer 409 "already
+    exists in the org"; livekit did-mapping a retryable 503)."""
+    _, orga, _ = await _tenant(db_session, async_session, "ra")
+    cfg1 = await db_session.create_telephony_configuration(
+        organization_id=orga.id, name="cfg1", provider="livekit", credentials={}
+    )
+    cfg2 = await db_session.create_telephony_configuration(
+        organization_id=orga.id, name="cfg2", provider="twilio", credentials={}
+    )
+    await db_session.create_phone_number(
+        organization_id=orga.id, telephony_configuration_id=cfg1.id, address=DID
+    )
+    with pytest.raises(IntegrityError):
+        await db_session.create_phone_number(
+            organization_id=orga.id, telephony_configuration_id=cfg2.id, address=DID
+        )
 
 
 def _phone_migration():
