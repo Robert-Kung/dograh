@@ -286,8 +286,11 @@ class CallFailureState:
         if self.tts_unavailable:
             return False
         tracker = self.playback
+        # Before the wait: the caller speaking while the bot finishes is
+        # talking over this prompt too.
+        user_mark = tracker.user_spoke
         await tracker.wait_idle(self.playback_gap_timeout)
-        started_mark, user_mark = tracker.started, tracker.user_spoke
+        started_mark = tracker.started
         try:
             await engine.task.queue_frame(TTSSpeakFrame(text, persist_to_logs=True))
         except Exception as e:

@@ -544,6 +544,42 @@ async def test_caller_speaking_before_the_goodbye_starts_calls_it_off(
     assert exits.refers == []
 
 
+async def test_caller_speaking_while_the_bot_finishes_calls_off_the_goodbye(
+    services, refer, monkeypatch
+):
+    """review gate R23: the caller speaks while the goodbye still waits for
+    the idle prompt to finish; that speech calls the hangup off (the mark is
+    taken when the idle end starts, not after the wait)."""
+    from pipecat.frames.frames import (
+        BotStartedSpeakingFrame,
+        BotStoppedSpeakingFrame,
+        VADUserStartedSpeakingFrame,
+    )
+
+    call = await ready_call(make_call(services, refer, tts="silent"))
+    events = _capture_events(monkeypatch)
+    await call.wd.on_push_frame(push_data(BotStartedSpeakingFrame()))  # idle prompt
+    resumed = []
+    hangup = asyncio.create_task(
+        farewell.end_idle_call(
+            call.engine, _fake_exits(call), resume=lambda: resumed.append(1)
+        )
+    )
+    await asyncio.sleep(0.02)
+    await call.wd.on_push_frame(
+        push_data(VADUserStartedSpeakingFrame(start_secs=0.2, timestamp=0.0))
+    )
+    await call.wd.on_push_frame(push_data(BotStoppedSpeakingFrame()))
+    await hangup
+
+    assert resumed == [1]
+    assert call.engine.entries("end") == []
+    assert events == []
+    assert not call.state.tts_unavailable
+    assert not call.state.idle_end_in_progress
+    await call.wd.stop()
+
+
 async def test_the_safetynet_still_transfers_after_a_called_off_hangup(
     exits, plain_workflow
 ):

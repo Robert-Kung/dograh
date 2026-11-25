@@ -714,6 +714,28 @@ async def test_caller_talking_over_the_prompt_does_not_condemn_tts(services, ref
 
 
 @pytest.mark.asyncio
+async def test_caller_speaking_while_the_bot_finishes_does_not_condemn_tts(
+    services, refer
+):
+    """review gate R23: speech heard while the prompt waits for the bot to
+    fall silent counts as the caller talking over it (the mark is taken
+    before the wait)."""
+    from pipecat.frames.frames import VADUserStartedSpeakingFrame
+
+    call = await ready_call(make_call(services, refer, tts="silent"))
+    await call.wd.on_push_frame(push_data(BotStartedSpeakingFrame()))
+    play = asyncio.create_task(call.state.play_bounded(call.engine, "提示"))
+    await asyncio.sleep(0.02)
+    await call.wd.on_push_frame(
+        push_data(VADUserStartedSpeakingFrame(start_secs=0.2, timestamp=0.0))
+    )
+    await call.wd.on_push_frame(push_data(BotStoppedSpeakingFrame()))
+    assert await play is False
+    assert not call.state.tts_unavailable
+    await call.wd.stop()
+
+
+@pytest.mark.asyncio
 async def test_closed_gate_holds_back_deferred_function_calls():
     """R9: the LLM releases deferred tool calls on an upstream BotStopped."""
     state = CallFailureState()
