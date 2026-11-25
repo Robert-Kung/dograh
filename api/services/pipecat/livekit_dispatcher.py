@@ -20,7 +20,7 @@ import asyncio
 import os
 import re
 import time
-from typing import Awaitable, Callable, Optional
+from typing import Awaitable, Callable, Optional, Protocol
 
 from loguru import logger
 
@@ -52,7 +52,45 @@ DISPATCH_TIMEOUT_SECONDS = 15.0
 # organization, mapped only when number, workflow and tenant agree. Injected
 # so this layer makes no storage assumption.
 DidResolver = Callable[[str], Awaitable[Optional[ResolvedDid]]]
-Fallback = Callable[[str, str, Optional[int]], Awaitable[None]]
+
+
+class Fallback(Protocol):
+    """C4 exit for a call no agent will take: REFER to the platform fallback
+    queue, or — ``end_only`` — answer, play the end prompt and end."""
+
+    def __call__(
+        self,
+        room_name: str,
+        reason: str,
+        workflow_run_id: Optional[int],
+        *,
+        end_only: bool = False,
+    ) -> Awaitable[None]: ...
+
+
+def end_only_reason(resolved: Optional[ResolvedDid]) -> Optional[str]:
+    """Why this call must end without a REFER, or None to proceed as before.
+
+    The platform fallback queue is the first tenant's human agents, so a call
+    belonging to any other organization must not be REFERred there (review
+    gate S2/R4, user ruling 2026-11-25); a suspended tenant's calls are ended
+    the same way. Per-tenant fallback destinations and the "service
+    suspended" prompt replace this in mt-s1-tenant-settings. An unset first
+    tenant counts as "not the first tenant": end rather than REFER into a
+    queue that may be someone else's.
+    """
+    if resolved is None:
+        return None
+    from api.services.ccp.tenants import SUSPENDED, first_tenant_organization_id
+
+    if resolved.tenant_status == SUSPENDED:
+        return "tenant_suspended"
+    if (
+        not resolved.mapped
+        and resolved.organization_id != first_tenant_organization_id()
+    ):
+        return "unmapped_did_other_org"
+    return None
 
 
 def did_from_sip_attributes(attributes: dict) -> str | None:
@@ -263,10 +301,12 @@ async def _dispatch(
     resolved = await asyncio.wait_for(
         _resolve_with_retry(resolver, did), timeout=DISPATCH_TIMEOUT_SECONDS
     )
+    # Before capacity admission: no run, no slot (tenant-isolation〈租戶狀態〉).
+    end_reason = end_only_reason(resolved)
+    if end_reason is not None:
+        await fallback(room_name, end_reason, None, end_only=True)
+        return True
     if resolved is None or not resolved.mapped:
-        # Unmapped-but-owned (resolved.organization_id set) is not the first
-        # tenant's call; per-tenant fallback settings arrive with
-        # mt-s1-tenant-settings. Either way the caller is never left silent.
         await fallback(room_name, "unmapped_did", None)
         return True
 

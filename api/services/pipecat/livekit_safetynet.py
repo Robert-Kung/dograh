@@ -320,8 +320,14 @@ async def server_side_safetynet(
     reason: str,
     workflow_run_id: Optional[int] = None,
     lk=None,
+    *,
+    end_only: bool = False,
 ) -> None:
     """Engine-free safetynet: answer, say why, REFER to the fallback queue.
+
+    ``end_only``: answer, play the end prompt and end — for calls that must
+    not reach the platform fallback queue (another org's, a suspended
+    tenant's; see ``livekit_dispatcher.end_only_reason``).
 
     Used when no working agent is in the room — dispatch failures, the
     undispatched-room reconciler, pipeline crashes and a failed mid-call
@@ -360,8 +366,8 @@ async def server_side_safetynet(
         )
 
         async with livekit_api(lk) as client:
-            destination = fallback_queue()
-            if destination is None:
+            destination = None if end_only else fallback_queue()
+            if destination is None and not end_only:
                 logger.warning(
                     "SAFETYNET_FALLBACK_QUEUE not configured; ending call with "
                     "the end prompt"

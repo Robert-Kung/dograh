@@ -348,12 +348,47 @@ async def test_prelaunch_failure_routes_to_fallback(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_end_only_never_refers_even_with_queue(monkeypatch, events):
+    """Another org's / a suspended tenant's call: end prompt, then the room is
+    deleted; the platform fallback queue (first tenant's agents) is not used."""
+    monkeypatch.setenv("SAFETYNET_FALLBACK_QUEUE", "tel:+886900000000")
+    lk, cap = _fake_lk([_sip_caller()])
+    await server_side_safetynet("cs-+886912", "tenant_suspended", lk=lk, end_only=True)
+    assert cap["transfers"] == []
+    assert cap["deleted"] == ["cs-+886912"]
+    assert [e["event"] for e in events] == [
+        "safetynet.triggered",
+        "safetynet.terminated",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_route_fallback_passes_end_only(monkeypatch):
+    from api.routes import livekit as livekit_route
+
+    called = {}
+
+    async def fake_safetynet(
+        room, reason, workflow_run_id=None, lk=None, end_only=False
+    ):
+        called.update(reason=reason, end_only=end_only)
+
+    monkeypatch.setattr(sn, "server_side_safetynet", fake_safetynet)
+    await await_fallback(
+        livekit_route._fallback("cs-+886912", "tenant_suspended", None, end_only=True)
+    )
+    assert called == {"reason": "tenant_suspended", "end_only": True}
+
+
+@pytest.mark.asyncio
 async def test_route_fallback_wired_to_safetynet(monkeypatch):
     from api.routes import livekit as livekit_route
 
     called = {}
 
-    async def fake_safetynet(room, reason, workflow_run_id=None, lk=None):
+    async def fake_safetynet(
+        room, reason, workflow_run_id=None, lk=None, end_only=False
+    ):
         called.update(room=room, reason=reason, workflow_run_id=workflow_run_id)
 
     monkeypatch.setattr(sn, "server_side_safetynet", fake_safetynet)

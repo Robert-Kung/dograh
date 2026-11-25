@@ -297,9 +297,8 @@ async def test_number_and_workflow_in_different_orgs_is_unmapped_but_owned(
     assert resolved == ResolvedDid(None, orga.id, "active", False)
 
 
-@pytest.mark.scenario("tenant-isolation:號碼與工作流分屬不同組織")
-@pytest.mark.scenario("livekit-dispatch:組織不一致視同未設定")
-async def test_unmapped_but_owned_falls_back_not_silent():
+async def test_unmapped_first_tenant_number_uses_platform_fallback(monkeypatch):
+    monkeypatch.setenv("CCP_FIRST_TENANT_ORGANIZATION_ID", "7")
     fallback = AsyncMock()
 
     async def resolver(did):
@@ -364,4 +363,71 @@ async def test_suspended_tenant_still_resolves_with_status(db_session, async_ses
     await _number(db_session, org, wf.id)
     assert await livekit_route._did_resolver(DID) == ResolvedDid(
         wf.id, org.id, "suspended", True
+    )
+
+
+# --- review gate S2/R4 (user ruling 2026-11-25): end, never REFER elsewhere --
+
+
+async def _dispatch_with(monkeypatch, resolved):
+    from api.db import db_client
+
+    async def no_run(*a, **k):
+        raise AssertionError("no run may be created")
+
+    monkeypatch.setattr(db_client, "create_workflow_run", no_run)
+    fallback = AsyncMock()
+
+    async def resolver(did):
+        return resolved
+
+    handled = await livekit_dispatcher._dispatch(
+        "cs-room", {SIP_DIALED_ATTRIBUTE: DID}, resolver, fallback, "ws://x"
+    )
+    assert handled is True
+    return fallback
+
+
+@pytest.mark.scenario("tenant-isolation:號碼與工作流分屬不同組織")
+@pytest.mark.scenario("tenant-isolation:停用號碼列仍歸屬其組織")
+@pytest.mark.scenario("livekit-dispatch:組織不一致視同未設定")
+async def test_unmapped_other_org_number_ends_without_refer(monkeypatch):
+    monkeypatch.setenv("CCP_FIRST_TENANT_ORGANIZATION_ID", "1")
+    fallback = await _dispatch_with(monkeypatch, ResolvedDid(None, 7, "active", False))
+    fallback.assert_awaited_once_with(
+        "cs-room", "unmapped_did_other_org", None, end_only=True
+    )
+
+
+async def test_non_tenant_org_number_ends_without_refer(monkeypatch):
+    monkeypatch.setenv("CCP_FIRST_TENANT_ORGANIZATION_ID", "1")
+    fallback = await _dispatch_with(monkeypatch, ResolvedDid(None, 7, None, False))
+    fallback.assert_awaited_once_with(
+        "cs-room", "unmapped_did_other_org", None, end_only=True
+    )
+
+
+async def test_unset_first_tenant_ends_rather_than_refer(monkeypatch):
+    monkeypatch.delenv("CCP_FIRST_TENANT_ORGANIZATION_ID", raising=False)
+    fallback = await _dispatch_with(monkeypatch, ResolvedDid(None, 1, "active", False))
+    fallback.assert_awaited_once_with(
+        "cs-room", "unmapped_did_other_org", None, end_only=True
+    )
+
+
+@pytest.mark.scenario("livekit-dispatch:停用租戶來電")
+@pytest.mark.scenario("tenant-isolation:停用租戶的號碼仍解析出組織")
+@pytest.mark.parametrize("first", ["1", "7"], ids=["other-org", "first-tenant"])
+async def test_suspended_tenant_call_ends_before_admission(monkeypatch, first):
+    from api.services.pipecat import active_calls
+
+    monkeypatch.setenv("CCP_FIRST_TENANT_ORGANIZATION_ID", first)
+    monkeypatch.setattr(
+        active_calls,
+        "try_acquire_slot",
+        lambda *a: (_ for _ in ()).throw(AssertionError("no slot")),
+    )
+    fallback = await _dispatch_with(monkeypatch, ResolvedDid(11, 7, "suspended", True))
+    fallback.assert_awaited_once_with(
+        "cs-room", "tenant_suspended", None, end_only=True
     )

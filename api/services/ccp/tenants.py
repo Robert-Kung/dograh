@@ -6,6 +6,7 @@ module is the only writer of ``ccp_tenants``; routes and CLIs wrap it.
 
 from __future__ import annotations
 
+import os
 import unicodedata
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -28,6 +29,16 @@ from api.utils.api_key import generate_api_key
 ACTIVE = "active"
 SUSPENDED = "suspended"
 STATUSES = (ACTIVE, SUSPENDED)
+# Deployment wiring (design D8): platform-up sets it on dograh-api from the
+# first-tenant file; the same name the ccp_tenants backfill migration reads.
+FIRST_TENANT_ENV = "CCP_FIRST_TENANT_ORGANIZATION_ID"
+
+
+def first_tenant_organization_id() -> int | None:
+    """The first tenant's organization (owner of the platform-wide fallback
+    queue), or None when the deployment did not set it."""
+    raw = os.environ.get(FIRST_TENANT_ENV, "").strip()
+    return int(raw) if raw.isdigit() else None
 
 
 class DisplayNameTaken(Exception):
