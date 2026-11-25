@@ -806,6 +806,59 @@ async def test_a_dropped_trigger_is_logged_once_per_reason(services, refer):
     await call.wd.stop()
 
 
+@pytest.mark.parametrize("kind", ["llm_error", "stt_errors"])
+async def test_an_error_dropped_during_a_called_off_hangup_still_transfers(
+    services, refer, kind
+):
+    """review gate R25: a one-shot error trigger dropped while the goodbye was
+    under way fires once the caller calls the hangup off — the error does not
+    come again, and the call must not go on with a dead provider. (A TTS
+    error aborts the goodbye and ends the call itself.)"""
+    from pipecat.frames.frames import VADUserStartedSpeakingFrame
+
+    call = await ready_call(make_call(services, refer, tts="silent"))
+    resumed = []
+    hangup = asyncio.create_task(
+        farewell.end_idle_call(
+            call.engine, _fake_exits(call), resume=lambda: resumed.append(1)
+        )
+    )
+    await until(lambda: call.engine.entries("tts"))
+    await _trigger(call, services, kind)
+    assert call.engine.entries("refer") == []  # dropped while the goodbye runs
+    await call.wd.on_push_frame(
+        push_data(VADUserStartedSpeakingFrame(start_secs=0.2, timestamp=0.0))
+    )
+    await hangup
+
+    assert resumed == [1]
+    await until(lambda: call.engine.entries("refer"))
+    assert len(call.engine.entries("refer")) == 1
+    await call.wd.stop()
+
+
+async def test_a_called_off_hangup_with_nothing_dropped_does_not_transfer(
+    services, refer
+):
+    from pipecat.frames.frames import VADUserStartedSpeakingFrame
+
+    call = await ready_call(make_call(services, refer, tts="silent"))
+    hangup = asyncio.create_task(
+        farewell.end_idle_call(call.engine, _fake_exits(call), resume=lambda: None)
+    )
+    await until(lambda: call.engine.entries("tts"))
+    call.wd._fire("bot_silence")  # polled: comes back by itself, not replayed
+    await call.wd.on_push_frame(
+        push_data(VADUserStartedSpeakingFrame(start_secs=0.2, timestamp=0.0))
+    )
+    await hangup
+    await settle(0.2)
+
+    assert call.engine.entries("refer") == []
+    assert not call.wd._fired
+    await call.wd.stop()
+
+
 async def test_the_forced_end_still_cancels_when_its_bookkeeping_fails(monkeypatch):
     monkeypatch.setattr(farewell, "IDLE_END_DEADLINE_SECONDS", 0)
     cancel, queue_frame = AsyncMock(), AsyncMock()

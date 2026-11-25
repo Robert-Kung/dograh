@@ -164,6 +164,9 @@ async def end_idle_call(engine, exits, *, resume: Callable[[], None]) -> None:
         state.idle_end_in_progress = False
         await _cut_current_turn(engine)
         resume()
+        # An error dropped while the goodbye was under way is not reported
+        # again: the safetynet takes it now that the call goes on.
+        exits.watchdog.replay_dropped_trigger()
         return
 
     # From here to the spawn below nothing may await: the decision and the

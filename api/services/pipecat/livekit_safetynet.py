@@ -760,7 +760,9 @@ class SafetynetWatchdog(BaseObserver):
 
         self._deadline: Optional[float] = None
         self._reply_owed = False  # survives tool-call suspension
-        self._dropped_logged: set[str] = set()
+        # Reasons dropped during the current idle hangup, in arrival order
+        # (logged once each; replayed if the hangup is called off).
+        self._dropped_logged: list[str] = []
         self._tool_calls: set[str] = set()
         self._fired = False
         self._stopped = False
@@ -896,7 +898,7 @@ class SafetynetWatchdog(BaseObserver):
             # goes on; nobody spoke, so there is no one to transfer.
             # Once per reason: the silence monitor comes back every tick.
             if reason not in self._dropped_logged:
-                self._dropped_logged.add(reason)
+                self._dropped_logged.append(reason)
                 logger.info(f"safetynet trigger dropped during idle hangup: {reason}")
             return
         self._fired = True
@@ -909,6 +911,19 @@ class SafetynetWatchdog(BaseObserver):
                 logger.exception(f"safetynet watchdog callback failed: {e}")
 
         spawn(_run())
+
+    def replay_dropped_trigger(self) -> None:
+        """The idle hangup was called off and the call goes on: fire once for
+        an error trigger dropped meanwhile (review gate R25).
+
+        An error is reported once and does not come again, so without this a
+        call would go on with a provider that already failed (C4). The silence
+        trigger is not replayed: the monitor re-evaluates it on its own.
+        """
+        pending = [r for r in self._dropped_logged if r != "bot_silence"]
+        self._dropped_logged.clear()
+        if pending:
+            self._fire(pending[0])
 
     async def _run_monitor(self) -> None:
         while not self._fired:
