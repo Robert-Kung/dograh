@@ -128,6 +128,14 @@ async def create_recordings(
     user=Depends(get_user),
 ):
     """Create one or more recording records after audio files have been uploaded."""
+    # upload-url issues keys under recordings/{org_id}/; another org's key
+    # would let this org's agents play that org's audio.
+    own_prefix = f"recordings/{user.selected_organization_id}/"
+    if any(not r.storage_key.startswith(own_prefix) for r in request.recordings):
+        raise HTTPException(
+            status_code=403,
+            detail="Access denied: file does not belong to your organization",
+        )
     try:
         backend = StorageBackend.get_current_backend()
         results = []

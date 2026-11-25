@@ -12,7 +12,14 @@ route fails CI until it is classified here. Skeleton: the parent repo's
   (8.3a). Shrink-only: limited to ``route_probe_snapshot.txt``.
 """
 
+# 8.3a: cross-org probe failed, route fixed; the same probe case now runs here.
+_PROMOTED = "tests/tenant_isolation/test_route_probe.py::test_promoted_route_probe"
+
 ORG_SCOPED: dict[str, tuple[str, ...]] = {
+    "POST /api/v1/campaign/create": (_PROMOTED,),
+    "POST /api/v1/knowledge-base/process-document": (_PROMOTED,),
+    "POST /api/v1/workflow-recordings/": (_PROMOTED,),
+    "WS /api/v1/ws/signaling/{workflow_id}/{workflow_run_id}": (_PROMOTED,),
     "POST /api/v1/internal/call-records/query": (
         "tests/tenant_isolation/test_ccp_tenant_scope.py::test_list_only_shows_own_organization",
     ),
@@ -88,6 +95,7 @@ EXEMPT: dict[str, str] = {
     + _UNREACHABLE,
     "GET /api/v1/user/configurations/defaults": "全域靜態資料（範本／預設值），無身分依賴、無租戶資料",
     "GET /api/v1/workflow/templates": "全域靜態資料（範本／預設值），無身分依賴、無租戶資料",
+    "POST /api/v1/workflow/templates/duplicate": "不可達：宣告在 POST /workflow/{workflow_id}/duplicate 之後，請求一律被該路由匹配（workflow_id='templates' → 422），handler 永不執行；跨組織探針（8.3a）實測命中的是後者",
     "POST /api/v1/telephony/inbound/run": _CARRIER_WEBHOOK,
     "POST /api/v1/telephony/inbound/fallback": _CARRIER_WEBHOOK,
     "POST /api/v1/telephony/inbound/{workflow_id}": _CARRIER_WEBHOOK,
@@ -130,7 +138,6 @@ PROBED: tuple[str, ...] = (
     "GET /api/v1/workflow/{workflow_id}/runs/{run_id}",
     "GET /api/v1/workflow/{workflow_id}/runs",
     "GET /api/v1/workflow/{workflow_id}/report",
-    "POST /api/v1/workflow/templates/duplicate",
     "POST /api/v1/workflow/ambient-noise/upload-url",
     "POST /api/v1/workflow/{workflow_id}/text-chat/sessions",
     "GET /api/v1/workflow/{workflow_id}/text-chat/sessions/{run_id}",
@@ -147,7 +154,6 @@ PROBED: tuple[str, ...] = (
     "DELETE /api/v1/user/api-keys/{api_key_id}",
     "PUT /api/v1/user/api-keys/{api_key_id}/reactivate",
     "GET /api/v1/user/configurations/voices/{provider}",
-    "POST /api/v1/campaign/create",
     "GET /api/v1/campaign/",
     "GET /api/v1/campaign/{campaign_id}",
     "POST /api/v1/campaign/{campaign_id}/start",
@@ -217,19 +223,16 @@ PROBED: tuple[str, ...] = (
     "GET /api/v1/organizations/reports/daily",
     "GET /api/v1/organizations/reports/workflows",
     "GET /api/v1/organizations/reports/daily/runs",
-    "WS /api/v1/ws/signaling/{workflow_id}/{workflow_run_id}",
     "GET /api/v1/turn/credentials",
     "POST /api/v1/workflow/{workflow_id}/embed-token",
     "GET /api/v1/workflow/{workflow_id}/embed-token",
     "DELETE /api/v1/workflow/{workflow_id}/embed-token",
     "POST /api/v1/knowledge-base/upload-url",
-    "POST /api/v1/knowledge-base/process-document",
     "GET /api/v1/knowledge-base/documents",
     "GET /api/v1/knowledge-base/documents/{document_uuid}",
     "DELETE /api/v1/knowledge-base/documents/{document_uuid}",
     "POST /api/v1/knowledge-base/search",
     "POST /api/v1/workflow-recordings/upload-url",
-    "POST /api/v1/workflow-recordings/",
     "GET /api/v1/workflow-recordings/",
     "DELETE /api/v1/workflow-recordings/{recording_id}",
     "PATCH /api/v1/workflow-recordings/{id}",

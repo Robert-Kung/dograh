@@ -113,6 +113,16 @@ async def process_document(
     * Users can only process documents in their organization.
     """
 
+    # upload-url issues keys under knowledge_base/{org_id}/; another org's key
+    # would ingest that org's document into this org's knowledge base.
+    if not request.s3_key.startswith(
+        f"knowledge_base/{user.selected_organization_id}/"
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail="Access denied: file does not belong to your organization",
+        )
+
     try:
         # Extract filename from s3_key
         filename = request.s3_key.split("/")[-1]

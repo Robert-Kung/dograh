@@ -633,7 +633,9 @@ async def signaling_websocket(
     workflow_run = await db_client.get_workflow_run(
         workflow_run_id, organization_id=user.selected_organization_id
     )
-    if not workflow_run:
+    # The pipeline runs the path's workflow_id, so it must be the run's own
+    # workflow (tenant-isolation: an own run must not start another org's workflow).
+    if not workflow_run or workflow_run.workflow_id != workflow_id:
         logger.warning(f"workflow run {workflow_run_id} not found for user {user.id}")
         raise HTTPException(status_code=400, detail="Bad workflow_run_id")
 

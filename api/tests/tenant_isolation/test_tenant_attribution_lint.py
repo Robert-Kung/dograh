@@ -8,7 +8,14 @@ and ``api/routes/`` and fails on:
 ② an ``organization_id`` truthiness / ``is not None`` branch that adds a query
    condition — with no ``else`` (unfiltered when missing) or an ``elif`` /
    ``else`` falling back to ``user_id``;
-③ an ``is_superuser`` branch outside the superuser routes.
+③ an ``is_superuser`` branch outside the superuser routes;
+④ a function in ``api/routes/`` passing a request-sourced identifier (any
+   parameter that is not a ``Depends``) to a ``db_client`` method whose
+   signature has no ``organization_id`` — unless an ownership check by
+   ``selected_organization_id`` dominates the call: the call sits inside an
+   ``if`` testing an organization-scoped value, or an earlier statement on its
+   path is an ``if`` testing one whose body raises. Judged by signature, not by
+   the db function's name (mt-s1-foundation 8.3c).
 
 Each exemption names its reason. ``scan(root)`` takes the tree root so the
 check can be proven red against pre-fix sources.
@@ -52,6 +59,123 @@ EXEMPT_SUPERUSER = {
     ),
 }
 SUPERUSER_FILES = {"routes/superuser.py"}
+
+_NO_IDENTITY = (
+    "無使用者身分的路由（(b) 豁免），識別碼即憑證（不可猜 token／API key）或承載商回呼"
+)
+_CARRIER = "承載商路由（(b) 豁免），組織取自號碼／設定列；websocket 為殘留風險 R-MT-11"
+# (relative path, enclosing function, db function) -> reason
+EXEMPT_UNSCOPED_CALL = {
+    (
+        "routes/agent_stream.py",
+        "agent_stream_websocket",
+        "get_workflow_by_uuid_unscoped",
+    ): _NO_IDENTITY,
+    ("routes/public_agent.py", "_validate_api_key", "validate_api_key"): _NO_IDENTITY,
+    (
+        "routes/public_agent.py",
+        "_get_workflow_definition_for_execution",
+        "get_draft_version",
+    ): ("workflow 取自已驗 API key 所屬組織的 trigger；" + _NO_IDENTITY),
+    (
+        "routes/public_agent.py",
+        "_resolve_trigger_target",
+        "get_agent_trigger_by_path",
+    ): _NO_IDENTITY,
+    (
+        "routes/public_download.py",
+        "download_workflow_artifact",
+        "get_workflow_run_by_public_token",
+    ): _NO_IDENTITY,
+    (
+        "routes/public_embed.py",
+        "_config_preflight_response",
+        "get_embed_token_by_token",
+    ): _NO_IDENTITY,
+    (
+        "routes/public_embed.py",
+        "_turn_credentials_preflight_response",
+        "get_embed_session_by_token",
+    ): _NO_IDENTITY,
+    (
+        "routes/public_embed.py",
+        "initialize_embed_session",
+        "get_embed_token_by_token",
+    ): _NO_IDENTITY,
+    (
+        "routes/public_embed.py",
+        "get_embed_config",
+        "get_embed_token_by_token",
+    ): _NO_IDENTITY,
+    (
+        "routes/public_embed.py",
+        "get_public_turn_credentials",
+        "get_embed_session_by_token",
+    ): _NO_IDENTITY,
+    (
+        "routes/webrtc_signaling.py",
+        "public_signaling_websocket",
+        "get_embed_session_by_token",
+    ): _NO_IDENTITY,
+    (
+        "routes/telephony.py",
+        "_verify_organization_phone_number",
+        "list_phone_numbers_for_config",
+    ): _CARRIER,
+    (
+        "routes/telephony.py",
+        "_validate_inbound_request",
+        "get_workflow_by_id",
+    ): _CARRIER,
+    (
+        "routes/telephony.py",
+        "_handle_telephony_websocket",
+        "get_workflow_run_by_id",
+    ): _CARRIER,
+    (
+        "routes/telephony.py",
+        "_handle_telephony_websocket",
+        "get_workflow_by_id",
+    ): _CARRIER,
+    (
+        "routes/telephony.py",
+        "_handle_telephony_websocket",
+        "update_workflow_run",
+    ): _CARRIER,
+    (
+        "routes/campaign.py",
+        "_get_campaign_stats",
+        "get_queued_runs_stats_for_campaigns",
+    ): ("helper：每個呼叫點傳入的都是已以 organization_id 取回的 campaign.id"),
+    (
+        "routes/workflow.py",
+        "_validate_workflow_definition",
+        "check_trigger_path_conflicts",
+    ): (
+        "trigger path 全平台唯一，衝突檢查刻意跨組織、只回傳呼叫端自己送出的 path；"
+        "exclude_workflow_id 由呼叫點以組織範圍取回的 workflow 提供"
+    ),
+    (
+        "routes/s3_signed_url.py",
+        "_authorize_and_get_workflow_run",
+        "get_workflow_run_by_id",
+    ): (
+        "superuser 分支（③ 已豁免同函式）；非 superuser 只經組織範圍 get_workflow_run，查無即 403"
+    ),
+    ("routes/webrtc_signaling.py", "_handle_offer", "get_workflow_organization_id"): (
+        "呼叫端 signaling_websocket 先以組織範圍取 run，並拒絕與 run 不符的 workflow_id"
+    ),
+}
+# Parameters that are never request-sourced identifiers.
+_NOT_REQUEST_PARAMS = {
+    "self",
+    "cls",
+    "user",
+    "request",
+    "websocket",
+    "ws",
+    "background_tasks",
+}
 
 
 def _files(root: Path):
@@ -154,12 +278,137 @@ def _superuser_branches(rel, tree):
                 yield f"{rel}:{node.lineno} ③ {fn.name}: is_superuser branch"
 
 
+def _db_signatures(root: Path) -> dict[str, bool]:
+    """db function name -> whether its signature takes ``organization_id``.
+
+    A name defined more than once counts as unscoped if any definition lacks
+    the parameter (the call could resolve to it)."""
+    sig: dict[str, bool] = {}
+    for path in sorted((root / "db").rglob("*.py")):
+        for fn in _functions(ast.parse(path.read_text())):
+            a = fn.args
+            takes = "organization_id" in {
+                x.arg for x in (*a.posonlyargs, *a.args, *a.kwonlyargs)
+            }
+            sig[fn.name] = sig.get(fn.name, True) and takes
+    return sig
+
+
+def _is_depends(node) -> bool:
+    return any(
+        isinstance(n, ast.Call)
+        and (getattr(n.func, "id", None) or getattr(n.func, "attr", None)) == "Depends"
+        for n in ast.walk(node)
+    )
+
+
+def _request_params(fn) -> set[str]:
+    a = fn.args
+    positional = [*a.posonlyargs, *a.args]
+    defaults = [None] * (len(positional) - len(a.defaults)) + list(a.defaults)
+    pairs = [*zip(positional, defaults), *zip(a.kwonlyargs, a.kw_defaults)]
+    return {
+        p.arg
+        for p, d in pairs
+        if p.arg not in _NOT_REQUEST_PARAMS
+        and not (d is not None and _is_depends(d))
+        and not (p.annotation is not None and _is_depends(p.annotation))
+    }
+
+
+def _scoped_names(fn) -> set[str]:
+    """Names bound (transitively) from an expression using ``selected_organization_id``."""
+    scoped: set[str] = set()
+    changed = True
+    while changed:
+        changed = False
+        for st in ast.walk(fn):
+            if not isinstance(st, (ast.Assign, ast.AnnAssign)) or st.value is None:
+                continue
+            if not ({"selected_organization_id"} | scoped) & _names(st.value):
+                continue
+            targets = st.targets if isinstance(st, ast.Assign) else [st.target]
+            for t in targets:
+                for n in ast.walk(t):
+                    if isinstance(n, ast.Name) and n.id not in scoped:
+                        scoped.add(n.id)
+                        changed = True
+    return scoped
+
+
+def _dominating_guard(fn, call, scoped: set[str]) -> bool:
+    """An ownership check on every path to ``call`` (see ④ above)."""
+    org = {"selected_organization_id"} | scoped
+
+    def visit(stmts) -> bool | None:
+        # True: guarded; False: reached unguarded; None: not in this block.
+        guarded = False
+        for st in stmts:
+            if call in set(ast.walk(st)):
+                if isinstance(st, ast.If) and org & _names(st.test):
+                    in_body = any(call in set(ast.walk(b)) for b in st.body)
+                    if in_body:
+                        return True
+                for field in ("body", "orelse", "finalbody", "handlers"):
+                    inner = getattr(st, field, None)
+                    if isinstance(inner, list) and inner:
+                        r = visit(
+                            [x for h in inner for x in h.body]
+                            if field == "handlers"
+                            else inner
+                        )
+                        if r is not None:
+                            return guarded or r
+                return guarded
+            if (
+                isinstance(st, ast.If)
+                and org & _names(st.test)
+                and any(isinstance(n, ast.Raise) for b in st.body for n in ast.walk(b))
+            ):
+                guarded = True
+        return None
+
+    return bool(visit(fn.body))
+
+
+def _unscoped_calls(rel, tree, signatures):
+    if not rel.startswith("routes/") or rel in SUPERUSER_FILES:
+        return
+    for fn in _functions(tree):
+        params = _request_params(fn)
+        if not params:
+            continue
+        scoped = _scoped_names(fn)
+        for call in ast.walk(fn):
+            if not (
+                isinstance(call, ast.Call)
+                and isinstance(call.func, ast.Attribute)
+                and isinstance(call.func.value, ast.Name)
+                and call.func.value.id == "db_client"
+                and signatures.get(call.func.attr) is False
+            ):
+                continue
+            args = [*call.args, *(k.value for k in call.keywords)]
+            if not any(params & _names(a) for a in args):
+                continue
+            if (rel, fn.name, call.func.attr) in EXEMPT_UNSCOPED_CALL:
+                continue
+            if _dominating_guard(fn, call, scoped):
+                continue
+            yield (
+                f"{rel}:{call.lineno} ④ {fn.name}: request id -> "
+                f"db_client.{call.func.attr} (no organization_id, no ownership check)"
+            )
+
+
 def scan(root: Path = API_ROOT) -> list[str]:
     out: list[str] = []
+    signatures = _db_signatures(root)
     for rel, tree in _files(root):
         out += _selected_org_conditions(rel, tree)
         out += _org_fallback_branches(rel, tree)
         out += _superuser_branches(rel, tree)
+        out += _unscoped_calls(rel, tree, signatures)
     return out
 
 
@@ -173,6 +422,10 @@ def test_exemptions_point_at_real_functions():
     have = {(rel, fn.name) for rel, tree in _files(API_ROOT) for fn in _functions(tree)}
     for key in (*EXEMPT_ORG_BRANCH, *EXEMPT_SUPERUSER):
         assert key in have, key
+    signatures = _db_signatures(API_ROOT)
+    for rel, fn, db_fn in EXEMPT_UNSCOPED_CALL:
+        assert (rel, fn) in have, (rel, fn)
+        assert signatures.get(db_fn) is False, (rel, fn, db_fn)
 
 
 @pytest.mark.scenario("tenant-isolation:靜態檢查")
@@ -225,3 +478,77 @@ async def test_tenant_members_are_not_superusers(db_session):
     await db_session.add_user_to_organization(user.id, org.id)
     assert UserModel.is_superuser.default.arg is False
     assert (await db_session.get_user_by_id(user.id)).is_superuser is False
+
+
+_DB_STUB = (
+    "async def get_thing(thing_id): ...\n"
+    "async def get_thing_scoped(thing_id): ...\n"
+    "async def get_org_thing(thing_id, organization_id): ...\n"
+)
+_HEAD = "async def h(thing_id: int, user=Depends(get_user)):\n"
+_OWN = "    t = await db_client.get_org_thing(thing_id, organization_id=user.selected_organization_id)\n"
+
+
+@pytest.mark.scenario("tenant-isolation:先查後做缺歸屬檢查")
+@pytest.mark.parametrize(
+    "body, flagged",
+    [
+        ("    return await db_client.get_thing(thing_id)\n", True),
+        # judged by signature: a reassuring name does not help
+        ("    return await db_client.get_thing_scoped(thing_id)\n", True),
+        (
+            _OWN
+            + "    if not t:\n        raise E(404)\n    return await db_client.get_thing(thing_id)\n",
+            False,
+        ),
+        (
+            _OWN + "    if t:\n        return await db_client.get_thing(thing_id)\n",
+            False,
+        ),
+        # a check that does not raise is not a check
+        (
+            _OWN
+            + "    if not t:\n        log()\n    return await db_client.get_thing(thing_id)\n",
+            True,
+        ),
+        # a check on another branch does not dominate the call
+        (
+            "    if x:\n"
+            + "    "
+            + _OWN
+            + "        if not t:\n            raise E(404)\n"
+            "    else:\n        return await db_client.get_thing(thing_id)\n",
+            True,
+        ),
+        (
+            "    return await db_client.get_org_thing(thing_id, organization_id=1)\n",
+            False,
+        ),
+    ],
+    ids=[
+        "unguarded",
+        "name-not-signature",
+        "raise-guard",
+        "if-body",
+        "no-raise",
+        "sibling-branch",
+        "takes-org",
+    ],
+)
+def test_detects_unscoped_call_shape(tmp_path, body, flagged):
+    for sub in SCANNED:
+        (tmp_path / sub).mkdir()
+    (tmp_path / "db" / "c.py").write_text(_DB_STUB)
+    (tmp_path / "routes" / "r.py").write_text(_HEAD + body)
+    found = [f for f in scan(tmp_path) if "④" in f]
+    assert bool(found) == flagged, found
+
+
+def test_dependency_params_are_not_request_ids(tmp_path):
+    for sub in SCANNED:
+        (tmp_path / sub).mkdir()
+    (tmp_path / "db" / "c.py").write_text(_DB_STUB)
+    (tmp_path / "routes" / "r.py").write_text(
+        "async def h(user=Depends(get_user)):\n    return await db_client.get_thing(user.id)\n"
+    )
+    assert scan(tmp_path) == []
