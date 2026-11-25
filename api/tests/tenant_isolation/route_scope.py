@@ -25,6 +25,10 @@ ORG_SCOPED: dict[str, tuple[str, ...]] = {
     "GET /api/v1/internal/usage-report": (
         "tests/tenant_isolation/test_ccp_tenant_scope.py::test_usage_report_counts_own_organization",
     ),
+    "GET /api/v1/s3/file-metadata": (
+        "tests/tenant_isolation/test_s3_file_metadata.py::test_other_org_run_metadata_is_denied",
+        "tests/tenant_isolation/test_s3_file_metadata.py::test_voicemail_metadata_is_superuser_only",
+    ),
 }
 
 _UNREACHABLE = "；交付態不可達（nginx 無 dograh 直連，編輯器閘門 deny）"
@@ -198,7 +202,6 @@ PROBED: tuple[str, ...] = (
     "DELETE /api/v1/organizations/langfuse-credentials",
     "GET /api/v1/organizations/campaign-defaults",
     "GET /api/v1/s3/signed-url",
-    "GET /api/v1/s3/file-metadata",
     "POST /api/v1/s3/presigned-upload-url",
     "GET /api/v1/user/service-keys",
     "POST /api/v1/user/service-keys",

@@ -121,20 +121,20 @@ async def _validate_and_extract_workflow_run_id(
 
 
 async def _authorize_and_get_workflow_run(
-    run_id: Optional[int], user, require_workflow_run: bool = True
+    run_id: Optional[int], user
 ) -> Optional[Any]:
     """Authorize access to workflow run and retrieve it.
 
     Args:
         run_id: Workflow run ID (can be None for special paths)
         user: Current user from auth
-        require_workflow_run: If True, raises exception when run not found
 
     Returns:
         WorkflowRunModel or None
 
     Raises:
-        HTTPException: If access is denied
+        HTTPException: 403 when a non-superuser asks for a run outside their
+            organization (or one that does not exist)
     """
     if run_id is None:
         return None
@@ -145,7 +145,7 @@ async def _authorize_and_get_workflow_run(
         workflow_run = await db_client.get_workflow_run(
             run_id, organization_id=user.selected_organization_id
         )
-        if not workflow_run and require_workflow_run:
+        if not workflow_run:
             raise HTTPException(
                 status_code=403, detail="Access denied for this workflow run"
             )
@@ -245,17 +245,18 @@ async def get_file_metadata(
     """Get file metadata including creation timestamp for debugging.
 
     Access Control:
-    * Superusers can request any key.
-    * Regular users can only request resources belonging to **their** workflow runs.
+    * Superusers can request any key, including ``voicemail_detections/``
+      (those keys carry no run or organization to authorize against).
+    * Regular users can only request resources belonging to **their**
+      organization's workflow runs; anything else is 403.
     """
 
     # Validate key and extract workflow_run_id (allow special paths for metadata)
     run_id = await _validate_and_extract_workflow_run_id(key, allow_special_paths=True)
+    if run_id is None and not user.is_superuser:
+        raise HTTPException(status_code=403, detail="Access denied")
 
-    # Authorize and get workflow run (for special paths, run_id might be None)
-    workflow_run = await _authorize_and_get_workflow_run(
-        run_id, user, require_workflow_run=False
-    )
+    workflow_run = await _authorize_and_get_workflow_run(run_id, user)
 
     # ------------------------------------------------------------------
     # 3. Get file metadata using the correct storage backend

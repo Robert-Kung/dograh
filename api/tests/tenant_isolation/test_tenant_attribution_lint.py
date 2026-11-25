@@ -37,7 +37,14 @@ EXEMPT_ORG_BRANCH = {
 EXEMPT_SUPERUSER = {
     ("routes/s3_signed_url.py", "_authorize_and_get_workflow_run"): (
         "superuser may sign any run's object (existing branch); non-superusers "
-        "get the run only through get_workflow_run scoped to their organization"
+        "get the run only through get_workflow_run scoped to their organization "
+        "and a miss always raises 403 — the former require_workflow_run=False "
+        "path (file-metadata) did not raise and leaked other organizations' "
+        "metadata; the parameter is removed (8.3b, R1)"
+    ),
+    ("routes/s3_signed_url.py", "get_file_metadata"): (
+        "voicemail_detections/ keys carry no run or organization — the branch "
+        "restricts them to superusers (403 otherwise); removing it widens access"
     ),
     ("routes/s3_signed_url.py", "get_signed_url"): (
         "non-superuser may only sign keys under their own organization — the "
