@@ -13,6 +13,7 @@ from api.services.campaign.source_sync import (
     ValidationResult,
 )
 from api.services.storage import storage_fs
+from api.utils.storage_key import is_org_scoped_key
 
 
 class CSVSyncService(CampaignSourceSyncService):
@@ -44,7 +45,7 @@ class CSVSyncService(CampaignSourceSyncService):
         """Validate a CSV source file for campaign creation."""
         # Uploads land under campaigns/{org_id}/ (s3 presigned-upload-url);
         # another org's key would dial that org's contact list.
-        if not source_id.startswith(f"campaigns/{organization_id}/"):
+        if not is_org_scoped_key(source_id, "campaigns", organization_id):
             return ValidationResult(
                 is_valid=False,
                 error=ValidationError(

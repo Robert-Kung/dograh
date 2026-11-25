@@ -10,17 +10,13 @@ callers or copied into its namespace.
 
 from loguru import logger
 
+from api.utils.storage_key import is_org_scoped_key
+
 CONFIG_KEY = "ambient_noise_configuration"
 
 
 def is_own_ambient_noise_key(storage_key: str, organization_id: int) -> bool:
-    parts = storage_key.split("/")
-    return (
-        len(parts) >= 3
-        and parts[0] == "ambient-noise"
-        and parts[1] == str(organization_id)
-        and all(seg not in ("", ".", "..") and "\\" not in seg for seg in parts[2:])
-    )
+    return is_org_scoped_key(storage_key, "ambient-noise", organization_id)
 
 
 def foreign_ambient_noise_key(

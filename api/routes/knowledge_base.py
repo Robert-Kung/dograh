@@ -23,6 +23,7 @@ from api.services.posthog_client import capture_event
 from api.services.storage import storage_fs
 from api.tasks.arq import enqueue_job
 from api.tasks.function_names import FunctionNames
+from api.utils.storage_key import is_org_scoped_key
 
 router = APIRouter(prefix="/knowledge-base", tags=["knowledge-base"])
 
@@ -115,8 +116,8 @@ async def process_document(
 
     # upload-url issues keys under knowledge_base/{org_id}/; another org's key
     # would ingest that org's document into this org's knowledge base.
-    if not request.s3_key.startswith(
-        f"knowledge_base/{user.selected_organization_id}/"
+    if not is_org_scoped_key(
+        request.s3_key, "knowledge_base", user.selected_organization_id
     ):
         raise HTTPException(
             status_code=403,

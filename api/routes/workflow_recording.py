@@ -24,6 +24,7 @@ from api.sdk_expose import sdk_expose
 from api.services.auth.depends import get_user
 from api.services.mps_service_key_client import mps_service_key_client
 from api.services.storage import storage_fs
+from api.utils.storage_key import key_segments
 
 router = APIRouter(prefix="/workflow-recordings", tags=["workflow-recordings"])
 
@@ -57,13 +58,13 @@ def _is_own_upload_key(
     recordings/{run_id}/user.wav, and run ids overlap org ids, so
     "recordings/{own org}/user.wav" would name another org's call audio.
     """
-    parts = storage_key.split("/")
+    parts = key_segments(storage_key)
     return (
-        len(parts) == 4
+        parts is not None
+        and len(parts) == 4
         and parts[0] == "recordings"
         and parts[1] == str(organization_id)
         and parts[2] == recording_id
-        and all(seg not in ("", ".", "..") and "\\" not in seg for seg in parts[2:])
     )
 
 

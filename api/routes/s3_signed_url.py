@@ -11,6 +11,7 @@ from api.db import db_client
 from api.enums import StorageBackend
 from api.services.auth.depends import get_user
 from api.services.storage import get_storage_for_backend, storage_fs
+from api.utils.storage_key import key_segments
 
 
 class S3SignedUrlResponse(TypedDict):
@@ -48,11 +49,12 @@ def _extract_org_id_from_key(key: str) -> Optional[int]:
 
     Matches known org-scoped keys of the form ``{prefix}/{org_id}/...`` where
     *org_id* is a positive integer. Returns ``None`` when the pattern does not
-    match.
+    match or the key is non-canonical (``..``, empty segment, backslash).
     """
-    parts = key.split("/")
+    parts = key_segments(key)
     if (
-        len(parts) >= 3
+        parts is not None
+        and len(parts) >= 3
         and parts[0] in ORG_SCOPED_STORAGE_PREFIXES
         and parts[1].isdigit()
     ):
@@ -120,9 +122,7 @@ async def _validate_and_extract_workflow_run_id(
     return int(run_id_str)
 
 
-async def _authorize_and_get_workflow_run(
-    run_id: Optional[int], user
-) -> Optional[Any]:
+async def _authorize_and_get_workflow_run(run_id: Optional[int], user) -> Optional[Any]:
     """Authorize access to workflow run and retrieve it.
 
     Args:
