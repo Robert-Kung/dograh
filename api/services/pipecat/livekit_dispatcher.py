@@ -71,10 +71,14 @@ class Fallback(Protocol):
 def end_only_reason(resolved: Optional[ResolvedDid]) -> Optional[str]:
     """Why this call must end without a REFER, or None to proceed as before.
 
-    The platform fallback queue is the first tenant's human agents, so a call
-    belonging to any other organization must not be REFERred there (review
-    gate S2/R4, user ruling 2026-11-25); a suspended tenant's calls are ended
-    the same way. Per-tenant fallback destinations and the "service
+    Dispatch time only, once the DID resolved (review gate S2/R4, user ruling
+    2026-11-25): the platform fallback queue is the first tenant's human
+    agents, so another organization's unmapped number, or a suspended
+    tenant's call, ends here instead of being REFERred there. Failure exits
+    before resolution (dispatch_error, undispatched) and after launch
+    (overflow, launch_failed, pipeline / mid-call safetynet) still use the
+    platform queue until mt-s1-tenant-settings resolves them per tenant
+    (residual risk R-MT-14; user ruling 2026-11-26). Per-tenant fallback destinations and the "service
     suspended" prompt replace this in mt-s1-tenant-settings. An unset first
     tenant counts as "not the first tenant": end rather than REFER into a
     queue that may be someone else's.
