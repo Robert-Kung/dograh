@@ -59,6 +59,29 @@ def test_process_document_rejects_non_canonical_key(key):
 
 
 @pytest.mark.parametrize("key", _bad_keys("campaigns"))
+def test_campaign_source_download_rejects_non_canonical_key(key):
+    """review round 2 R10: the source download used a bare prefix check."""
+    from api.routes.campaign import router as campaign_router
+
+    app = FastAPI()
+    app.include_router(campaign_router)
+    app.dependency_overrides[get_user] = lambda: SimpleNamespace(
+        id=1, selected_organization_id=ORG
+    )
+    sign = AsyncMock(return_value="https://download.example/x")
+    with (
+        patch("api.routes.campaign.db_client") as mock_db,
+        patch("api.routes.campaign.storage_fs.aget_signed_url", sign),
+    ):
+        mock_db.get_campaign = AsyncMock(
+            return_value=SimpleNamespace(source_type="csv", source_id=key)
+        )
+        response = TestClient(app).get("/campaign/5/source-download-url")
+    assert response.status_code == 403, response.text
+    assert sign.await_count == 0
+
+
+@pytest.mark.parametrize("key", _bad_keys("campaigns"))
 async def test_csv_source_rejects_non_canonical_key(key):
     service = CSVSyncService()
     with patch.object(service, "_fetch_csv_data", new=AsyncMock()) as fetch:

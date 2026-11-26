@@ -21,6 +21,7 @@ from api.services.campaign.source_sync_factory import get_sync_service
 from api.services.quota_service import authorize_workflow_run_start
 from api.services.reports import generate_campaign_report_csv
 from api.services.storage import storage_fs
+from api.utils.storage_key import is_org_scoped_key
 
 router = APIRouter(prefix="/campaign")
 
@@ -965,7 +966,9 @@ async def get_campaign_source_download_url(
 
     # Verify the file key belongs to the user's organization
     # File key format: campaigns/{org_id}/{uuid}_{filename}.csv
-    if not campaign.source_id.startswith(f"campaigns/{user.selected_organization_id}/"):
+    if not is_org_scoped_key(
+        campaign.source_id, "campaigns", user.selected_organization_id
+    ):
         raise HTTPException(
             status_code=403,
             detail="Access denied: Source file does not belong to your organization",
