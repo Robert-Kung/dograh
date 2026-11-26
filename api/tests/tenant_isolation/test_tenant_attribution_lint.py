@@ -386,13 +386,18 @@ def _org_aliases(fn) -> set[str]:
 def _is_presence_check(test, aliases: set[str]) -> bool:
     """``if not user.selected_organization_id:`` only proves an organization
     is selected, not that the id belongs to it.  (``if workflow is None`` on a
-    row fetched with the organization is an ownership check.)"""
+    row fetched with the organization is an ownership check.)  Also spelled
+    ``X == None``, and inside an ``or`` (``if not X or flag: raise``): the
+    guard then raises whenever X is missing, so it proves no more than
+    presence (review round 2 R14)."""
+    if isinstance(test, ast.BoolOp) and isinstance(test.op, ast.Or):
+        return any(_is_presence_check(v, aliases) for v in test.values)
     if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
         test = test.operand
     elif (
         isinstance(test, ast.Compare)
         and len(test.ops) == 1
-        and isinstance(test.ops[0], ast.Is)
+        and isinstance(test.ops[0], (ast.Is, ast.Eq))
         and isinstance(test.comparators[0], ast.Constant)
         and test.comparators[0].value is None
     ):
@@ -636,6 +641,24 @@ _OWN = "    t = await db_client.get_org_thing(thing_id, organization_id=user.sel
             "    return await db_client.get_thing(thing_id)\n",
             True,
         ),
+        # review round 2 R14: presence checks in other spellings
+        (
+            "    if not user.selected_organization_id or flag:\n        raise E(400)\n"
+            "    return await db_client.get_thing(thing_id)\n",
+            True,
+        ),
+        (
+            "    org = user.selected_organization_id\n"
+            "    if flag or org is None:\n        raise E(400)\n"
+            "    return await db_client.get_thing(thing_id)\n",
+            True,
+        ),
+        (
+            "    org = user.selected_organization_id\n"
+            "    if org == None:\n        raise E(400)\n"
+            "    return await db_client.get_thing(thing_id)\n",
+            True,
+        ),
         (
             "    await _ensure_config_belongs_to_org(thing_id, user.selected_organization_id)\n"
             "    return await db_client.get_thing(thing_id)\n",
@@ -682,6 +705,9 @@ _OWN = "    t = await db_client.get_org_thing(thing_id, organization_id=user.sel
         "takes-org",
         "presence-only",
         "presence-alias",
+        "presence-or",
+        "presence-or-alias",
+        "presence-eq-none",
         "ownership-helper",
         "helper-other-id",
         "helper-in-if",
