@@ -230,6 +230,8 @@ async def test_smallwebrtc_run_reaching_telephony_websocket_closes_without_runni
         state=WorkflowRunState.INITIALIZED.value,
         initial_context={},
         gathered_context={},
+        campaign_id=None,
+        workflow=SimpleNamespace(user_id=99),
     )
     provider_lookup = AsyncMock()
 
@@ -241,7 +243,6 @@ async def test_smallwebrtc_run_reaching_telephony_websocket_closes_without_runni
         ),
     ):
         mock_db.get_workflow_run_by_id = AsyncMock(return_value=workflow_run)
-        mock_db.is_user_in_organization = AsyncMock(return_value=True)
         mock_db.update_workflow_run = AsyncMock()
 
         await _handle_telephony_websocket(websocket, 33, 99, 501)

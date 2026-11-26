@@ -543,6 +543,21 @@ async def websocket_endpoint(
     await _handle_telephony_websocket(websocket, workflow_id, user_id, workflow_run_id)
 
 
+async def _run_execution_user_id(workflow_run) -> int | None:
+    """Who a carrier call runs as: what the call's creator put in the URL.
+
+    A campaign call runs as the campaign's creator (the dispatcher's webhook
+    URL); every other carrier call as the workflow's owner
+    (``_get_execution_user_id``, the inbound dispatchers). Not required to be
+    an organization member: the workflow already binds the run's organization,
+    and an owner who left it must not silence the line (C4).
+    """
+    if workflow_run.campaign_id is not None:
+        campaign = await db_client.get_campaign_by_id(workflow_run.campaign_id)
+        return campaign.created_by if campaign else None
+    return workflow_run.workflow.user_id
+
+
 async def _handle_telephony_websocket(
     websocket: WebSocket, workflow_id: int, user_id: int, workflow_run_id: int
 ):
@@ -560,9 +575,10 @@ async def _handle_telephony_websocket(
             return
 
         # The run is the only anchor (no user session): the pipeline runs the
-        # path's workflow as the path's user, so both must belong to the run
-        # — the run's own workflow and a member of the run's organization
-        # (tenant-isolation, review gate S5).
+        # path's workflow as the path's user, so both must be the run's own —
+        # its workflow (which binds the run's organization; tenant-isolation,
+        # review gate S5) and its execution user as derived here, not merely
+        # some member of the organization (review round 2 R4).
         organization_id = workflow_run.organization_id
         if workflow_run.workflow_id != workflow_id:
             logger.warning(
@@ -570,9 +586,9 @@ async def _handle_telephony_websocket(
             )
             await websocket.close(code=4404, reason="Workflow run not found")
             return
-        if not await db_client.is_user_in_organization(user_id, organization_id):
+        if user_id != await _run_execution_user_id(workflow_run):
             logger.warning(
-                f"User {user_id} is not a member of run {workflow_run_id}'s organization"
+                f"User {user_id} is not run {workflow_run_id}'s execution user"
             )
             await websocket.close(code=4404, reason="Workflow run not found")
             return

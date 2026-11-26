@@ -138,6 +138,14 @@ EXEMPT_UNSCOPED_CALL = {
         "update_workflow_run",
     ): _CARRIER,
     (
+        "routes/telephony.py",
+        "_run_execution_user_id",
+        "get_campaign_by_id",
+    ): (
+        "campaign id 取自已載入的 run 列（非請求值），用來推導執行者並與路徑 "
+        "user 比對（review round 2 R4）；" + _CARRIER
+    ),
+    (
         "routes/campaign.py",
         "_get_campaign_stats",
         "get_queued_runs_stats_for_campaigns",
