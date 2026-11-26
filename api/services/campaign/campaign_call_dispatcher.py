@@ -300,6 +300,7 @@ class CampaignCallDispatcher:
                 workflow_id=campaign.workflow_id,
                 mode=workflow_run_mode,
                 user_id=campaign.created_by,
+                organization_id=campaign.organization_id,
                 initial_context=initial_context,
                 campaign_id=campaign.id,
                 queued_run_id=queued_run.id,  # Link to queued run for retry tracking

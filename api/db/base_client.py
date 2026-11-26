@@ -6,6 +6,13 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from api.constants import DATABASE_URL
 
 
+def require_organization_id(organization_id: int | None, caller: str) -> None:
+    """Tenant scoping is mandatory (tenant-isolation): no ``user_id`` fallback,
+    no unscoped query. Unscoped system lookups use the ``*_by_id`` variants."""
+    if organization_id is None:
+        raise ValueError(f"{caller} requires organization_id")
+
+
 class BaseDBClient:
     def __init__(self):
         self.engine = create_async_engine(DATABASE_URL, pool_pre_ping=True)

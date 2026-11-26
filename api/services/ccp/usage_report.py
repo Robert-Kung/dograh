@@ -99,14 +99,14 @@ def _add(split: dict, cls: str, n: int) -> None:
 
 
 async def build_usage_report(
-    query: UsageReportQuery, *, now: datetime | None = None
+    query: UsageReportQuery, *, organization_id: int, now: datetime | None = None
 ) -> dict:
     bounds = day_boundaries(query)
     params = {
         "bounds": bounds,
         "start": bounds[0],
         "end": bounds[-1],
-        **cs.scope_params(now),
+        **cs.scope_params(organization_id, now),
         **cs.category_params(query.codes),
         **cs.seconds_params(),
     }

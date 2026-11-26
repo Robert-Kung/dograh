@@ -1,4 +1,7 @@
-from fastapi import APIRouter, Depends, HTTPException
+import secrets
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, Header, HTTPException
 from loguru import logger
 
 from api.db import db_client
@@ -6,6 +9,7 @@ from api.db.models import UserModel
 from api.enums import OrganizationConfigurationKey, PostHogEvent
 from api.schemas.auth import AuthResponse, LoginRequest, SignupRequest, UserResponse
 from api.services.auth.depends import create_user_configuration_with_mps_key, get_user
+from api.services.ccp import tenants
 from api.services.configuration.ai_model_configuration import (
     convert_legacy_ai_model_configuration_to_v2,
 )
@@ -18,7 +22,31 @@ router = APIRouter(
 )
 
 
-@router.post("/signup", response_model=AuthResponse)
+def _require_signup_secret(
+    provided: Annotated[str | None, Header(alias="X-Dograh-Devops-Secret")] = None,
+) -> None:
+    """Public signup is closed (tenant-isolation〈關閉公開註冊〉, design D9).
+
+    The deploy bootstrap holding the devops secret is the only caller. Unset
+    secret refuses too — never an open signup. Runs before body validation,
+    so a refused caller learns nothing about the body and nothing is written.
+    """
+    from api.constants import DOGRAH_DEVOPS_SECRET
+
+    if not DOGRAH_DEVOPS_SECRET or not provided:
+        raise HTTPException(status_code=403, detail="signup_disabled")
+    # Bytes: compare_digest raises TypeError on non-ASCII str.
+    if not secrets.compare_digest(
+        provided.encode("utf-8"), DOGRAH_DEVOPS_SECRET.encode("utf-8")
+    ):
+        raise HTTPException(status_code=403, detail="signup_disabled")
+
+
+@router.post(
+    "/signup",
+    response_model=AuthResponse,
+    dependencies=[Depends(_require_signup_secret)],
+)
 async def signup(request: SignupRequest):
     # Check if email is already taken
     existing_user = await db_client.get_user_by_email(request.email)
@@ -42,6 +70,10 @@ async def signup(request: SignupRequest):
     # Link user to organization
     await db_client.add_user_to_organization(user.id, organization.id)
     await db_client.update_user_selected_organization(user.id, organization.id)
+
+    # First tenant on an empty deployment (design D2): only when ccp_tenants
+    # is empty; any later signup's organization is not a tenant.
+    await tenants.ensure_first_tenant(organization.id)
 
     # Create default service configuration
     try:

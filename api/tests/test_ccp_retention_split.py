@@ -49,6 +49,7 @@ async def make_run(db_session, async_session):
         run = WorkflowRunModel(
             name="retention-split-run",
             workflow_id=wf.id,
+            organization_id=wf.organization_id,
             mode=mode,
             created_at=datetime.now(UTC) - timedelta(days=age_days),
             **cols,

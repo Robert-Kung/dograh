@@ -544,6 +544,42 @@ async def test_caller_speaking_before_the_goodbye_starts_calls_it_off(
     assert exits.refers == []
 
 
+async def test_caller_speaking_while_the_bot_finishes_calls_off_the_goodbye(
+    services, refer, monkeypatch
+):
+    """review gate R23: the caller speaks while the goodbye still waits for
+    the idle prompt to finish; that speech calls the hangup off (the mark is
+    taken when the idle end starts, not after the wait)."""
+    from pipecat.frames.frames import (
+        BotStartedSpeakingFrame,
+        BotStoppedSpeakingFrame,
+        VADUserStartedSpeakingFrame,
+    )
+
+    call = await ready_call(make_call(services, refer, tts="silent"))
+    events = _capture_events(monkeypatch)
+    await call.wd.on_push_frame(push_data(BotStartedSpeakingFrame()))  # idle prompt
+    resumed = []
+    hangup = asyncio.create_task(
+        farewell.end_idle_call(
+            call.engine, _fake_exits(call), resume=lambda: resumed.append(1)
+        )
+    )
+    await asyncio.sleep(0.02)
+    await call.wd.on_push_frame(
+        push_data(VADUserStartedSpeakingFrame(start_secs=0.2, timestamp=0.0))
+    )
+    await call.wd.on_push_frame(push_data(BotStoppedSpeakingFrame()))
+    await hangup
+
+    assert resumed == [1]
+    assert call.engine.entries("end") == []
+    assert events == []
+    assert not call.state.tts_unavailable
+    assert not call.state.idle_end_in_progress
+    await call.wd.stop()
+
+
 async def test_the_safetynet_still_transfers_after_a_called_off_hangup(
     exits, plain_workflow
 ):
@@ -767,6 +803,97 @@ async def test_a_dropped_trigger_is_logged_once_per_reason(services, refer):
     dropped = [line for line in lines if "dropped during idle hangup" in line]
     assert len(dropped) == 2
     assert call.engine.entries("refer") == []
+    await call.wd.stop()
+
+
+@pytest.mark.parametrize("kind", ["llm_error", "stt_errors"])
+async def test_an_error_dropped_during_a_called_off_hangup_still_transfers(
+    services, refer, kind
+):
+    """review gate R25: a one-shot error trigger dropped while the goodbye was
+    under way fires once the caller calls the hangup off — the error does not
+    come again, and the call must not go on with a dead provider. (A TTS
+    error aborts the goodbye and ends the call itself.)"""
+    from pipecat.frames.frames import VADUserStartedSpeakingFrame
+
+    call = await ready_call(make_call(services, refer, tts="silent"))
+    resumed = []
+    hangup = asyncio.create_task(
+        farewell.end_idle_call(
+            call.engine, _fake_exits(call), resume=lambda: resumed.append(1)
+        )
+    )
+    await until(lambda: call.engine.entries("tts"))
+    await _trigger(call, services, kind)
+    assert call.engine.entries("refer") == []  # dropped while the goodbye runs
+    await call.wd.on_push_frame(
+        push_data(VADUserStartedSpeakingFrame(start_secs=0.2, timestamp=0.0))
+    )
+    await hangup
+
+    assert resumed == [1]
+    await until(lambda: call.engine.entries("refer"))
+    assert len(call.engine.entries("refer")) == 1
+    await call.wd.stop()
+
+
+async def test_an_error_dropped_in_an_earlier_idle_end_is_not_replayed_later(
+    services, refer
+):
+    """review round 2 R3(b): an error dropped during one goodbye whose call
+    a press-0 transfer then took over (nothing replays it there) must not
+    fire when a later, unrelated goodbye is called off."""
+    from pipecat.frames.frames import VADUserStartedSpeakingFrame
+
+    call = await ready_call(make_call(services, refer, tts="silent"))
+    # First idle end: an LLM error is dropped, the caller presses 0 meanwhile.
+    hangup = asyncio.create_task(
+        farewell.end_idle_call(call.engine, _fake_exits(call), resume=lambda: None)
+    )
+    await until(lambda: call.engine.entries("tts"))
+    await _trigger(call, services, "llm_error")
+    call.engine._livekit_transfer_in_progress = True
+    await hangup
+    assert call.engine.entries("refer") == []
+    # The press-0 REFER failed: back to the AI, which has recovered.
+    call.engine._livekit_transfer_in_progress = False
+    call.engine.log.clear()
+
+    # A later idle end, called off by the caller; no error this time.
+    hangup = asyncio.create_task(
+        farewell.end_idle_call(call.engine, _fake_exits(call), resume=lambda: None)
+    )
+    await until(lambda: call.engine.entries("tts"))
+    await call.wd.on_push_frame(
+        push_data(VADUserStartedSpeakingFrame(start_secs=0.2, timestamp=0.0))
+    )
+    await hangup
+    await settle(0.2)
+
+    assert call.engine.entries("refer") == []
+    assert not call.wd._fired
+    await call.wd.stop()
+
+
+async def test_a_called_off_hangup_with_nothing_dropped_does_not_transfer(
+    services, refer
+):
+    from pipecat.frames.frames import VADUserStartedSpeakingFrame
+
+    call = await ready_call(make_call(services, refer, tts="silent"))
+    hangup = asyncio.create_task(
+        farewell.end_idle_call(call.engine, _fake_exits(call), resume=lambda: None)
+    )
+    await until(lambda: call.engine.entries("tts"))
+    call.wd._fire("bot_silence")  # polled: comes back by itself, not replayed
+    await call.wd.on_push_frame(
+        push_data(VADUserStartedSpeakingFrame(start_secs=0.2, timestamp=0.0))
+    )
+    await hangup
+    await settle(0.2)
+
+    assert call.engine.entries("refer") == []
+    assert not call.wd._fired
     await call.wd.stop()
 
 

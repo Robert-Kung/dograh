@@ -307,11 +307,15 @@ class TelephonyPhoneNumberModel(Base):
     inbound_workflow = relationship("WorkflowModel")
 
     __table_args__ = (
-        UniqueConstraint(
-            "organization_id",
+        # A number belongs to one organization platform-wide, active or not
+        # (mt-s1-foundation D3): a second tenant cannot register it, so it can
+        # neither hijack nor DoS the owner's inbound calls.
+        Index(
+            "uq_phone_numbers_address_global",
             "address_normalized",
-            name="uq_phone_numbers_org_address",
+            unique=True,
         ),
+        Index("ix_phone_numbers_org_address", "organization_id", "address_normalized"),
         Index("ix_phone_numbers_config", "telephony_configuration_id"),
         Index(
             "ix_phone_numbers_workflow",
@@ -435,7 +439,9 @@ class WorkflowModel(Base):
     )
     user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     user = relationship("UserModel", back_populates="workflows")
-    organization_id = Column(Integer, ForeignKey("organizations.id"), nullable=True)
+    # NOT NULL since mt-s1-foundation: attribution is the row's organization,
+    # never the creator's selected organization (user_id may be NULL).
+    organization_id = Column(Integer, ForeignKey("organizations.id"), nullable=False)
     organization = relationship("OrganizationModel")
     # Optional folder for grouping in the agents list. NULL = "Uncategorized".
     # ON DELETE SET NULL: deleting a folder un-files its agents, never deletes them.
@@ -522,6 +528,9 @@ class WorkflowRunModel(Base):
     name = Column(String, nullable=False)
     workflow_id = Column(Integer, ForeignKey("workflows.id"), nullable=False)
     workflow = relationship("WorkflowModel", back_populates="runs")
+    # Always the workflow's organization at creation (mt-s1-foundation).
+    organization_id = Column(Integer, ForeignKey("organizations.id"), nullable=False)
+    organization = relationship("OrganizationModel")
     definition_id = Column(
         Integer, ForeignKey("workflow_definitions.id"), nullable=True
     )
@@ -589,6 +598,7 @@ class WorkflowRunModel(Base):
         ),
         Index("idx_workflow_runs_workflow_id", "workflow_id"),
         Index("idx_workflow_runs_campaign_id", "campaign_id"),
+        Index("idx_workflow_runs_org_created", "organization_id", "created_at"),
     )
 
 
@@ -1458,3 +1468,60 @@ class CcpSettingsModel(Base):
     key_fingerprint = Column(String(8), nullable=True)
 
     __table_args__ = (CheckConstraint("id = 1", name="ccp_settings_single_row"),)
+
+
+class CcpTenantModel(Base):
+    """CCP tenant lifecycle row (mt-s1-foundation, tenant-isolation).
+
+    A dograh organization *is* a CCP tenant iff it has a row here. Settings
+    values never live here (they go to OrganizationConfigurationModel with a
+    ``CCP_`` key prefix). Writes only through ``api/services/ccp/tenants.py``.
+    """
+
+    __tablename__ = "ccp_tenants"
+
+    organization_id = Column(
+        Integer,
+        ForeignKey("organizations.id", ondelete="RESTRICT"),
+        primary_key=True,
+    )
+    display_name = Column(String(64), nullable=False)
+    # NFKC + strip + casefold of display_name; computed by the service layer.
+    display_name_key = Column(String(64), nullable=True)
+    # DB default is the fail-closed value: a write that forgets the status
+    # cannot take calls. Backfill and provisioning always write it explicitly.
+    status = Column(String(16), nullable=False, server_default=text("'suspended'"))
+    status_changed_at = Column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    signed_off_by = Column(String(128), nullable=True)
+    signed_off_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('active', 'suspended')", name="ccp_tenants_status_valid"
+        ),
+        CheckConstraint(
+            "(signed_off_by IS NULL) = (signed_off_at IS NULL)",
+            name="ccp_tenants_signoff_both_or_neither",
+        ),
+        CheckConstraint(
+            "char_length(display_name) BETWEEN 1 AND 64",
+            name="ccp_tenants_display_name_length",
+        ),
+        Index(
+            "uq_ccp_tenants_display_name_key",
+            "display_name_key",
+            unique=True,
+            postgresql_where=text("display_name_key IS NOT NULL"),
+        ),
+    )

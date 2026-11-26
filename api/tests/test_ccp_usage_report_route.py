@@ -47,15 +47,27 @@ def calls(monkeypatch):
     return seen
 
 
+# The organization header (mt-s1-foundation 5.4); TENANT is the only tenant.
+TENANT = 7
+ORG_HEADER = "X-CCP-Organization-Id"
+
+
 def _client(monkeypatch, configured=SECRET) -> TestClient:
     monkeypatch.setattr("api.constants.DOGRAH_DEVOPS_SECRET", configured)
+
+    async def is_tenant(organization_id):
+        return organization_id == TENANT
+
+    monkeypatch.setattr("api.services.ccp.tenants.is_tenant", is_tenant)
     app = FastAPI()
     app.include_router(route.router, prefix="/api/v1")
     return TestClient(app)
 
 
-def _get(client, params=GOOD, secret: str | bytes | None = SECRET):
+def _get(client, params=GOOD, secret: str | bytes | None = SECRET, org=str(TENANT)):
     headers = {} if secret is None else {"X-Dograh-Devops-Secret": secret}
+    if org is not None:
+        headers[ORG_HEADER] = org
     return client.get(PATH, params=params, headers=headers)
 
 

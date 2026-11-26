@@ -243,9 +243,14 @@ def _page_sql(sort: str, order: str):
     )
 
 
+# Caller-search coverage is the organization's own earliest searchable call
+# (tenant-isolation: another org's history must not leak through it).
 _META_SQL = text(
     """SELECT
-        (SELECT min(created_at) FROM ccp_call_meta WHERE caller_last4 IS NOT NULL),
+        (SELECT min(m.created_at)
+           FROM ccp_call_meta m JOIN workflow_runs wr ON wr.id = m.workflow_run_id
+          WHERE m.caller_last4 IS NOT NULL
+            AND wr.organization_id = :organization_id),
         (SELECT key_fingerprint FROM ccp_settings WHERE id = 1)"""
 )
 
@@ -284,7 +289,11 @@ def _seconds(value) -> float:
 
 
 async def query_calls(
-    query: CallQuery, *, timezone: str, now: datetime | None = None
+    query: CallQuery,
+    *,
+    organization_id: int,
+    timezone: str,
+    now: datetime | None = None,
 ) -> dict:
     params = {
         "start": query.start,
@@ -294,7 +303,7 @@ async def query_calls(
         "uncategorized": query.uncategorized,
         "caller_hmac": query.caller_hmac,
         "caller_last4": query.caller_last4,
-        **cs.scope_params(now),
+        **cs.scope_params(organization_id, now),
         **cs.category_params(query.codes),
         **cs.seconds_params(),
     }
@@ -310,7 +319,11 @@ async def query_calls(
                 {**params, "limit": PAGE_SIZE, "offset": (page - 1) * PAGE_SIZE},
             )
         ).all()
-        coverage, fingerprint = (await session.execute(_META_SQL)).one()
+        coverage, fingerprint = (
+            await session.execute(
+                _META_SQL, {"organization_id": params["organization_id"]}
+            )
+        ).one()
         return total, pages, page, rows, coverage, fingerprint
 
     total, pages, page, rows, coverage, fingerprint = await _read(run)
@@ -493,11 +506,15 @@ def build_extracted(raw) -> tuple[list, bool]:
 
 
 async def get_call(
-    run_id: int, codes: tuple[str, ...], *, now: datetime | None = None
+    run_id: int,
+    codes: tuple[str, ...],
+    *,
+    organization_id: int,
+    now: datetime | None = None,
 ) -> dict | None:
     params = {
         "run_id": run_id,
-        **cs.scope_params(now),
+        **cs.scope_params(organization_id, now),
         **cs.category_params(codes),
         **cs.seconds_params(),
     }
@@ -627,7 +644,11 @@ class AudioStream:
 
 
 async def open_audio(
-    run_id: int, range_header: str | None, *, now: datetime | None = None
+    run_id: int,
+    range_header: str | None,
+    *,
+    organization_id: int,
+    now: datetime | None = None,
 ) -> AudioStream | None:
     """The recording's bytes, or None when the call or its recording is absent.
 
@@ -639,7 +660,8 @@ async def open_audio(
     async def run(session):
         return (
             await session.execute(
-                _AUDIO_SQL, {"run_id": run_id, **cs.scope_params(now)}
+                _AUDIO_SQL,
+                {"run_id": run_id, **cs.scope_params(organization_id, now)},
             )
         ).one_or_none()
 

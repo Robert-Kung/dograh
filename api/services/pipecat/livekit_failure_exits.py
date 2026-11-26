@@ -279,13 +279,17 @@ class CallFailureState:
 
         Skipped when TTS is already unavailable. Waits for the bot to fall
         silent first, so the tail of an interrupted utterance is not taken
-        for this prompt. A timeout marks TTS unavailable; the caller talking
-        over the prompt before it starts does not. Either way the caller
-        moves on. Fixed text through ``TTSSpeakFrame`` — never the LLM.
+        for this prompt. A timeout marks TTS unavailable unless the prompt
+        never started and the caller spoke since it was asked for (their
+        speech may have held it back); only speech after that wait calls the prompt off before it
+        starts, so a healthy prompt still plays after the caller spoke while
+        the bot finished (review round 2 R2). Either way the caller moves on.
+        Fixed text through ``TTSSpeakFrame`` — never the LLM.
         """
         if self.tts_unavailable:
             return False
         tracker = self.playback
+        asked_mark = tracker.user_spoke
         await tracker.wait_idle(self.playback_gap_timeout)
         started_mark, user_mark = tracker.started, tracker.user_spoke
         try:
@@ -301,7 +305,10 @@ class CallFailureState:
             abort=lambda: self.tts_unavailable,
         )
         if outcome is PlaybackOutcome.TIMED_OUT:
-            self.mark_tts_unavailable("prompt playback timed out")
+            if tracker.user_spoke > asked_mark and tracker.started == started_mark:
+                logger.info("prompt did not start; the caller spoke over it")
+            else:
+                self.mark_tts_unavailable("prompt playback timed out")
         return outcome is PlaybackOutcome.PLAYED
 
     async def stop_stt(self) -> None:

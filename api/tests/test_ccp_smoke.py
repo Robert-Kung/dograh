@@ -12,6 +12,7 @@ import types
 
 import pytest
 
+from api.db.telephony_phone_number_client import ResolvedDid
 from api.services.ccp import call_scope, smoke
 from api.services.observability import alerts
 
@@ -106,7 +107,9 @@ def _wire_dispatch(monkeypatch, created):
 
 
 async def _resolver(did):
-    return (1, 2)
+    return ResolvedDid(
+        workflow_id=1, organization_id=2, tenant_status="active", mapped=True
+    )
 
 
 async def _fallback_fails(room, reason, workflow_run_id=None):
@@ -211,6 +214,7 @@ async def test_template_variable_cannot_tag_a_run(db_session, async_session):
     run = await db_session.create_workflow_run(
         name="m1-run",
         workflow_id=wf.id,
+        organization_id=wf.organization_id,
         mode="livekit",
         user_id=user.id,
         initial_context={"did": "+886212345678"},

@@ -1336,3 +1336,109 @@ async def test_text_chat_empty_llm_turn_gets_fallback_reply(
     assert message_response.status_code == 200
     turns = message_response.json()["session_data"]["turns"]
     assert turns[1]["assistant_message"]["text"] == EMPTY_LLM_TURN_FALLBACK_TEXT
+
+
+@pytest.mark.asyncio
+async def test_text_chat_runs_workflow_without_creator(
+    db_session,
+    async_session,
+    test_client_factory,
+):
+    """review gate R26: a provisioned workflow has no creator (user_id NULL);
+    text chat must run on the organization's configuration, not 500."""
+    from sqlalchemy import text
+
+    workflow_definition = {
+        "nodes": [
+            {
+                "id": "start",
+                "type": "startCall",
+                "position": {"x": 0, "y": 0},
+                "data": {
+                    "name": "Start",
+                    "prompt": "You are a helpful assistant.",
+                    "is_start": True,
+                    "allow_interrupt": False,
+                    "add_global_prompt": False,
+                    "greeting_type": "text",
+                    "greeting": "Welcome.",
+                },
+            },
+            {
+                "id": "end",
+                "type": "endCall",
+                "position": {"x": 0, "y": 200},
+                "data": {
+                    "name": "End",
+                    "prompt": "Wrap up the conversation.",
+                    "is_end": True,
+                    "allow_interrupt": False,
+                    "add_global_prompt": False,
+                },
+            },
+        ],
+        "edges": [
+            {
+                "id": "start-end",
+                "source": "start",
+                "target": "end",
+                "data": {"label": "End Call", "condition": "When the task is done."},
+            }
+        ],
+    }
+    user, workflow = await _create_user_and_workflow(
+        db_session,
+        async_session,
+        workflow_definition=workflow_definition,
+        suffix="no-creator",
+    )
+    wf_id = workflow.id
+    await async_session.execute(
+        text("UPDATE workflows SET user_id = NULL WHERE id = :w"), {"w": wf_id}
+    )
+    async_session.expire(workflow)  # identity map still holds the old user_id
+    org_config = EffectiveAIModelConfiguration.model_validate(USER_CONFIGURATION)
+    get_config = AsyncMock(return_value=org_config)
+
+    async with test_client_factory(user) as client:
+        with (
+            patch(
+                "api.services.workflow.text_chat_runner.create_llm_service",
+                side_effect=[
+                    MockLLMService(mock_steps=[], chunk_delay=0.001),
+                    MockLLMService(
+                        mock_steps=[MockLLMService.create_text_chunks("Hi back.")],
+                        chunk_delay=0.001,
+                    ),
+                ],
+            ),
+            patch(
+                "api.services.workflow.text_chat_runner.db_client.has_active_recordings",
+                new=AsyncMock(return_value=False),
+            ),
+            patch(
+                "api.services.configuration.ai_model_configuration."
+                "get_effective_ai_model_configuration_for_workflow",
+                new=get_config,
+            ),
+            patch(
+                "api.services.quota_service."
+                "get_effective_ai_model_configuration_for_workflow",
+                new=get_config,
+            ),
+        ):
+            created = await client.post(
+                f"/api/v1/workflow/{wf_id}/text-chat/sessions", json={}
+            )
+            assert created.status_code == 200, created.text
+            body = created.json()
+            message = await client.post(
+                f"/api/v1/workflow/{wf_id}/text-chat/sessions/"
+                f"{body['workflow_run_id']}/messages",
+                json={"text": "Hi", "expected_revision": body["revision"]},
+            )
+
+    assert message.status_code == 200, message.text
+    turns = message.json()["session_data"]["turns"]
+    assert turns[-1]["assistant_message"]["text"] == "Hi back."
+    assert all(c.kwargs["user_id"] is None for c in get_config.await_args_list)

@@ -54,7 +54,12 @@ async def run_id(db_session, async_session):
         user_id=user.id,
         organization_id=org.id,
     )
-    run = WorkflowRunModel(name="call-meta-run", workflow_id=wf.id, mode="livekit")
+    run = WorkflowRunModel(
+        name="call-meta-run",
+        workflow_id=wf.id,
+        organization_id=wf.organization_id,
+        mode="livekit",
+    )
     async_session.add(run)
     await async_session.flush()
     return run.id

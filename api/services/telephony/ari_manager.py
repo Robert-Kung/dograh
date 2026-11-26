@@ -571,6 +571,7 @@ class ARIConnection:
                 workflow_id=inbound_workflow_id,
                 mode=WorkflowRunMode.ARI.value,
                 user_id=user_id,
+                organization_id=self.organization_id,
                 call_type=CallType.INBOUND,
                 initial_context={
                     "caller_number": caller_number,

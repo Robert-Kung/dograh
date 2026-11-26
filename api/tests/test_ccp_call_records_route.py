@@ -78,16 +78,27 @@ def svc(monkeypatch):
     return seen
 
 
+# The organization header (mt-s1-foundation 5.4); TENANT is the only tenant.
+TENANT = 7
+ORG_HEADER = "X-CCP-Organization-Id"
+
+
 def _client(monkeypatch, configured=SECRET) -> TestClient:
     monkeypatch.setattr("api.constants.DOGRAH_CALL_RECORDS_SECRET", configured)
     monkeypatch.setattr("api.constants.DOGRAH_DEVOPS_SECRET", DEVOPS)
+
+    async def is_tenant(organization_id):
+        return organization_id == TENANT
+
+    monkeypatch.setattr("api.services.ccp.tenants.is_tenant", is_tenant)
     app = FastAPI()
     app.include_router(route.router, prefix="/api/v1")
     return TestClient(app)
 
 
-def _h(secret=SECRET):
-    return {} if secret is None else {"X-Dograh-Call-Records-Secret": secret}
+def _h(secret=SECRET, org=str(TENANT)):
+    headers = {} if secret is None else {"X-Dograh-Call-Records-Secret": secret}
+    return headers if org is None else {**headers, ORG_HEADER: org}
 
 
 def test_unconfigured_secret_is_503(monkeypatch, svc):

@@ -578,6 +578,7 @@ class TestRunDefinitionBinding:
         run = await db_session.create_workflow_run(
             name="Campaign Run",
             workflow_id=workflow.id,
+            organization_id=workflow.organization_id,
             mode="webrtc",
             user_id=user.id,
         )
@@ -600,6 +601,7 @@ class TestRunDefinitionBinding:
         run = await db_session.create_workflow_run(
             name="Test Run",
             workflow_id=workflow.id,
+            organization_id=workflow.organization_id,
             mode="webrtc",  # test mode
             user_id=user.id,
             use_draft=True,
@@ -624,6 +626,7 @@ class TestRunDefinitionBinding:
         run = await db_session.create_workflow_run(
             name="Embed Run",
             workflow_id=workflow.id,
+            organization_id=workflow.organization_id,
             mode="smallwebrtc",
             user_id=user.id,
             initial_context={

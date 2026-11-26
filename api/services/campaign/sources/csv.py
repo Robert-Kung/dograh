@@ -13,6 +13,7 @@ from api.services.campaign.source_sync import (
     ValidationResult,
 )
 from api.services.storage import storage_fs
+from api.utils.storage_key import is_org_scoped_key
 
 
 class CSVSyncService(CampaignSourceSyncService):
@@ -42,6 +43,15 @@ class CSVSyncService(CampaignSourceSyncService):
         self, source_id: str, organization_id: Optional[int] = None
     ) -> ValidationResult:
         """Validate a CSV source file for campaign creation."""
+        # Uploads land under campaigns/{org_id}/ (s3 presigned-upload-url);
+        # another org's key would dial that org's contact list.
+        if not is_org_scoped_key(source_id, "campaigns", organization_id):
+            return ValidationResult(
+                is_valid=False,
+                error=ValidationError(
+                    message="Source file does not belong to your organization"
+                ),
+            )
         try:
             csv_data = await self._fetch_csv_data(source_id)
         except ValueError as e:

@@ -1,5 +1,4 @@
 import json
-import re
 import uuid
 from datetime import datetime
 from typing import List, Literal, Optional
@@ -48,6 +47,10 @@ from api.services.mps_service_key_client import mps_service_key_client
 from api.services.posthog_client import capture_event
 from api.services.reports import generate_workflow_report_csv
 from api.services.storage import storage_fs
+from api.services.workflow.ambient_noise import (
+    drop_unchanged_foreign_key,
+    foreign_ambient_noise_key,
+)
 from api.services.workflow.dto import ReactFlowDTO, sanitize_workflow_definition
 from api.services.workflow.duplicate import duplicate_workflow
 from api.services.workflow.errors import ItemKind, WorkflowError
@@ -72,6 +75,7 @@ from api.utils.recording_artifacts import (
     get_recording_storage_key,
     has_recording_track,
 )
+from api.utils.storage_key import ascii_name
 
 router = APIRouter(prefix="/workflow")
 
@@ -434,7 +438,7 @@ async def create_workflow(
         request.name,
         workflow_definition,
         user.id,
-        user.selected_organization_id,
+        organization_id=user.selected_organization_id,
     )
 
     capture_event(
@@ -1045,6 +1049,28 @@ async def update_workflow(
         # Validate model overrides. v2 uses a complete workflow-level model
         # configuration; legacy v1 uses partial service overlays.
         workflow_configurations = request.workflow_configurations
+        if foreign_ambient_noise_key(
+            workflow_configurations, user.selected_organization_id
+        ):
+            existing_workflow = await db_client.get_workflow(
+                workflow_id, organization_id=user.selected_organization_id
+            )
+            if existing_workflow is not None:
+                existing_draft = await db_client.get_draft_version(workflow_id)
+                workflow_configurations = drop_unchanged_foreign_key(
+                    workflow_configurations,
+                    (
+                        existing_draft or existing_workflow.released_definition
+                    ).workflow_configurations,
+                    user.selected_organization_id,
+                )
+        if foreign_ambient_noise_key(
+            workflow_configurations, user.selected_organization_id
+        ):
+            raise HTTPException(
+                status_code=403,
+                detail="Access denied: ambient noise file does not belong to your organization",
+            )
 
         # Ticket-server bearer key round-trip: responses mask it, so a save
         # that echoes the mask must restore the stored real key.
@@ -1341,14 +1367,21 @@ async def create_workflow_run(
         request: The create workflow run request
         user: The user to create the workflow run for
     """
-    run = await db_client.create_workflow_run(
-        request.name,
-        workflow_id,
-        request.mode,
-        user.id,
-        use_draft=True,
-        organization_id=user.selected_organization_id,
-    )
+    if not user.selected_organization_id:
+        raise HTTPException(status_code=400, detail="No organization selected")
+    try:
+        run = await db_client.create_workflow_run(
+            request.name,
+            workflow_id,
+            request.mode,
+            user.id,
+            use_draft=True,
+            organization_id=user.selected_organization_id,
+        )
+    except ValueError:
+        # The workflow is looked up within the organization; another org's
+        # (or a missing) workflow is not found, not a server error.
+        raise HTTPException(status_code=404, detail="Workflow not found")
     return {
         "id": run.id,
         "workflow_id": run.workflow_id,
@@ -1589,7 +1622,7 @@ async def duplicate_workflow_template(
         request.workflow_name,
         workflow_def,
         user.id,
-        user.selected_organization_id,
+        organization_id=user.selected_organization_id,
     )
 
     if trigger_paths:
@@ -1649,7 +1682,7 @@ async def get_ambient_noise_upload_url(
     if not workflow:
         raise HTTPException(status_code=404, detail="Workflow not found")
 
-    sanitized = re.sub(r"[^a-zA-Z0-9._-]", "_", request.filename)
+    sanitized = ascii_name(request.filename)
     storage_key = (
         f"ambient-noise/{user.selected_organization_id}"
         f"/{request.workflow_id}/{uuid.uuid4()}_{sanitized}"

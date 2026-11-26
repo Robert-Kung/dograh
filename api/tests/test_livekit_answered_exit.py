@@ -525,7 +525,7 @@ def gate(monkeypatch):
 
 async def _overflow(lk, room=ROOM):
     await capacity_gate.capacity_overflow(
-        room, active=6, limit=6, workflow_id=1, user_id=1, lk=lk
+        room, active=6, limit=6, workflow_id=1, organization_id=1, lk=lk
     )
 
 
@@ -681,7 +681,7 @@ async def test_gate_lookup_gets_a_node_graph_not_the_db_row(monkeypatch):
     from api.services.pipecat import livekit_transfer_flow, transfer_call_config
     from api.tests.support.workflow_rows import workflow_row
 
-    async def get_workflow(workflow_id, user_id):
+    async def get_workflow(workflow_id, *, organization_id):
         return workflow_row(tool_uuid="xfer-1")
 
     seen = {}

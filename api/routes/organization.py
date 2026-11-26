@@ -13,6 +13,7 @@ from api.constants import (
 from api.db import db_client
 from api.db.models import UserModel
 from api.db.telephony_configuration_client import TelephonyConfigurationInUseError
+from api.db.telephony_phone_number_client import DidTakenError
 from api.enums import OrganizationConfigurationKey, PostHogEvent
 from api.schemas.ai_model_configuration import (
     DOGRAH_DEFAULT_LANGUAGE,
@@ -793,16 +794,14 @@ async def create_phone_number(
         if conflict:
             existing_cfg, existing_phone = conflict
             same_org = existing_cfg.organization_id == user.selected_organization_id
-            scope = (
-                f"telephony configuration '{existing_cfg.name}'"
-                if same_org
-                else "another organization using the same provider account"
-            )
+            if not same_org:
+                # Never describe a number held by another organization.
+                raise HTTPException(status_code=409, detail="did_taken")
             raise HTTPException(
                 status_code=409,
                 detail=(
                     f"Phone number {existing_phone.address} is already registered "
-                    f"under {scope}. Inbound calls cannot be uniquely routed when "
+                    f"under telephony configuration '{existing_cfg.name}'. Inbound calls cannot be uniquely routed when "
                     f"the same number is configured against the same provider "
                     f"account in more than one place."
                 ),
@@ -820,6 +819,9 @@ async def create_phone_number(
             is_default_caller_id=request.is_default_caller_id,
             extra_metadata=request.extra_metadata,
         )
+    except DidTakenError:
+        # Platform-wide unique (mt-s1-foundation D3); holder never disclosed.
+        raise HTTPException(status_code=409, detail="did_taken")
     except IntegrityError:
         raise HTTPException(
             status_code=409,
@@ -1012,7 +1014,10 @@ async def save_telephony_configuration(
     existing_numbers = await db_client.list_phone_numbers_for_config(row.id)
     existing_by_address = {n.address: n for n in existing_numbers}
     incoming_set = set(new_addresses)
-    for addr in new_addresses:
+    # Numbers not registered are reported back (by position in from_numbers,
+    # masked) instead of silently dropped; did_taken never names the holder.
+    skipped_numbers: list[dict] = []
+    for index, addr in enumerate(new_addresses):
         if addr in existing_by_address:
             continue
         try:
@@ -1021,12 +1026,20 @@ async def save_telephony_configuration(
                 telephony_configuration_id=row.id,
                 address=addr,
             )
+            continue
+        except DidTakenError:
+            reason = "did_taken"
         except IntegrityError:
-            logger.warning(
-                f"Skipping duplicate phone number {addr!r} for config {row.id}"
-            )
+            reason = "already_registered"
         except ValueError as e:
-            logger.warning(f"Skipping invalid phone number {addr!r}: {e}")
+            logger.warning(f"Skipping invalid phone number ***{addr[-4:]!s}: {e}")
+            reason = "invalid"
+        logger.warning(
+            f"Skipping phone number ***{addr[-4:]!s} for config {row.id}: {reason}"
+        )
+        skipped_numbers.append(
+            {"index": index, "address_masked": f"***{addr[-4:]}", "reason": reason}
+        )
     for n in existing_numbers:
         if n.address not in incoming_set:
             await db_client.delete_phone_number(n.id, row.id)
@@ -1041,7 +1054,10 @@ async def save_telephony_configuration(
         },
     )
 
-    return {"message": "Telephony configuration saved successfully"}
+    return {
+        "message": "Telephony configuration saved successfully",
+        "skipped_numbers": skipped_numbers,
+    }
 
 
 class LangfuseCredentialsRequest(BaseModel):

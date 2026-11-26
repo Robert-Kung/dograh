@@ -90,7 +90,9 @@ async def summarize_transfer_handoff(_ctx, snapshot: dict) -> None:
 
     # get_workflow_run selectinloads .definition (get_workflow_run_by_id
     # doesn't, and lazy-loading outside the session raises in async SQLA).
-    workflow_run = await db_client.get_workflow_run(workflow_run_id)
+    workflow_run = await db_client.get_workflow_run(
+        workflow_run_id, organization_id=organization_id
+    )
     run_configs = (
         (workflow_run.definition.workflow_configurations or {})
         if workflow_run and workflow_run.definition

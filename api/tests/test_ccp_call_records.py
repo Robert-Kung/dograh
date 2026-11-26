@@ -35,6 +35,11 @@ def hmac_key(monkeypatch):
     monkeypatch.setenv("RECORD_TRANSCRIPT_RETENTION_DAYS", "30")
 
 
+# Organization the module's rows belong to (mt-s1-foundation 5.2: every
+# CCP query is scoped to one organization). Set by the ``workflow`` fixture.
+SCOPE: dict = {}
+
+
 @pytest.fixture
 async def workflow(db_session, async_session):
     org = OrganizationModel(provider_id="test-org-call-records")
@@ -45,6 +50,7 @@ async def workflow(db_session, async_session):
     )
     async_session.add(user)
     await async_session.flush()
+    SCOPE["org"] = org.id  # every service call below is scoped to this org
     return await db_session.create_workflow(
         name="Call Records Workflow",
         workflow_definition={"nodes": [], "edges": []},
@@ -79,6 +85,7 @@ def add_run(workflow, async_session):
         run = WorkflowRunModel(
             name="call-records-run",
             workflow_id=workflow.id,
+            organization_id=workflow.organization_id,
             mode=mode,
             call_type=call_type,
             is_completed=completed,
@@ -129,7 +136,9 @@ def _q(date_from=date(2021, 11, 1), date_to=date(2021, 11, 20), **kw) -> cr.Call
 
 
 async def _list(**kw) -> dict:
-    return await cr.query_calls(_q(**kw), timezone=TZ, now=NOW)
+    return await cr.query_calls(
+        _q(**kw), timezone=TZ, organization_id=SCOPE["org"], now=NOW
+    )
 
 
 # --- list: scope and parity with the usage report (2.2) ---
@@ -167,6 +176,7 @@ async def mixed_month(add_run):
 async def test_totals_match_usage_report_cell_by_cell(mixed_month):
     report = await ur.build_usage_report(
         ur.validate_query(date(2021, 11, 1), date(2021, 11, 20), TZ, CODES, now=NOW),
+        organization_id=SCOPE["org"],
         now=NOW,
     )
     assert (await _list())["total"] == report["calls"] == 15
@@ -369,7 +379,9 @@ def test_parse_run_id(raw, ok):
 
 
 async def _detail(run_id, codes=CODES):
-    return await cr.get_call(run_id, tuple(codes), now=NOW)
+    return await cr.get_call(
+        run_id, tuple(codes), organization_id=SCOPE["org"], now=NOW
+    )
 
 
 async def test_detail_out_of_scope_is_none(add_run):
@@ -694,7 +706,9 @@ async def _drain(stream) -> bytes:
 
 async def test_audio_range_read(add_run, fake_minio):
     run_id = await add_run(_at(2021, 11, 5), recording_url="recordings/9.wav")
-    stream = await cr.open_audio(run_id, "bytes=1000-", now=NOW)
+    stream = await cr.open_audio(
+        run_id, "bytes=1000-", organization_id=SCOPE["org"], now=NOW
+    )
     assert (stream.status, stream.offset, stream.length, stream.size) == (
         206,
         1000,
@@ -705,7 +719,7 @@ async def test_audio_range_read(add_run, fake_minio):
     assert fake_minio.calls == [("recordings/9.wav", 1000, 101400)]
     assert fake_minio.objects[0].closed
 
-    whole = await cr.open_audio(run_id, None, now=NOW)
+    whole = await cr.open_audio(run_id, None, organization_id=SCOPE["org"], now=NOW)
     assert (whole.status, whole.length) == (200, 102400)
     assert await _drain(whole) == fake_minio.blob
 
@@ -722,42 +736,55 @@ async def test_audio_absent(add_run, fake_minio):
         _at(2021, 11, 5), mode="smallwebrtc", recording_url="recordings/1.wav"
     )
     for run_id in (none, url_shaped, traversal, test_call):
-        assert await cr.open_audio(run_id, None, now=NOW) is None
+        assert (
+            await cr.open_audio(run_id, None, organization_id=SCOPE["org"], now=NOW)
+            is None
+        )
     assert fake_minio.calls == []
     fake_minio.missing = True
     run_id = await add_run(_at(2021, 11, 5), recording_url="recordings/1.wav")
-    assert await cr.open_audio(run_id, None, now=NOW) is None
+    assert (
+        await cr.open_audio(run_id, None, organization_id=SCOPE["org"], now=NOW) is None
+    )
 
 
 async def test_audio_unsatisfiable_range_releases_slot(add_run, fake_minio):
     run_id = await add_run(_at(2021, 11, 5), recording_url="recordings/9.wav")
     for _ in range(cr.AUDIO_CONCURRENCY + 1):
         with pytest.raises(cr.RangeNotSatisfiable) as caught:
-            await cr.open_audio(run_id, "bytes=0-1,5-6", now=NOW)
+            await cr.open_audio(
+                run_id, "bytes=0-1,5-6", organization_id=SCOPE["org"], now=NOW
+            )
         assert caught.value.size == 102400
 
 
 async def test_audio_concurrency_cap_and_release_on_abort(add_run, fake_minio):
     run_id = await add_run(_at(2021, 11, 5), recording_url="recordings/9.wav")
     streams = [
-        await cr.open_audio(run_id, None, now=NOW) for _ in range(cr.AUDIO_CONCURRENCY)
+        await cr.open_audio(run_id, None, organization_id=SCOPE["org"], now=NOW)
+        for _ in range(cr.AUDIO_CONCURRENCY)
     ]
     with pytest.raises(cr.AudioBusy):
-        await cr.open_audio(run_id, None, now=NOW)
+        await cr.open_audio(run_id, None, organization_id=SCOPE["org"], now=NOW)
     # A client that disconnects mid-stream: the generator is closed early.
     first = streams[0].body()
     await first.__anext__()
     await first.aclose()
     assert fake_minio.objects[0].closed
-    again = await cr.open_audio(run_id, None, now=NOW)
+    again = await cr.open_audio(run_id, None, organization_id=SCOPE["org"], now=NOW)
     # One dropped before the first byte: only the route's background release.
     streams[1].release()
     streams[1].release()  # idempotent
-    assert await cr.open_audio(run_id, None, now=NOW) is not None
+    assert (
+        await cr.open_audio(run_id, None, organization_id=SCOPE["org"], now=NOW)
+        is not None
+    )
     for s in [again, *streams[2:]]:
         s.release()
     for _ in range(cr.AUDIO_CONCURRENCY - 1):
-        (await cr.open_audio(run_id, None, now=NOW)).release()
+        (
+            await cr.open_audio(run_id, None, organization_id=SCOPE["org"], now=NOW)
+        ).release()
 
 
 async def test_audio_streams_without_a_db_session(add_run, fake_minio, monkeypatch):
@@ -778,7 +805,7 @@ async def test_audio_streams_without_a_db_session(add_run, fake_minio, monkeypat
             return await self.ctx.__aexit__(*exc)
 
     monkeypatch.setattr(db_client, "async_session", Tracking)
-    stream = await cr.open_audio(run_id, None, now=NOW)
+    stream = await cr.open_audio(run_id, None, organization_id=SCOPE["org"], now=NOW)
     assert open_sessions == []  # closed before the first byte
     await asyncio.wait_for(_drain(stream), 5)
 
@@ -794,5 +821,8 @@ async def test_smoke_run_not_listed_not_readable(add_run, fake_minio):
     ids = {r["run_id"] for r in (await _list())["rows"]}
     assert keep in ids and smoke_run not in ids
     assert await _detail(smoke_run) is None
-    assert await cr.open_audio(smoke_run, None, now=NOW) is None
+    assert (
+        await cr.open_audio(smoke_run, None, organization_id=SCOPE["org"], now=NOW)
+        is None
+    )
     assert fake_minio.calls == []

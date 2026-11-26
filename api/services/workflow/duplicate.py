@@ -9,6 +9,7 @@ from loguru import logger
 from api.db import db_client
 from api.enums import StorageBackend
 from api.services.storage import get_storage_for_backend, storage_fs
+from api.services.workflow.ambient_noise import foreign_ambient_noise_key
 
 
 def _extract_trigger_paths(workflow_definition: dict) -> list[str]:
@@ -94,6 +95,10 @@ async def duplicate_workflow(
     # 5a. Copy custom ambient noise file if present
     if source_wc:
         ambient_cfg = source_wc.get("ambient_noise_configuration")
+        if foreign_ambient_noise_key(source_wc, organization_id):
+            # Never copy another org's object into this org's namespace.
+            ambient_cfg.pop("storage_key", None)
+            ambient_cfg.pop("storage_backend", None)
         if ambient_cfg and ambient_cfg.get("storage_key"):
             old_key = ambient_cfg["storage_key"]
             filename = posixpath.basename(old_key)

@@ -63,6 +63,7 @@ from api.services.pipecat.transport_setup import (
 from api.services.pipecat.worker_runner import run_pipeline_worker
 from api.services.pipecat.ws_sender_registry import get_ws_sender
 from api.services.telephony import registry as telephony_registry
+from api.services.workflow.ambient_noise import scoped_ambient_noise_config
 from api.services.workflow.dto import ReactFlowDTO
 from api.services.workflow.pipecat_engine import PipecatEngine
 from api.services.workflow.workflow_graph import WorkflowGraph
@@ -240,21 +241,31 @@ async def _run_pipeline_telephony_impl(
     logger.debug(f"Running {provider_name} pipeline for workflow_run {workflow_run_id}")
     set_current_run_id(workflow_run_id)
 
-    workflow = await db_client.get_workflow(workflow_id, user_id)
+    # Scope by the run's organization (tenant-isolation), never the creator.
+    organization_id = await db_client.get_organization_id_by_workflow_run_id(
+        workflow_run_id
+    )
+    workflow = await db_client.get_workflow(
+        workflow_id, organization_id=organization_id
+    )
     if workflow:
         set_current_org_id(workflow.organization_id)
 
-    ambient_noise_config = None
-    if workflow and workflow.workflow_configurations:
-        ambient_noise_config = workflow.workflow_configurations.get(
-            "ambient_noise_configuration"
+    ambient_noise_config = (
+        scoped_ambient_noise_config(
+            workflow.workflow_configurations, workflow.organization_id
         )
+        if workflow
+        else None
+    )
 
     # The telephony config id is stamped on the workflow run when it's created
     # (test call, campaign dispatch, inbound). Transports use it to load creds
     # from the right config row. Falls back to None for legacy runs (transports
     # then resolve the org's default config).
-    workflow_run = await db_client.get_workflow_run(workflow_run_id)
+    workflow_run = await db_client.get_workflow_run(
+        workflow_run_id, organization_id=organization_id
+    )
     telephony_configuration_id = None
     if workflow_run and workflow_run.initial_context:
         telephony_configuration_id = workflow_run.initial_context.get(
@@ -349,19 +360,26 @@ async def _run_pipeline_smallwebrtc_impl(
     )
     set_current_run_id(workflow_run_id)
 
-    # Get workflow to extract all pipeline configurations
-    workflow = await db_client.get_workflow(workflow_id, user_id)
+    # Get workflow to extract all pipeline configurations, scoped by the run's
+    # organization (tenant-isolation), never the creator.
+    organization_id = await db_client.get_organization_id_by_workflow_run_id(
+        workflow_run_id
+    )
+    workflow = await db_client.get_workflow(
+        workflow_id, organization_id=organization_id
+    )
 
     # Set org context early so tasks created by the transport inherit it
     if workflow:
         set_current_org_id(workflow.organization_id)
 
-    ambient_noise_config = None
-    if workflow and workflow.workflow_configurations:
-        if "ambient_noise_configuration" in workflow.workflow_configurations:
-            ambient_noise_config = workflow.workflow_configurations[
-                "ambient_noise_configuration"
-            ]
+    ambient_noise_config = (
+        scoped_ambient_noise_config(
+            workflow.workflow_configurations, workflow.organization_id
+        )
+        if workflow
+        else None
+    )
 
     # Create audio configuration for WebRTC
     audio_config = create_audio_config(WorkflowRunMode.SMALLWEBRTC.value)
@@ -373,7 +391,9 @@ async def _run_pipeline_smallwebrtc_impl(
         get_effective_ai_model_configuration_for_workflow,
     )
 
-    workflow_run = await db_client.get_workflow_run(workflow_run_id, user_id)
+    workflow_run = await db_client.get_workflow_run(
+        workflow_run_id, organization_id=organization_id
+    )
     run_configs = (
         (workflow_run.definition.workflow_configurations or {}) if workflow_run else {}
     )
@@ -410,7 +430,7 @@ async def run_pipeline_livekit(
     room_name: str,
     workflow_id: int,
     workflow_run_id: int,
-    user_id: int,
+    organization_id: int,
     call_context_vars: dict = {},
     user_provider_id: str | None = None,
     reserved: bool = False,
@@ -429,7 +449,7 @@ async def run_pipeline_livekit(
             room_name,
             workflow_id,
             workflow_run_id,
-            user_id,
+            organization_id,
             call_context_vars=call_context_vars,
             user_provider_id=user_provider_id,
         )
@@ -463,26 +483,34 @@ async def _run_pipeline_livekit_impl(
     room_name: str,
     workflow_id: int,
     workflow_run_id: int,
-    user_id: int,
+    organization_id: int,
     call_context_vars: dict = {},
     user_provider_id: str | None = None,
 ) -> None:
-    """Run pipeline for a LiveKit room, mirroring the smallwebrtc path."""
+    """Run pipeline for a LiveKit room, mirroring the smallwebrtc path.
+
+    Located by the DID-resolved organization (mt-s1-foundation D4), never by a
+    creator: a provisioned workflow has no user, so ``user_id`` may be None.
+    """
     logger.debug(
         f"Running pipeline for LiveKit room {room_name} with workflow_id: {workflow_id} and workflow_run_id: {workflow_run_id}"
     )
     set_current_run_id(workflow_run_id)
 
-    workflow = await db_client.get_workflow(workflow_id, user_id)
+    workflow = await db_client.get_workflow(
+        workflow_id, organization_id=organization_id
+    )
     if workflow:
         set_current_org_id(workflow.organization_id)
+    user_id = workflow.user_id if workflow else None
 
-    ambient_noise_config = None
-    if workflow and workflow.workflow_configurations:
-        if "ambient_noise_configuration" in workflow.workflow_configurations:
-            ambient_noise_config = workflow.workflow_configurations[
-                "ambient_noise_configuration"
-            ]
+    ambient_noise_config = (
+        scoped_ambient_noise_config(
+            workflow.workflow_configurations, workflow.organization_id
+        )
+        if workflow
+        else None
+    )
 
     audio_config = create_audio_config(WorkflowRunMode.LIVEKIT.value)
 
@@ -490,7 +518,9 @@ async def _run_pipeline_livekit_impl(
         get_effective_ai_model_configuration_for_workflow,
     )
 
-    workflow_run = await db_client.get_workflow_run(workflow_run_id, user_id)
+    workflow_run = await db_client.get_workflow_run(
+        workflow_run_id, organization_id=organization_id
+    )
     run_configs = (
         (workflow_run.definition.workflow_configurations or {}) if workflow_run else {}
     )
@@ -575,7 +605,20 @@ async def _run_pipeline_impl(
             applied. Fetched and resolved here if None.
     """
     if workflow_run is None:
-        workflow_run = await db_client.get_workflow_run(workflow_run_id, user_id)
+        # Only the run id is known here; the run's own organization scopes
+        # everything below (tenant-isolation).
+        organization_id = await db_client.get_organization_id_by_workflow_run_id(
+            workflow_run_id
+        )
+        workflow_run = (
+            await db_client.get_workflow_run(
+                workflow_run_id, organization_id=organization_id
+            )
+            if organization_id is not None
+            else None
+        )
+        if workflow_run is None:
+            raise HTTPException(status_code=404, detail="Workflow run not found")
 
     # If the workflow run is already completed, we don't need to run it again
     if workflow_run.is_completed:
@@ -588,7 +631,9 @@ async def _run_pipeline_impl(
         merged_call_context_vars = {**merged_call_context_vars, **call_context_vars}
 
     # Get workflow for metadata (name, organization_id, call_disposition_codes)
-    workflow = await db_client.get_workflow(workflow_id, user_id)
+    workflow = await db_client.get_workflow(
+        workflow_id, organization_id=workflow_run.organization_id
+    )
     if not workflow:
         raise HTTPException(status_code=404, detail="Workflow not found")
 

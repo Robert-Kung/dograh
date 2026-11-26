@@ -11,6 +11,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 from loguru import logger
 from pydantic import BaseModel
 
+from api.services.ccp import tenant_header as th
 from api.services.ccp import usage_report as ur
 
 router = APIRouter(prefix="/internal", tags=["internal"])
@@ -58,12 +59,24 @@ def _require_devops_secret(
     _verify_devops_secret(DOGRAH_DEVOPS_SECRET, x_dograh_devops_secret)
 
 
+async def _tenant_organization(
+    _: Annotated[None, Depends(_require_devops_secret)],
+    raw: Annotated[str | None, Header(alias=th.ORGANIZATION_HEADER)] = None,
+) -> int:
+    # After the secret (its 503/403 keep their meaning), before the query.
+    try:
+        return await th.resolve_tenant_organization(raw)
+    except th.TenantHeaderError as exc:
+        raise HTTPException(status_code=exc.status, detail=exc.code) from None
+
+
 @router.get(
     "/usage-report",
     response_model=UsageReportResponse,
     dependencies=[Depends(_require_devops_secret)],
 )
 async def usage_report(
+    organization_id: Annotated[int, Depends(_tenant_organization)],
     date_from: Annotated[date, Query(alias="from")],
     date_to: Annotated[date, Query(alias="to")],
     timezone: Annotated[str, Query()],
@@ -77,7 +90,7 @@ async def usage_report(
             detail=f"invalid {exc}",
         ) from None
     try:
-        report = await ur.build_usage_report(query)
+        report = await ur.build_usage_report(query, organization_id=organization_id)
     except ur.UsageReportTimeout:
         logger.warning("usage report: statement timeout")
         raise HTTPException(

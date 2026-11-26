@@ -23,6 +23,7 @@ from api.sdk_expose import sdk_expose
 from api.services.auth.depends import get_user
 from api.services.mps_service_key_client import mps_service_key_client
 from api.services.storage import storage_fs
+from api.utils.storage_key import is_own_recording_upload_key, safe_filename
 
 router = APIRouter(prefix="/workflow-recordings", tags=["workflow-recordings"])
 
@@ -78,7 +79,7 @@ async def get_upload_urls(
             storage_key = (
                 f"recordings/{user.selected_organization_id}"
                 f"/{recording_id}"
-                f"/{fd.filename}"
+                f"/{safe_filename(fd.filename)}"
             )
 
             upload_url = await storage_fs.aget_presigned_put_url(
@@ -128,6 +129,16 @@ async def create_recordings(
     user=Depends(get_user),
 ):
     """Create one or more recording records after audio files have been uploaded."""
+    if any(
+        not is_own_recording_upload_key(
+            r.storage_key, user.selected_organization_id, r.recording_id
+        )
+        for r in request.recordings
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail="Access denied: file does not belong to your organization",
+        )
     try:
         backend = StorageBackend.get_current_backend()
         results = []

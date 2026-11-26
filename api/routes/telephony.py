@@ -425,6 +425,8 @@ async def _create_inbound_workflow_run(
     normalized_data,
     telephony_configuration_id: int,
     from_phone_number_id: Optional[int] = None,
+    *,
+    organization_id: int,
 ) -> int:
     """Create workflow run for inbound call and return run ID"""
     call_id = normalized_data.call_id
@@ -436,6 +438,7 @@ async def _create_inbound_workflow_run(
         workflow_id,
         provider,  # Use detected provider as mode
         user_id=user_id,
+        organization_id=organization_id,
         call_type=CallType.INBOUND,
         initial_context={
             "caller_number": normalized_data.from_number,
@@ -540,6 +543,21 @@ async def websocket_endpoint(
     await _handle_telephony_websocket(websocket, workflow_id, user_id, workflow_run_id)
 
 
+async def _run_execution_user_id(workflow_run) -> int | None:
+    """Who a carrier call runs as: what the call's creator put in the URL.
+
+    A campaign call runs as the campaign's creator (the dispatcher's webhook
+    URL); every other carrier call as the workflow's owner
+    (``_get_execution_user_id``, the inbound dispatchers). Not required to be
+    an organization member: the workflow already binds the run's organization,
+    and an owner who left it must not silence the line (C4).
+    """
+    if workflow_run.campaign_id is not None:
+        campaign = await db_client.get_campaign_by_id(workflow_run.campaign_id)
+        return campaign.created_by if campaign else None
+    return workflow_run.workflow.user_id
+
+
 async def _handle_telephony_websocket(
     websocket: WebSocket, workflow_id: int, user_id: int, workflow_run_id: int
 ):
@@ -548,19 +566,31 @@ async def _handle_telephony_websocket(
         # Set the run context
         set_current_run_id(workflow_run_id)
 
-        # Get workflow run to determine provider type
-        workflow_run = await db_client.get_workflow_run(workflow_run_id)
+        # Get workflow run to determine provider type. Provider websocket: only
+        # the run id is known here (no user session) — explicit unscoped lookup.
+        workflow_run = await db_client.get_workflow_run_by_id(workflow_run_id)
         if not workflow_run:
             logger.error(f"Workflow run {workflow_run_id} not found")
             await websocket.close(code=4404, reason="Workflow run not found")
             return
 
-        # Get workflow for organization info. System lookup keyed only on the
-        # workflow_id (org is derived below) — use the explicit unscoped variant.
-        workflow = await db_client.get_workflow_by_id(workflow_id)
-        if not workflow:
-            logger.error(f"Workflow {workflow_id} not found")
-            await websocket.close(code=4404, reason="Workflow not found")
+        # The run is the only anchor (no user session): the pipeline runs the
+        # path's workflow as the path's user, so both must be the run's own —
+        # its workflow (which binds the run's organization; tenant-isolation,
+        # review gate S5) and its execution user as derived here, not merely
+        # some member of the organization (review round 2 R4).
+        organization_id = workflow_run.organization_id
+        if workflow_run.workflow_id != workflow_id:
+            logger.warning(
+                f"Workflow run {workflow_run_id} does not belong to workflow {workflow_id}"
+            )
+            await websocket.close(code=4404, reason="Workflow run not found")
+            return
+        if user_id != await _run_execution_user_id(workflow_run):
+            logger.warning(
+                f"User {user_id} is not run {workflow_run_id}'s execution user"
+            )
+            await websocket.close(code=4404, reason="Workflow run not found")
             return
 
         # Check workflow run state - only allow 'initialized' state
@@ -620,9 +650,7 @@ async def _handle_telephony_websocket(
             f"WebSocket connected for {provider_type} provider, workflow_run {workflow_run_id}"
         )
 
-        provider = await get_telephony_provider_for_run(
-            workflow_run, workflow.organization_id
-        )
+        provider = await get_telephony_provider_for_run(workflow_run, organization_id)
 
         # Verify the provider matches what was stored
         if provider.PROVIDER_NAME != provider_type:
@@ -774,6 +802,7 @@ async def handle_inbound_run(request: Request):
             normalized_data,
             telephony_configuration_id=telephony_configuration_id,
             from_phone_number_id=phone_row.id,
+            organization_id=config.organization_id,
         )
         quota_result = await authorize_workflow_run_start(
             workflow_id=workflow_id,
@@ -909,6 +938,7 @@ async def handle_inbound_telephony(
             normalized_data,
             telephony_configuration_id=workflow_context["telephony_configuration_id"],
             from_phone_number_id=workflow_context.get("from_phone_number_id"),
+            organization_id=workflow_context["organization_id"],
         )
         quota_result = await authorize_workflow_run_start(
             workflow_id=workflow_id,

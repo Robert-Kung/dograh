@@ -59,6 +59,11 @@ def normalize_telephony_address(
     lowered = raw.lower()
     if lowered.startswith(("sip:", "sips:")):
         return _normalize_sip_uri(raw)
+    if lowered.startswith("tel:"):
+        # RFC 3966 tel URI: the number itself, parameters dropped.
+        raw = raw[4:].split(";", 1)[0].strip()
+        if not raw:
+            raise ValueError("tel: URI has no number")
 
     digits = _PSTN_STRIP_RE.sub("", raw)
     if digits.startswith("+"):

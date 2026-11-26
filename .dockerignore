@@ -27,6 +27,10 @@ api/.env*
 **/.claude
 **/.next
 **/__pycache__
+# 本機跑 pytest 留下的快取（mt-s1-foundation 7.3 開發機升級實測，2026-11-25）：build context 是 repo 根，
+# `api/.dockerignore` 的 `.pytest_cache/` 不生效；`nodeids` 含參數化測試 ID 的字面值（例如來話號碼），
+# 被母 repo 映像層掃描（task 11.7）擋下。快取在映像內零用途。
+**/.pytest_cache
 **/*.pyc
 **/node_modules
 .mypy_cache

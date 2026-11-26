@@ -87,9 +87,14 @@ async def _cut_current_turn(engine) -> None:
 
 
 async def _play_farewell(
-    engine, state: CallFailureState
+    engine, state: CallFailureState, user_mark: int
 ) -> tuple[Optional[PlaybackOutcome], Optional[str]]:
-    """Speak the goodbye; the playback outcome, or why it was not attempted."""
+    """Speak the goodbye; the playback outcome, or why it was not attempted.
+
+    ``user_mark`` is the caller-speech count when the idle end started: the
+    caller speaking while the goodbye waits for the bot to fall silent calls
+    it off too.
+    """
     if state.tts_unavailable:
         return None, "tts_unavailable"
     tracker = state.playback
@@ -97,7 +102,7 @@ async def _play_farewell(
     # A stalled LLM stream (the idle prompt cut off mid-sentence) would hold
     # the goodbye back in its processor.
     await _cut_current_turn(engine)
-    started_mark, user_mark = tracker.started, tracker.user_spoke
+    started_mark = tracker.started
     await engine.task.queue_frame(
         TTSSpeakFrame(IDLE_FAREWELL_TEXT, persist_to_logs=True)
     )
@@ -126,18 +131,21 @@ async def end_idle_call(engine, exits, *, resume: Callable[[], None]) -> None:
         resume: Called when the caller spoke up before the goodbye started
             and the call goes on (resets the idle count).
     """
+    state: CallFailureState = exits.state
+    # Before any wait: speech from here on calls the goodbye off.
+    user_mark = state.playback.user_spoke
     if _transfer_in_progress(engine) or engine.is_call_disposed():
         # A press-0 / voice transfer, or an end already under way (its final
         # extraction still running), owns the call's exit.
         return
-    state: CallFailureState = exits.state
     room_name = exits.watchdog.room_name
     workflow_run_id = exits.watchdog.workflow_run_id
     started = time.monotonic()
 
+    exits.watchdog.begin_idle_end()
     state.idle_end_in_progress = True
     try:
-        outcome, unplayed = await _play_farewell(engine, state)
+        outcome, unplayed = await _play_farewell(engine, state, user_mark)
     except Exception as e:
         # pipecat swallows an event handler's exception; without this the
         # flag would stay set on a call nothing is ending.
@@ -157,6 +165,9 @@ async def end_idle_call(engine, exits, *, resume: Callable[[], None]) -> None:
         state.idle_end_in_progress = False
         await _cut_current_turn(engine)
         resume()
+        # An error dropped while the goodbye was under way is not reported
+        # again: the safetynet takes it now that the call goes on.
+        exits.watchdog.replay_dropped_trigger()
         return
 
     # From here to the spawn below nothing may await: the decision and the

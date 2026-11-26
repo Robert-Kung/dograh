@@ -90,6 +90,14 @@ async def test_run_pipeline_counts_call_during_setup(monkeypatch):
         await release_setup.wait()
         raise RuntimeError("setup failed")
 
+    async def fake_org_of_run(run_id):
+        return 3
+
+    monkeypatch.setattr(
+        run_pipeline_module.db_client,
+        "get_organization_id_by_workflow_run_id",
+        fake_org_of_run,
+    )
     monkeypatch.setattr(
         run_pipeline_module.db_client,
         "get_workflow_run",
