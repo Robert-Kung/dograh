@@ -237,3 +237,19 @@ async def test_superadmin_list_shows_run_org(db_session, async_session):
         filters=[{"attribute": "runId", "type": "number", "value": {"value": prov.id}}],
     )
     assert [(r["id"], r["organization_id"]) for r in rows] == [(prov.id, org_b.id)]
+
+
+async def test_create_run_route_without_selected_org_is_400(
+    test_client_factory, db_session
+):
+    """review round 2 R11: no selected organization is a bad request, not a
+    missing workflow (404 is for a workflow outside the organization)."""
+    user, _ = await db_session.get_or_create_user_by_provider_id("attr_no_org")
+    assert user.selected_organization_id is None
+
+    async with test_client_factory(user) as client:
+        r = await client.post(
+            "/api/v1/workflow/1/runs", json={"mode": "textchat", "name": "x"}
+        )
+
+    assert r.status_code == 400, r.text

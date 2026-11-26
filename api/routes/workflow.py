@@ -1367,6 +1367,8 @@ async def create_workflow_run(
         request: The create workflow run request
         user: The user to create the workflow run for
     """
+    if not user.selected_organization_id:
+        raise HTTPException(status_code=400, detail="No organization selected")
     try:
         run = await db_client.create_workflow_run(
             request.name,
