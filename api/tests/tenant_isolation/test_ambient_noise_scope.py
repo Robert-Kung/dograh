@@ -81,3 +81,65 @@ async def test_duplicate_does_not_copy_foreign_object():
     copy.assert_not_awaited()
     saved = db.update_workflow.await_args.kwargs["workflow_configurations"]
     assert "storage_key" not in saved["ambient_noise_configuration"]
+
+
+# --- saving a workflow that already holds a foreign key (review round 2 R8) --
+
+
+async def _workflow_with_draft_configs(db_session, tag, configs):
+    user, _ = await db_session.get_or_create_user_by_provider_id(f"ambient_{tag}")
+    org, _ = await db_session.get_or_create_organization_by_provider_id(
+        f"ambient_org_{tag}", user.id
+    )
+    await db_session.update_user_selected_organization(user.id, org.id)
+    user = await db_session.get_user_by_id(user.id)
+    workflow = await db_session.create_workflow(
+        name="ambient",
+        workflow_definition={"nodes": [], "edges": []},
+        user_id=user.id,
+        organization_id=org.id,
+    )
+    await db_session.save_workflow_draft(
+        workflow_id=workflow.id, workflow_configurations=configs
+    )
+    return user, workflow
+
+
+async def test_save_with_unchanged_foreign_key_strips_it(
+    test_client_factory, db_session
+):
+    """A workflow saved before the write-side check still holds a foreign key;
+    the UI sends workflow_configurations back whole on every save. An
+    unchanged key is dropped the way the runtime drops it, not a 403 on every
+    save from then on."""
+    stored = _wc("recordings/99.wav")
+    user, workflow = await _workflow_with_draft_configs(db_session, "same", stored)
+
+    async with test_client_factory(user) as client:
+        r = await client.put(
+            f"/api/v1/workflow/{workflow.id}",
+            json={"workflow_configurations": _wc("recordings/99.wav")},
+        )
+
+    assert r.status_code == 200, r.text
+    draft = await db_session.get_draft_version(workflow.id)
+    assert draft.workflow_configurations["ambient_noise_configuration"] == {
+        "enabled": True,
+        "volume": 0.5,
+    }
+
+
+async def test_save_with_a_new_foreign_key_is_refused(test_client_factory, db_session):
+    user, workflow = await _workflow_with_draft_configs(
+        db_session, "new", _wc("recordings/99.wav")
+    )
+
+    async with test_client_factory(user) as client:
+        r = await client.put(
+            f"/api/v1/workflow/{workflow.id}",
+            json={"workflow_configurations": _wc("recordings/100.wav")},
+        )
+
+    assert r.status_code == 403, r.text
+    draft = await db_session.get_draft_version(workflow.id)
+    assert draft.workflow_configurations == _wc("recordings/99.wav")
