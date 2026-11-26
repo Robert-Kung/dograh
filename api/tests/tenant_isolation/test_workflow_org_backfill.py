@@ -124,11 +124,24 @@ async def _wf_org(async_session, wf_id):
     ).scalar_one()
 
 
+@pytest.mark.parametrize(
+    "creator_in",
+    ["both", "none"],
+    ids=["creator_in_two_orgs_incl_phone_org", "creator_in_no_org"],
+)
 async def test_backfill_from_phone_number_org(
-    pre_migration, db_session, async_session, capsys
+    pre_migration, db_session, async_session, capsys, creator_in
 ):
-    a, b = await _org(async_session, "p_a"), await _org(async_session, "p_b")
-    uid = await _user(async_session, "p", [a, b])  # creator ambiguous
+    """The number's organization wins when the creator is ambiguous (two
+    organizations, the number's among them) or belongs to none (S9 allows
+    it) — review round 2 R17."""
+    a, b = (
+        await _org(async_session, f"p_a_{creator_in}"),
+        await _org(async_session, f"p_b_{creator_in}"),
+    )
+    uid = await _user(
+        async_session, f"p_{creator_in}", [a, b] if creator_in == "both" else []
+    )
     wf = await _null_org_workflow(db_session, async_session, uid, a)
     await _phone(async_session, b, wf, "+886299990001")
 
