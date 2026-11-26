@@ -348,18 +348,88 @@ async def test_prelaunch_failure_routes_to_fallback(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_end_only_never_refers_even_with_queue(monkeypatch, events):
+async def test_end_only_never_refers_even_with_queue(monkeypatch, events, answer):
     """Another org's / a suspended tenant's call: end prompt, then the room is
     deleted; the platform fallback queue (first tenant's agents) is not used."""
     monkeypatch.setenv("SAFETYNET_FALLBACK_QUEUE", "tel:+886900000000")
-    lk, cap = _fake_lk([_sip_caller()])
+    lk, cap = _fake_lk([_sip_caller()], log=answer.log)
     await server_side_safetynet("cs-+886912", "tenant_suspended", lk=lk, end_only=True)
     assert cap["transfers"] == []
     assert cap["deleted"] == ["cs-+886912"]
+    # review round 2 R13: the caller hears the end prompt before the room goes
+    assert answer.log == [
+        ("answer", "cs-+886912"),
+        ("play", "end"),
+        ("delete", "cs-+886912"),
+        ("disconnect", "cs-+886912"),
+    ]
     assert [e["event"] for e in events] == [
         "safetynet.triggered",
         "safetynet.terminated",
     ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "resolved, reason",
+    [
+        ((11, 7, "suspended", True), "tenant_suspended"),
+        ((None, 7, "active", False), "unmapped_did_other_org"),
+    ],
+    ids=["suspended", "other-org"],
+)
+async def test_end_only_call_through_dispatch_plays_end_prompt(
+    monkeypatch, events, answer, resolved, reason
+):
+    """review round 2 R13: from the public dispatch entry with the route's real
+    fallback, a call that must not be REFERred is answered, hears the end
+    prompt and is ended — never sent to the platform queue, never silent."""
+    from contextlib import asynccontextmanager
+
+    from api.db.telephony_phone_number_client import ResolvedDid
+    from api.routes import livekit as livekit_route
+    from api.services.pipecat import livekit_cold_transfer
+    from api.services.pipecat.livekit_dispatcher import (
+        SIP_DIALED_ATTRIBUTE,
+        dispatch_livekit_call,
+    )
+
+    monkeypatch.setenv("SAFETYNET_FALLBACK_QUEUE", "tel:+886900000000")
+    monkeypatch.setenv("CCP_FIRST_TENANT_ORGANIZATION_ID", "1")
+    lk, cap = _fake_lk([_sip_caller()], log=answer.log)
+
+    @asynccontextmanager
+    async def fake_api(given=None):
+        yield lk
+
+    monkeypatch.setattr(livekit_cold_transfer, "livekit_api", fake_api)
+    spawned = []
+    real_fallback = livekit_route._fallback
+
+    async def fallback(*args, **kwargs):
+        spawned.append(await real_fallback(*args, **kwargs))
+
+    async def resolver(did):
+        return ResolvedDid(*resolved)
+
+    await dispatch_livekit_call(
+        "cs-+886912", {SIP_DIALED_ATTRIBUTE: "+886221110002"}, resolver, fallback
+    )
+    for task in spawned:
+        await task
+
+    assert cap["transfers"] == []
+    assert answer.log == [
+        ("answer", "cs-+886912"),
+        ("play", "end"),
+        ("delete", "cs-+886912"),
+        ("disconnect", "cs-+886912"),
+    ]
+    assert [e["event"] for e in events] == [
+        "safetynet.triggered",
+        "safetynet.terminated",
+    ]
+    assert events[0]["reason"] == reason
 
 
 @pytest.mark.asyncio
