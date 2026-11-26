@@ -35,6 +35,8 @@ TRANSFERRED = EndTaskReason.TRANSFER_CALL.value
 # Short playback timeouts so the timeout cases run in well under a second.
 START_TIMEOUT = 0.2
 GAP_TIMEOUT = 0.15
+# tts="delayed": a healthy TTS's time to first byte, well inside START_TIMEOUT.
+TTS_FIRST_BYTE = 0.05
 
 
 def tts_error(services, code=429):
@@ -67,9 +69,11 @@ class FakeSTT:
 class FakeEngine:
     """Engine with a scripted TTS, recording the call's exit in order.
 
-    ``tts``: ``healthy`` (a prompt plays and ends), ``silent`` (no audio ever),
-    ``stall`` (audio starts, then stops arriving), ``error`` (the TTS pushes
-    an ErrorFrame for the prompt, seen by the watchdog).
+    ``tts``: ``healthy`` (a prompt plays and ends), ``delayed`` (a healthy
+    TTS with its time to first byte: playback starts ``TTS_FIRST_BYTE``
+    after queueing, then ends), ``silent`` (no audio ever), ``stall`` (audio
+    starts, then stops arriving), ``error`` (the TTS pushes an ErrorFrame for
+    the prompt, seen by the watchdog).
     """
 
     def __init__(self, state, *, tts="healthy", watchdog=None, services=None):
@@ -78,6 +82,7 @@ class FakeEngine:
         self.watchdog = watchdog
         self.services = services
         self.log = []
+        self._playing: list[asyncio.Task] = []
         self._livekit_transfer_in_progress = False
         self.task = types.SimpleNamespace(
             queue_frame=self.queue_frame, has_finished=lambda: True
@@ -89,10 +94,18 @@ class FakeEngine:
             if self.tts == "healthy":
                 self.state.playback.note_started(BotStartedSpeakingFrame())
                 self.state.playback.note_stopped(BotStoppedSpeakingFrame())
+            elif self.tts == "delayed":
+                self._playing.append(asyncio.create_task(self._play_later()))
             elif self.tts == "stall":
                 self.state.playback.note_started(BotStartedSpeakingFrame())
             elif self.tts == "error":
                 await self.watchdog.on_push_frame(push_data(tts_error(self.services)))
+
+    async def _play_later(self):
+        await asyncio.sleep(TTS_FIRST_BYTE)
+        self.state.playback.note_started(BotStartedSpeakingFrame())
+        await asyncio.sleep(TTS_FIRST_BYTE)
+        self.state.playback.note_stopped(BotStoppedSpeakingFrame())
 
     async def end_call_with_reason(self, reason, abort_immediately=False):
         self.log.append(("end", reason, abort_immediately))

@@ -736,6 +736,77 @@ async def test_caller_speaking_while_the_bot_finishes_does_not_condemn_tts(
 
 
 @pytest.mark.asyncio
+async def test_caller_speaking_while_the_bot_finishes_does_not_cancel_a_healthy_prompt(
+    services, refer
+):
+    """review round 2 R2: speech heard while the prompt waits for the bot to
+    fall silent does not stop a healthy prompt that starts after the wait —
+    only speech after the wait calls it off before it starts."""
+    from pipecat.frames.frames import VADUserStartedSpeakingFrame
+
+    call = await ready_call(make_call(services, refer, tts="delayed"))
+    await call.wd.on_push_frame(push_data(BotStartedSpeakingFrame()))
+    play = asyncio.create_task(call.state.play_bounded(call.engine, "提示"))
+    await asyncio.sleep(0.02)
+    await call.wd.on_push_frame(
+        push_data(VADUserStartedSpeakingFrame(start_secs=0.2, timestamp=0.0))
+    )
+    await call.wd.on_push_frame(push_data(BotStoppedSpeakingFrame()))
+    assert await play is True
+    assert not call.state.tts_unavailable
+    await call.wd.stop()
+
+
+@pytest.mark.asyncio
+async def test_prompt_stalling_after_it_started_condemns_tts_even_if_caller_spoke(
+    services, refer
+):
+    """review round 2 R2: the caller-speech exemption covers a prompt that
+    never started; one whose audio stopped arriving mid-way still marks TTS
+    unavailable."""
+    from pipecat.frames.frames import VADUserStartedSpeakingFrame
+
+    call = await ready_call(make_call(services, refer, tts="stall"))
+    await call.wd.on_push_frame(push_data(BotStartedSpeakingFrame()))
+    play = asyncio.create_task(call.state.play_bounded(call.engine, "提示"))
+    await asyncio.sleep(0.02)
+    await call.wd.on_push_frame(
+        push_data(VADUserStartedSpeakingFrame(start_secs=0.2, timestamp=0.0))
+    )
+    await call.wd.on_push_frame(push_data(BotStoppedSpeakingFrame()))
+    assert await play is False
+    assert call.state.tts_unavailable
+    await call.wd.stop()
+
+
+@pytest.mark.asyncio
+async def test_refer_rejected_after_caller_spoke_while_bot_finished_plays_end_prompt(
+    services, refer
+):
+    """review round 2 R2 (D9/C4): the caller speaks while the safetynet waits
+    for the bot to finish; the transfer prompt still plays on a healthy TTS,
+    so a rejected REFER ends the call with the end prompt, not a bare abort."""
+    from pipecat.frames.frames import VADUserStartedSpeakingFrame
+
+    refer.result = {"status": "failed", "reason": "sip_refer_rejected"}
+    call = await ready_call(make_call(services, refer, tts="delayed"))
+    await call.wd.on_push_frame(push_data(BotStartedSpeakingFrame()))  # mid-utterance
+    await call.wd.on_push_frame(push_data(_llm_429(services)))
+    await asyncio.sleep(0.03)  # the safetynet now waits for the bot to finish
+    await call.wd.on_push_frame(
+        push_data(VADUserStartedSpeakingFrame(start_secs=0.2, timestamp=0.0))
+    )
+    await call.wd.on_push_frame(push_data(BotStoppedSpeakingFrame()))
+    await until(lambda: call.engine.entries("end"))
+    kinds = [e[0] for e in call.engine.log]
+    assert kinds == ["tts", "refer", "tts", "end"]
+    assert "請稍後再撥" in call.engine.log[2][1]
+    assert call.engine.log[3] == ("end", "pipeline_error", False)
+    assert not call.state.tts_unavailable
+    await call.wd.stop()
+
+
+@pytest.mark.asyncio
 async def test_closed_gate_holds_back_deferred_function_calls():
     """R9: the LLM releases deferred tool calls on an upstream BotStopped."""
     state = CallFailureState()
