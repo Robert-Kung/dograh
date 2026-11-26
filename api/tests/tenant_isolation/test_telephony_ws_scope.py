@@ -13,7 +13,6 @@ another member's model settings.
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-import pytest
 from sqlalchemy import delete
 
 from api.db import db_client

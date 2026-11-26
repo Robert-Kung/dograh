@@ -1034,7 +1034,9 @@ async def save_telephony_configuration(
         except ValueError as e:
             logger.warning(f"Skipping invalid phone number ***{addr[-4:]!s}: {e}")
             reason = "invalid"
-        logger.warning(f"Skipping phone number ***{addr[-4:]!s} for config {row.id}: {reason}")
+        logger.warning(
+            f"Skipping phone number ***{addr[-4:]!s} for config {row.id}: {reason}"
+        )
         skipped_numbers.append(
             {"index": index, "address_masked": f"***{addr[-4:]}", "reason": reason}
         )
