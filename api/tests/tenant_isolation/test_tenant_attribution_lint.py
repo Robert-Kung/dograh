@@ -397,19 +397,28 @@ def _is_presence_check(test, aliases: set[str]) -> bool:
 
 
 def _ownership_helper_call(st, org: set[str], ids: set[str]) -> bool:
+    """``await helper(id, org)`` as a statement of its own (bare or assigned).
+
+    Only an unconditional call at this block level counts: a helper inside an
+    ``if``/``try``/loop/lambda may not run, and a same-named attribute
+    (``mod.helper``) may be another function.  Known limit: one validated
+    request id is enough even if the db call takes others (the phone-number
+    queries also filter by the validated config id; a stricter rule flags
+    those safe calls) — review gate round 2 S2.
+    """
     helpers = {name for _, name in OWNERSHIP_HELPERS}
-    for n in ast.walk(st):
-        if not (
-            isinstance(n, ast.Call)
-            and (getattr(n.func, "id", None) or getattr(n.func, "attr", None))
-            in helpers
-        ):
-            continue
-        args = [*n.args, *(k.value for k in n.keywords)]
-        names = set().union(*(_names(a) for a in args)) if args else set()
-        if names & org and names & ids:
-            return True
-    return False
+    if not isinstance(st, (ast.Expr, ast.Assign, ast.AnnAssign)) or st.value is None:
+        return False
+    n = st.value.value if isinstance(st.value, ast.Await) else st.value
+    if not (
+        isinstance(n, ast.Call)
+        and isinstance(n.func, ast.Name)
+        and n.func.id in helpers
+    ):
+        return False
+    args = [*n.args, *(k.value for k in n.keywords)]
+    names = set().union(*(_names(a) for a in args)) if args else set()
+    return bool(names & org and names & ids)
 
 
 def _dominating_guard(fn, call, scoped: set[str], ids: set[str]) -> bool:
@@ -630,6 +639,30 @@ _OWN = "    t = await db_client.get_org_thing(thing_id, organization_id=user.sel
             "    return await db_client.get_thing(thing_id)\n",
             True,
         ),
+        # only an unconditional, top-level, bare-name call guards
+        (
+            "    if flag:\n"
+            "        await _ensure_config_belongs_to_org(thing_id, user.selected_organization_id)\n"
+            "    return await db_client.get_thing(thing_id)\n",
+            True,
+        ),
+        (
+            "    try:\n"
+            "        await _ensure_config_belongs_to_org(thing_id, user.selected_organization_id)\n"
+            "    except Exception:\n        pass\n"
+            "    return await db_client.get_thing(thing_id)\n",
+            True,
+        ),
+        (
+            "    await mymod._ensure_config_belongs_to_org(thing_id, user.selected_organization_id)\n"
+            "    return await db_client.get_thing(thing_id)\n",
+            True,
+        ),
+        (
+            "    f = lambda: _ensure_config_belongs_to_org(thing_id, user.selected_organization_id)\n"
+            "    return await db_client.get_thing(thing_id)\n",
+            True,
+        ),
     ],
     ids=[
         "unguarded",
@@ -643,6 +676,10 @@ _OWN = "    t = await db_client.get_org_thing(thing_id, organization_id=user.sel
         "presence-alias",
         "ownership-helper",
         "helper-other-id",
+        "helper-in-if",
+        "helper-in-try",
+        "helper-attribute",
+        "helper-in-lambda",
     ],
 )
 def test_detects_unscoped_call_shape(tmp_path, body, flagged):
