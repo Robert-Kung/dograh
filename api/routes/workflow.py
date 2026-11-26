@@ -1,5 +1,4 @@
 import json
-import re
 import uuid
 from datetime import datetime
 from typing import List, Literal, Optional
@@ -76,6 +75,7 @@ from api.utils.recording_artifacts import (
     get_recording_storage_key,
     has_recording_track,
 )
+from api.utils.storage_key import ascii_name
 
 router = APIRouter(prefix="/workflow")
 
@@ -1682,7 +1682,7 @@ async def get_ambient_noise_upload_url(
     if not workflow:
         raise HTTPException(status_code=404, detail="Workflow not found")
 
-    sanitized = re.sub(r"[^a-zA-Z0-9._-]", "_", request.filename)
+    sanitized = ascii_name(request.filename)
     storage_key = (
         f"ambient-noise/{user.selected_organization_id}"
         f"/{request.workflow_id}/{uuid.uuid4()}_{sanitized}"

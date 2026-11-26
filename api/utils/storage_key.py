@@ -79,3 +79,38 @@ def is_org_scoped_key(storage_key: str, prefix: str, organization_id: int) -> bo
         and parts[0] == prefix
         and parts[1] == str(organization_id)
     )
+
+
+_NON_ASCII_NAME_CHARS = re.compile(r"[^a-zA-Z0-9._-]")
+
+
+def ascii_name(name: str) -> str:
+    """``name`` with every character outside ``[a-zA-Z0-9._-]`` made ``_``."""
+    return _NON_ASCII_NAME_CHARS.sub("_", name)
+
+
+def safe_filename(name: str) -> str:
+    """:func:`ascii_name`, never empty or a dot segment: one canonical key
+    segment (workflow recording uploads)."""
+    cleaned = ascii_name(name)
+    return "_" if cleaned in ("", ".", "..") else cleaned
+
+
+def is_own_recording_upload_key(
+    storage_key: str, organization_id: int, recording_id: str
+) -> bool:
+    """True only for the exact shape the recording upload-url issues:
+    recordings/{org_id}/{recording_id}/{filename}.
+
+    A prefix check is not enough: call recordings live at
+    recordings/{run_id}/user.wav, and run ids overlap org ids, so
+    "recordings/{own org}/user.wav" would name another org's call audio.
+    """
+    parts = key_segments(storage_key)
+    return (
+        parts is not None
+        and len(parts) == 4
+        and parts[0] == "recordings"
+        and parts[1] == str(organization_id)
+        and parts[2] == recording_id
+    )
