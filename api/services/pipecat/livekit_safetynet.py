@@ -918,6 +918,13 @@ class SafetynetWatchdog(BaseObserver):
 
         spawn(_run())
 
+    def begin_idle_end(self) -> None:
+        """An idle hangup starts: forget triggers dropped during an earlier
+        one (review round 2 R3). A hangup that a press-0 transfer took over
+        never replays what it dropped, and that must not fire when a later,
+        unrelated hangup is called off."""
+        self._dropped_logged.clear()
+
     def replay_dropped_trigger(self) -> None:
         """The idle hangup was called off and the call goes on: fire once for
         an error trigger dropped meanwhile (review gate R25).

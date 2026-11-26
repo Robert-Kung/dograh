@@ -142,6 +142,7 @@ async def end_idle_call(engine, exits, *, resume: Callable[[], None]) -> None:
     workflow_run_id = exits.watchdog.workflow_run_id
     started = time.monotonic()
 
+    exits.watchdog.begin_idle_end()
     state.idle_end_in_progress = True
     try:
         outcome, unplayed = await _play_farewell(engine, state, user_mark)
