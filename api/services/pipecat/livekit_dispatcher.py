@@ -78,7 +78,7 @@ def end_only_reason(resolved: Optional[ResolvedDid]) -> Optional[str]:
     before resolution (dispatch_error, undispatched) and after launch
     (overflow, launch_failed, pipeline / mid-call safetynet) still use the
     platform queue until mt-s1-tenant-settings resolves them per tenant
-    (residual risk R-MT-14; user ruling 2026-11-26). Per-tenant fallback destinations and the "service
+    (residual risk R-BQ.5; user ruling 2026-11-26). Per-tenant fallback destinations and the "service
     suspended" prompt replace this in mt-s1-tenant-settings. An unset first
     tenant counts as "not the first tenant": end rather than REFER into a
     queue that may be someone else's.

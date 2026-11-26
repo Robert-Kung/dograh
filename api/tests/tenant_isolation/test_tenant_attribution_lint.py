@@ -63,7 +63,7 @@ SUPERUSER_FILES = {"routes/superuser.py"}
 _NO_IDENTITY = (
     "無使用者身分的路由（(b) 豁免），識別碼即憑證（不可猜 token／API key）或承載商回呼"
 )
-_CARRIER = "承載商路由（(b) 豁免），組織取自號碼／設定列；websocket 為殘留風險 R-MT-11"
+_CARRIER = "承載商路由（(b) 豁免），組織取自號碼／設定列；websocket 為殘留風險 R-BQ.2"
 # (relative path, enclosing function, db function) -> reason
 EXEMPT_UNSCOPED_CALL = {
     (

@@ -61,7 +61,7 @@ EXEMPT: dict[str, str] = {
     "POST /api/v1/auth/login": "登入面：取得身分之前的端點，回應只含登入者自身"
     + _UNREACHABLE,
     "POST /api/v1/livekit/inbound/{secret}": "部署層密鑰（path secret＋LiveKit webhook 簽章）：來電分派，組織取自號碼列（test_two_tenants.py 涵蓋）",
-    "WS /api/v1/telephony/ws/{workflow_id}/{user_id}/{workflow_run_id}": "承載商 websocket 無身分依賴、run id 自增可猜，搶先連線可使他租戶 run 被設 RUNNING、真來電被拒——殘留風險 R-MT-11"
+    "WS /api/v1/telephony/ws/{workflow_id}/{user_id}/{workflow_run_id}": "承載商 websocket 無身分依賴、run id 自增可猜，搶先連線可使他租戶 run 被設 RUNNING、真來電被拒——殘留風險 R-BQ.2"
     + _UNREACHABLE,
     "WS /api/v1/agent-stream/{workflow_uuid}": "無使用者身分的 websocket（承載商／公開嵌入）"
     + _UNREACHABLE,
