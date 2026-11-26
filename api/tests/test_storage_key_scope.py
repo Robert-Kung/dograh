@@ -88,3 +88,59 @@ def test_free_form_names_still_accepted():
     assert is_org_scoped_key(
         f"knowledge_base/{ORG}/u-1/客服手冊 v2.pdf", "knowledge_base", ORG
     )
+
+
+# --- upload-url issues only keys process-document accepts (review round 2 R9) -
+
+_BAD_FILENAMES = [
+    "../escape.pdf",
+    "..",
+    ".",
+    "",
+    "a/b.pdf",
+    "a\\b.pdf",
+    "a//b.pdf",
+    "%2e%2e",
+    "a%2fb.pdf",
+    "．．",
+    "a／b.pdf",
+    "tab\there.pdf",
+    "nul\x00.pdf",
+]
+
+
+def _kb_client():
+    app = FastAPI()
+    app.include_router(kb_router)
+    app.dependency_overrides[get_user] = lambda: SimpleNamespace(
+        id=1, selected_organization_id=ORG
+    )
+    return TestClient(app)
+
+
+def _upload_key(filename):
+    sign = AsyncMock(return_value="https://upload.example/put")
+    with patch("api.routes.knowledge_base.storage_fs.aget_presigned_put_url", sign):
+        response = _kb_client().post(
+            "/knowledge-base/upload-url",
+            json={"filename": filename, "mime_type": "application/pdf"},
+        )
+    assert response.status_code == 200, response.text
+    key = response.json()["s3_key"]
+    assert sign.await_args.kwargs["file_path"] == key
+    return key
+
+
+@pytest.mark.parametrize("filename", _BAD_FILENAMES)
+def test_upload_url_key_is_canonical_for_any_filename(filename):
+    from api.utils.storage_key import is_org_scoped_key
+
+    key = _upload_key(filename)
+    assert is_org_scoped_key(key, "knowledge_base", ORG), key
+    assert len(key.split("/")) == 4, key
+
+
+def test_upload_url_keeps_a_readable_filename():
+    key = _upload_key("客服手冊 v2.pdf")
+    assert key.split("/")[-1] == "客服手冊 v2.pdf"
+    assert _upload_key("a/b.pdf").split("/")[-1] == "a_b.pdf"

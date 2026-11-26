@@ -23,7 +23,7 @@ from api.services.posthog_client import capture_event
 from api.services.storage import storage_fs
 from api.tasks.arq import enqueue_job
 from api.tasks.function_names import FunctionNames
-from api.utils.storage_key import is_org_scoped_key
+from api.utils.storage_key import is_org_scoped_key, key_segment_name
 
 router = APIRouter(prefix="/knowledge-base", tags=["knowledge-base"])
 
@@ -55,8 +55,13 @@ async def get_upload_url(
         # Generate unique document UUID for S3 organization
         document_uuid = str(uuid.uuid4())
 
-        # Generate S3 key: knowledge_base/{org_id}/{document_uuid}/{filename}
-        s3_key = f"knowledge_base/{user.selected_organization_id}/{document_uuid}/{request.filename}"
+        # Generate S3 key: knowledge_base/{org_id}/{document_uuid}/{filename};
+        # the name is made one canonical segment, or process-document (which
+        # takes only canonical keys) would refuse the upload.
+        filename = key_segment_name(request.filename)
+        s3_key = (
+            f"knowledge_base/{user.selected_organization_id}/{document_uuid}/{filename}"
+        )
 
         # Generate presigned PUT URL (valid for 30 minutes)
         upload_url = await storage_fs.aget_presigned_put_url(

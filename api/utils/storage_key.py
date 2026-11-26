@@ -29,6 +29,30 @@ def _unsafe(seg: str) -> bool:
     return False
 
 
+def _breaks_segment(c: str) -> bool:
+    if ord(c) < 32 or ord(c) == 127:
+        return True
+    form = unicodedata.normalize("NFKC", c)
+    return "/" in form or "\\" in form
+
+
+def key_segment_name(name: str) -> str:
+    """``name`` as one canonical key segment, kept readable (round 2 R9).
+
+    Only what :func:`key_segments` would refuse is changed: separators (also
+    as NFKC forms) and control characters become ``_``, a ``%`` is replaced
+    only where decoding would make a separator or a dot segment, and an
+    empty, ``.`` or ``..`` name gets a ``_`` prefix. Other names, Chinese
+    ones included, are kept as they are.
+    """
+    cleaned = "".join("_" if _breaks_segment(c) else c for c in name)
+    if _unsafe(cleaned):
+        cleaned = cleaned.replace("%", "_")
+    if _unsafe(cleaned):
+        cleaned = f"_{cleaned}"
+    return cleaned
+
+
 def key_segments(storage_key: str) -> list[str] | None:
     """The key's ``/`` segments, or None if any segment is non-canonical.
 
