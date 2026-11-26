@@ -28,6 +28,11 @@ def _bad_keys(prefix: str) -> list[str]:
         f"{prefix}/{ORG}//file.csv",
         f"{prefix}/{ORG}/sub\\..\\file.csv",
         f"{prefix}/{ORG}/",
+        # round 2 S4: forms a decoding/normalizing backend turns into traversal
+        f"{prefix}/{ORG}/%2e%2e/7/file.csv",
+        f"{prefix}/{ORG}/\uff0e\uff0e/7/file.csv",
+        f"{prefix}/{ORG}/a%2fb.csv",
+        f"{prefix}/{ORG}/file.csv\x00",
     ]
 
 
@@ -70,3 +75,16 @@ async def test_csv_source_accepts_canonical_own_key():
             f"campaigns/{ORG}/abc/source.csv", organization_id=ORG
         )
     assert result.is_valid, result.error
+
+
+def test_org_segment_is_ascii_digits_only():
+    assert _extract_org_id_from_key("campaigns/\uff11/x.csv") is None
+    assert _extract_org_id_from_key(f"campaigns/{ORG}/x.csv") == ORG
+
+
+def test_free_form_names_still_accepted():
+    from api.utils.storage_key import is_org_scoped_key
+
+    assert is_org_scoped_key(
+        f"knowledge_base/{ORG}/u-1/客服手冊 v2.pdf", "knowledge_base", ORG
+    )

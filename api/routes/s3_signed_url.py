@@ -11,7 +11,7 @@ from api.db import db_client
 from api.enums import StorageBackend
 from api.services.auth.depends import get_user
 from api.services.storage import get_storage_for_backend, storage_fs
-from api.utils.storage_key import key_segments
+from api.utils.storage_key import key_segments, org_segment
 
 
 class S3SignedUrlResponse(TypedDict):
@@ -56,9 +56,8 @@ def _extract_org_id_from_key(key: str) -> Optional[int]:
         parts is not None
         and len(parts) >= 3
         and parts[0] in ORG_SCOPED_STORAGE_PREFIXES
-        and parts[1].isdigit()
     ):
-        return int(parts[1])
+        return org_segment(parts[1])
     return None
 
 
